@@ -1,0 +1,24 @@
+[package]
+name = "locksmith"
+description = "Scope-preserving pnpm lockfile grafts and three-way merges"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-saphyr = { workspace = true }
+thiserror = { workspace = true }
+node-semver = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false
