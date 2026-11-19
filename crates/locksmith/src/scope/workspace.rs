@@ -14,7 +14,6 @@ pub(super) use rules::RootChoice;
 use rules::RootChoices;
 
 pub(super) struct Projection {
-    pub(super) lock: Lockfile,
     pub(super) roots: RootChoices,
     bindings: Vec<bindings::Root>,
     pub(super) unprojected: BTreeSet<String>,
@@ -81,7 +80,7 @@ pub(super) fn apply(
     after: &WorkspaceConfig,
     manifests: &[super::ManifestChange],
     registry: Option<&crate::RegistryMetadata>,
-) -> Result<Option<Projection>, LockfileError> {
+) -> Result<Option<(Lockfile, Projection)>, LockfileError> {
     fn rules(c: &WorkspaceConfig) -> Option<&serde_json::Map<String, Value>> {
         c.resolution
             .package_extensions
@@ -164,24 +163,31 @@ pub(super) fn apply(
         for doc in docs {
             for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
                 let pkg = graph::package_key(key);
-                let Some((parent, version)) = pkg.rsplit_once('@') else {
+                if !pkg.contains('@') {
                     continue;
-                };
+                }
                 for name in edges(body).map(|(_, n, _)| n.as_str()).chain(
                     graph::section(&doc["packages"][pkg], "peerDependencies")
                         .into_iter()
                         .flatten()
                         .map(|(n, _)| n.as_str()),
                 ) {
-                    if names.contains(name)
-                        && previous.relevant(name, parent, version)
-                            != overrides.relevant(name, parent, version)
-                    {
+                    if names.contains(name) {
                         override_edits.entry(pkg).or_default().insert(name);
                     }
                 }
             }
         }
+        // One release can have many peer instances in both locks. Match each
+        // parent/child selector once, independent of the number of instances.
+        override_edits.retain(|pkg, children| {
+            let (parent, version) = pkg.rsplit_once('@').expect("versioned package");
+            children.retain(|name| {
+                previous.relevant(name, parent, version)
+                    != overrides.relevant(name, parent, version)
+            });
+            !children.is_empty()
+        });
     }
     let policy = config::ResolutionCompatibility::new(&before.resolution, &after.resolution, base);
     let affected = if changes_extensions || !override_edits.is_empty() {
@@ -318,12 +324,14 @@ pub(super) fn apply(
         }
         unprojected = walk.materialize(&mut output)?;
     }
-    Ok(Some(Projection {
-        lock: baseline.converged_project(output, candidate),
-        roots,
-        bindings,
-        unprojected,
-    }))
+    Ok(Some((
+        baseline.converged_project(output, candidate),
+        Projection {
+            roots,
+            bindings,
+            unprojected,
+        },
+    )))
 }
 
 struct SnapshotEdit {

@@ -117,6 +117,19 @@ pub(super) fn catalogs(
                         ));
                     }
                 }
+                // pnpm may omit the catalog record for an existing exact
+                // release. A new consumer can use that same locked release.
+                let (target, range) = reconcile::alias(spec).unwrap_or((name, spec));
+                if before == after
+                    && base.is_none()
+                    && range.parse::<node_semver::Version>().is_ok()
+                    && installed["version"].as_str() == Some(range)
+                    && docs[0]["packages"]
+                        .get(format!("{target}@{range}"))
+                        .is_some()
+                {
+                    continue;
+                }
                 if let (Some(before), Some(pin)) =
                     (before, base.and_then(|v| v["version"].as_str()))
                     && reconcile::alias(before).map(|a| a.0) == reconcile::alias(spec).map(|a| a.0)

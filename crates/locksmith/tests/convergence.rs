@@ -877,3 +877,53 @@ fn a_changed_local_provider_rebinds_its_sibling_and_keeps_the_siblings_other_dep
         result.to_yaml().unwrap()
     );
 }
+
+#[test]
+fn a_new_consumer_can_reuse_an_exact_catalog_release_without_adding_a_catalog_record() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    let make = |installed: bool| {
+        let spec = if installed {
+            "catalog:toolchain"
+        } else {
+            "2.8.1"
+        };
+        let manifest = json!({"dependencies":{"tslib":spec}});
+        let lock = lock(
+            json!({"app":{"dependencies":{"tslib":{"specifier":spec,"version":"2.8.1"}}}}),
+            json!({"tslib@2.8.1":{}}),
+        );
+        let mut doc = lock.project().unwrap().clone();
+        let mut config = json!({"catalogs":{"toolchain":{"tslib":"2.8.1"}}});
+        if installed {
+            config["overrides"] = json!({"unused":"1.0.0"});
+            doc["overrides"] = config["overrides"].clone();
+            doc["catalogs"] =
+                json!({"toolchain":{"tslib":{"specifier":"2.8.1","version":"2.8.1"}}});
+        }
+        (
+            WorkspaceConfig::from_pnpm(&config).unwrap(),
+            manifest,
+            parse(doc),
+        )
+    };
+    let (before, old, base) = make(false);
+    let (after, new, installed) = make(true);
+    let changes = [change("app", &old, &new)];
+    let opts = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let result = converge(&base, &installed, &changes, opts).unwrap();
+    let doc = result.project().unwrap();
+    assert_eq!(doc["importers"], installed.project().unwrap()["importers"]);
+    assert_eq!(doc["snapshots"], base.project().unwrap()["snapshots"]);
+    assert!(doc.get("catalogs").is_none());
+    assert_eq!(
+        converge(&base, &result, &changes, opts)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+}

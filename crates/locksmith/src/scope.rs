@@ -81,8 +81,18 @@ pub fn converge(
     } else {
         None
     };
-    let mut result =
-        converge_manifests(baseline, candidate, changes, options, configured.as_ref())?;
+    let (projected, configured) = match configured {
+        Some((lock, rules)) => (lock, Some(rules)),
+        None => (baseline.clone(), None),
+    };
+    let mut result = converge_manifests(
+        baseline,
+        projected,
+        candidate,
+        changes,
+        options,
+        configured.as_ref(),
+    )?;
     if let Some(projection) = configured {
         projection.bind_roots(
             &mut result,
@@ -108,12 +118,12 @@ pub fn converge(
 
 fn converge_manifests(
     original: &Lockfile,
+    baseline: Lockfile,
     candidate: &Lockfile,
     changes: &[ManifestChange<'_>],
     options: ConvergeOptions<'_>,
     configured: Option<&workspace::Projection>,
 ) -> Result<Lockfile, LockfileError> {
-    let baseline = configured.map_or(original, |p| &p.lock);
     let root_choices = configured.map(|p| &p.roots);
     let override_tie_break = options
         .configuration
@@ -304,20 +314,28 @@ fn converge_manifests(
         }
     }
     if changed.is_empty() && configured.is_none() {
-        return Ok(baseline.clone());
+        return Ok(baseline);
     }
     if configured.is_none() {
         baseline.validate_with_config(options.configuration)?;
     }
     if only_specifiers {
-        let mut result = baseline.clone();
+        let edits: Vec<_> = specifiers
+            .into_iter()
+            .filter(|(_, (old, spec))| old["specifier"].as_str() != Some(spec))
+            .map(|(key, (_, spec))| (key, spec))
+            .collect();
+        if edits.is_empty() && configured.is_none() {
+            return Ok(baseline);
+        }
+        let mut result = baseline;
         let project = std::sync::Arc::make_mut(
             result
                 .documents
                 .get_mut(&crate::DocumentKind::Project)
                 .expect("project checked"),
         );
-        for ((id, group, name), (_, specifier)) in specifiers {
+        for ((id, group, name), specifier) in edits {
             project["importers"][id][group][name]["specifier"] = Value::from(specifier);
         }
         if configured.is_some() {
@@ -539,7 +557,7 @@ fn converge_manifests(
         local_donor.extend(p.unprojected.iter().cloned());
     }
     let result = assembly::from_edges(
-        [baseline, candidate],
+        (baseline, candidate),
         original.project().unwrap(),
         output,
         [&Value::Object(retained), &Value::Object(adopted)],

@@ -6,7 +6,7 @@ use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value
 /// Assemble a graph from independently selected importer edges. The large
 /// input graphs stay borrowed until their selected records are copied once.
 pub(crate) fn from_edges(
-    [base, donor]: [&Lockfile; 2],
+    (mut base, donor): (Lockfile, &Lockfile),
     original: &Value,
     importers: Value,
     [retained, adopted]: [&Value; 2],
@@ -60,14 +60,23 @@ pub(crate) fn from_edges(
             &mut conflicts,
         );
     }
-    let mut output = baseline.clone();
+    let docs = std::mem::take(&mut base.documents);
+    let mut result = Lockfile::with_documents(docs, &[&base, donor]);
+    result.preserve_baseline = true;
+    // Projection already owns this graph. Only a borrowed input needs a copy.
+    let output = std::sync::Arc::make_mut(
+        result
+            .documents
+            .get_mut(&DocumentKind::Project)
+            .expect("project checked"),
+    );
     output["importers"] = importers;
     for key in &selected.snapshots {
-        replace_entry(&mut output, current, "snapshots", key);
+        replace_entry(output, current, "snapshots", key);
     }
     for key in &selected.packages {
-        if !same_package(&baseline["packages"][key], &current["packages"][key]) {
-            replace_entry(&mut output, current, "packages", key);
+        if !same_package(&output["packages"][key], &current["packages"][key]) {
+            replace_entry(output, current, "packages", key);
         }
     }
     for (key, body) in edits {
@@ -76,13 +85,13 @@ pub(crate) fn from_edges(
     for (key, mut body) in generated {
         if protected.snapshots.contains(&key) || selected.snapshots.contains(&key) {
             copy_optional(&mut body, &output["snapshots"][&key]);
-            protect(&output, Some(&body), "snapshots", &key, &mut conflicts);
+            protect(output, Some(&body), "snapshots", &key, &mut conflicts);
         } else {
             output["snapshots"][key] = body;
         }
     }
     complete(
-        &mut output,
+        output,
         DocumentKind::Project,
         Some((original, options.configuration)),
         &mut conflicts,
@@ -90,7 +99,7 @@ pub(crate) fn from_edges(
     if !conflicts.is_empty() {
         return Err(LockfileError::Conflicts(conflicts));
     }
-    Ok(base.converged_project(output, donor))
+    Ok(result)
 }
 
 /// Shared completion policy for convergence and merges.
