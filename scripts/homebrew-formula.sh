@@ -25,7 +25,8 @@ class LocksmithReleaseDownloadStrategy < CurlDownloadStrategy
 
     system_command! "gh", args: ["release", "download", File.basename(File.dirname(url)),
                                  "--repo", "Sec-ant/locksmith", "--pattern", File.basename(url),
-                                 "--output", temporary_path, "--clobber"], timeout: timeout
+                                 "--output", temporary_path, "--clobber"],
+                          env: Utils::Path.formula_opt_bin_env("gh"), timeout: timeout
   end
 end
 
