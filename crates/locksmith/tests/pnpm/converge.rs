@@ -295,7 +295,7 @@ fn extension_edits_keep_baseline_pins_and_match_native_peer_instances() {
 #[test]
 #[ignore = "requires PNPM_BIN and registry access"]
 fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
-    use locksmith::{ConvergeOptions, ManifestChange, converge};
+    use locksmith::{ConvergeOptions, ManifestChange, RepairContext, converge, repair};
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join("store");
     let build = |dir: &str, edited: bool, seed: &str| {
@@ -360,6 +360,15 @@ fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
         let result = converge(&before.2, &after.2, &changes, options).unwrap();
         assert_eq!(result.project(), expected.2.project());
         let raw = result.to_yaml().unwrap();
+        let manifests = after.1.iter().cloned().collect();
+        let context = RepairContext {
+            manifests: &manifests,
+            configuration: &after.0,
+            patches: &Default::default(),
+            parents: &[],
+            registry: None,
+        };
+        assert_eq!(repair(&raw, &context).unwrap().to_yaml().unwrap(), raw);
         assert_eq!(
             converge(&before.2, &result, &changes, options)
                 .unwrap()
