@@ -326,15 +326,12 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
         let Some(version) = entry.get("version").and_then(Value::as_str) else {
             return false;
         };
-        let expected = entry
-            .get("specifier")
-            .and_then(Value::as_str)
-            .and_then(alias)
-            .map_or_else(
-                || version.to_owned(),
-                |(target, _)| format!("{target}@{version}"),
-            );
-        return graph::package_key(reference) == expected;
+        let pin = graph::package_key(reference);
+        if let Some((target, _)) = entry["specifier"].as_str().and_then(alias) {
+            return (target == name && pin == version)
+                || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
+        }
+        return pin == version;
     }
     let (range, version) = if let Some((target, range)) = alias(specifier) {
         let Some(version) = reference

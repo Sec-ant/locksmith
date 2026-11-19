@@ -261,6 +261,48 @@ pub(crate) fn matches_bindings(
     encode(graph::package_key(key), bindings, style, flat, encoding) == key
 }
 
+/// Encode a mix of two witnessed contexts only if the same pnpm encoding
+/// reproduces both input identities, including the suffix length threshold.
+pub(crate) fn projected_identity(
+    keys: [&str; 2],
+    evidence: [&BTreeMap<String, String>; 2],
+    target: &BTreeMap<String, String>,
+    config: &crate::WorkspaceConfig,
+    lock: &crate::Value,
+) -> Option<String> {
+    let observed = keys
+        .iter()
+        .filter_map(|k| HashStyle::recognize(k.rsplit_once('(')?.1.strip_suffix(')')?))
+        .next();
+    let hash = observed.or(config.extension_checksum.map(|h| match h {
+        crate::ExtensionChecksum::Md5 => HashStyle::Md5Base32,
+        crate::ExtensionChecksum::Sha256 => HashStyle::Sha256,
+    }));
+    // pnpm persists non-default suffix limits in lockfile settings.
+    let limit = lock["settings"]
+        .get("peersSuffixMaxLength")
+        .map_or(Some(1000), |v| v.as_u64())?;
+    let package = graph::package_key(keys[0]);
+    let identity = |pins: &BTreeMap<String, String>| {
+        let flat = config.resolution.lock.dedupe_peers;
+        let encoding = config.linked_peer_encoding;
+        let long = peer_text(pins, flat, encoding).encode_utf16().count() as u64 > limit;
+        Some(encode(
+            package,
+            pins,
+            if long { Some(hash?) } else { None },
+            flat,
+            encoding,
+        ))
+    };
+    for (key, pins) in keys.into_iter().zip(evidence) {
+        if identity(pins)? != key {
+            return None;
+        }
+    }
+    identity(target)
+}
+
 pub(super) fn encode(
     package: &str,
     peers: &BTreeMap<String, String>,

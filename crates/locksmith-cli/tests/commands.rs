@@ -244,6 +244,61 @@ fn converge_reads_ref_and_worktree_and_outputs_only_required_changes() {
 }
 
 #[test]
+fn a_widened_catalog_keeps_one_release_across_new_and_existing_consumers() {
+    let r = Repo::new();
+    for (install, range, version) in [(false, "1.0.0", "1.0.0"), (true, "^1", "1.1.0")] {
+        r.write(
+            "pnpm-workspace.yaml",
+            &format!("packages: ['apps/*']\ncatalog:\n  right: '{range}'\n"),
+        );
+        let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{}},
+            "catalogs":{"default":{"right":{"specifier":range,"version":version}}},
+            "packages":{format!("right@{version}"):{"resolution":{"integrity":"sha512-right"}}},
+            "snapshots":{format!("right@{version}"):{}}});
+        let group = if install {
+            "devDependencies"
+        } else {
+            "dependencies"
+        };
+        let consumers = if install {
+            &["web", "mobile"][..]
+        } else {
+            &["web"][..]
+        };
+        for id in consumers {
+            r.write(
+                &format!("apps/{id}/package.json"),
+                &json!({"name":id,group:{"right":"catalog:"}}).to_string(),
+            );
+            doc["importers"][format!("apps/{id}")] =
+                json!({group:{"right":{"specifier":"catalog:","version":version}}});
+        }
+        r.write("pnpm-lock.yaml", &doc.to_string());
+        if !install {
+            r.commit("catalog baseline");
+        }
+    }
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    let doc = graph(&out.stdout);
+    assert_eq!(
+        doc["catalogs"]["default"]["right"],
+        json!({"specifier":"^1","version":"1.0.0"})
+    );
+    for id in ["apps/web", "apps/mobile"] {
+        assert_eq!(
+            doc["importers"][id],
+            json!({"devDependencies":{"right":{"specifier":"catalog:","version":"1.0.0"}}})
+        );
+    }
+    assert_eq!(doc["snapshots"], json!({"right@1.0.0":{}}));
+    fs::write(r.0.path().join("pnpm-lock.yaml"), &out.stdout).unwrap();
+    let repeated = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(repeated.status.success(), "{}", report(&repeated));
+    assert_eq!(repeated.stdout, out.stdout);
+}
+
+#[test]
 fn merged_intent_with_an_unavailable_release_leaves_lock_unmerged() {
     let r = Repo::new();
     r.branches(|r, side| {

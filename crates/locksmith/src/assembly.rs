@@ -6,8 +6,8 @@ use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value
 /// Assemble a graph from independently selected importer edges. The large
 /// input graphs stay borrowed until their selected records are copied once.
 pub(crate) fn from_edges(
-    base: &Lockfile,
-    donor: &Lockfile,
+    [base, donor]: [&Lockfile; 2],
+    original: &Value,
     importers: Value,
     [retained, adopted]: [&Value; 2],
     options: crate::ConvergeOptions<'_>,
@@ -49,6 +49,9 @@ pub(crate) fn from_edges(
         protect(baseline, Some(chosen), "snapshots", key, &mut conflicts);
     }
     for key in selected.packages.intersection(&protected.packages) {
+        if same_package(&baseline["packages"][key], &current["packages"][key]) {
+            continue;
+        }
         protect(
             baseline,
             current["packages"].get(key),
@@ -63,7 +66,9 @@ pub(crate) fn from_edges(
         replace_entry(&mut output, current, "snapshots", key);
     }
     for key in &selected.packages {
-        replace_entry(&mut output, current, "packages", key);
+        if !same_package(&baseline["packages"][key], &current["packages"][key]) {
+            replace_entry(&mut output, current, "packages", key);
+        }
     }
     for (key, body) in edits {
         output["snapshots"][key] = body;
@@ -79,7 +84,7 @@ pub(crate) fn from_edges(
     complete(
         &mut output,
         DocumentKind::Project,
-        Some((baseline, options.configuration)),
+        Some((original, options.configuration)),
         &mut conflicts,
     )?;
     if !conflicts.is_empty() {
@@ -112,6 +117,17 @@ pub(crate) fn complete(
         });
     }
     Ok(())
+}
+
+// A registry deprecation notice may change after the immutable artifact was published.
+fn same_package(a: &Value, b: &Value) -> bool {
+    a == b
+        || a["resolution"]["integrity"].is_string()
+            && a.get("deprecated") != b.get("deprecated")
+            && [a, b].into_iter().all(|doc| {
+                doc.as_object()
+                    .is_some_and(|m| m.keys().all(|k| k == "deprecated" || a.get(k) == b.get(k)))
+            })
 }
 
 fn copy_optional(record: &mut Value, source: &Value) {
@@ -189,7 +205,7 @@ fn retain_children(
             continue;
         };
         let pkg = &candidate["packages"][parent];
-        let witnessed = !old.is_null() && pkg == &base["packages"][parent];
+        let witnessed = !old.is_null() && same_package(pkg, &base["packages"][parent]);
         if !pkg["resolution"]["integrity"].is_string()
             || (!witnessed && crate::peer::patch(key).is_some())
         {

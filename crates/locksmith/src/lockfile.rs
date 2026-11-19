@@ -99,7 +99,7 @@ impl Lockfile {
         for (i, source) in self.sources.iter().enumerate() {
             if source.documents == self.documents
                 && self.documents.iter().all(|(kind, document)| {
-                    crate::manifest::same_overrides(document, &source.documents[kind])
+                    crate::manifest::same_override_order(document, &source.documents[kind])
                         && (Arc::ptr_eq(document, &source.documents[kind])
                             || crate::source::SECTIONS.into_iter().chain(["catalogs"]).all(
                                 |section| {

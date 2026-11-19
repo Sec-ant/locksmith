@@ -45,13 +45,10 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     {
         let a = project.config.get(key);
         let b = working.config.get(key);
-        if key != "packageExtensions"
-            && (a != b
-                || (key == "overrides"
-                    && a.and_then(Value::as_object)
-                        .iter()
-                        .flat_map(|m| m.iter())
-                        .ne(b.and_then(Value::as_object).iter().flat_map(|m| m.iter()))))
+        if !matches!(
+            key.as_str(),
+            "catalog" | "catalogs" | "overrides" | "packageExtensions"
+        ) && a != b
         {
             return Err(format!("changed workspace setting {key} in pnpm-workspace.yaml or package.json requires resolution").into());
         }

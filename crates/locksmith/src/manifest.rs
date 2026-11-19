@@ -11,6 +11,14 @@ pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
             .same_rules(&Overrides::new(right, OverrideTieBreak::Last))
 }
 
+pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
+    left.get("overrides") == right.get("overrides")
+        && graph::section(left, "overrides")
+            .into_iter()
+            .flatten()
+            .eq(graph::section(right, "overrides").into_iter().flatten())
+}
+
 /// pnpm precedence: optional > production > dev > auto-installed peers.
 pub(crate) fn declarations<'a>(
     manifest: &'a Value,

@@ -839,3 +839,41 @@ fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
     };
     assert!(converge(&base, &installed, &[], options).is_err());
 }
+
+#[test]
+fn a_changed_local_provider_rebinds_its_sibling_and_keeps_the_siblings_other_dependencies() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+    let make = |provider: &str, leaf: &str| {
+        let ext = json!({"host@1":{"dependencies":{"renderer":provider}}});
+        let cfg = WorkspaceConfig::from_pnpm(&json!({"packageExtensions":ext})).unwrap();
+        let plugin = format!("1.0.0(renderer@{provider})");
+        let data = lock(
+            json!({".":{"dependencies":{"host":{"specifier":"1.0.0","version":"1.0.0"}}}}),
+            json!({"host@1.0.0":{"dependencies":{"renderer":provider,"plugin":plugin}},
+                format!("plugin@{plugin}"):{"dependencies":{"renderer":provider,"leaf":leaf}},
+                format!("renderer@{provider}"): {}, format!("leaf@{leaf}"): {}}),
+        );
+        let mut doc = data.project().unwrap().clone();
+        doc["packages"]["plugin@1.0.0"]["peerDependencies"] = json!({"renderer":"^1"});
+        doc["packageExtensionsChecksum"] = format!("{:x}", Md5::digest(ext.to_string())).into();
+        (cfg, parse(doc))
+    };
+    let (old, base) = make("1.0.0", "1.0.0");
+    let (new, fresh) = make("1.1.0", "1.2.0");
+    let (_, expected) = make("1.1.0", "1.0.0");
+    let opts = ConvergeOptions {
+        baseline_configuration: Some(&old),
+        configuration: Some(&new),
+        registry: None,
+    };
+    let result = converge(&base, &fresh, &[], opts).unwrap();
+    assert_eq!(result.project(), expected.project());
+    assert_eq!(
+        converge(&base, &result, &[], opts)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+}

@@ -151,7 +151,7 @@ pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, Lockfi
     let result = Lockfile::try_from(output)?;
     if result.project() != Some(after)
         || result.document(DocumentKind::Environment) != lock.environment()
-        || !crate::manifest::same_overrides(after, result.project().expect("verified project"))
+        || !crate::manifest::same_override_order(after, result.project().expect("verified project"))
     {
         return Err(LockfileError::OutputMismatch);
     }

@@ -404,7 +404,15 @@ fn reordering_rules_for_unrelated_names_preserves_the_target_resolution() {
         result.project().unwrap()["snapshots"]["lib@1.0.0(a@1.0.0)(b@1.0.0)"]["dependencies"]["runtime"],
         "1.0.0"
     );
-    assert_eq!(result.to_yaml().unwrap(), base.to_yaml().unwrap());
+    let rendered = Lockfile::try_from(result.to_yaml().unwrap()).unwrap();
+    assert_eq!(rendered.project(), base.project());
+    assert!(
+        rendered.project().unwrap()["overrides"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .eq(after["overrides"].as_object().unwrap().keys())
+    );
 }
 
 #[test]

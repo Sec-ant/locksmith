@@ -376,7 +376,7 @@ pub(crate) fn render(
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
                 || !source.reusable_field(kind, key, preserve_baseline && i == 0)
-                || (key == "overrides" && !crate::manifest::same_overrides(original, document))
+                || (key == "overrides" && !crate::manifest::same_override_order(original, document))
             {
                 return None;
             }

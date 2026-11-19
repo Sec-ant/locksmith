@@ -2,7 +2,7 @@
 //!
 //! [`merge`] accepts the ancestor and both branch locks. Pass `None` for a three-way
 //! comparison or `Some(&context)` to select records using the final workspace settings
-//! and manifests. [`converge`] retains changes required by manifest edits and
+//! and manifests. [`converge`] retains changes required by manifest and workspace edits and
 //! restores unrelated baseline pins. [`repair`] fixes broken records against final workspace inputs.
 //! Call [`inspect_peers`] to apply peer policy.
 //!

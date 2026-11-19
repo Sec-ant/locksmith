@@ -35,13 +35,13 @@ git diff --no-index pnpm-lock.yaml repaired.yaml
 
 ## Reduce changes after an install
 
-After you edit `package.json` or a `packageExtensions` dependency rule, `pnpm install` may also update unrelated packages. From the workspace root, run `converge` with the Git ref that contains the original manifests, workspace settings, and lockfile.
+After you edit a manifest, catalog, override, or package extension, `pnpm install` may also update unrelated packages. From the workspace root, run `converge` with the Git ref that contains the original manifests, workspace settings, and lockfile.
 
 ```sh
 locksmith converge origin/main > converged.yaml
 ```
 
-`converge` keeps baseline versions and peer bindings wherever the edit permits. For changes to `dependencies` or `optionalDependencies` in `packageExtensions`, it updates the affected package instances using the installed lock. Other workspace resolution settings must match the ref. Review `converged.yaml` before replacing `pnpm-lock.yaml`.
+`converge` keeps baseline versions that still satisfy the edited declarations. It applies overrides to the matching dependencies and preserves peer bindings per consumer. For example, two apps can use the same plugin with different React versions after a package extension adds React as a peer. Review `converged.yaml` before replacing `pnpm-lock.yaml`.
 
 If the install upgraded a package, add `--allow-network` to check whether its new release still accepts a dependency version from the baseline.
 

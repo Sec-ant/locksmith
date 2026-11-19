@@ -291,3 +291,157 @@ fn extension_edits_keep_baseline_pins_and_match_native_peer_instances() {
         install(&after.3, &store, true);
     }
 }
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
+    use locksmith::{ConvergeOptions, ManifestChange, converge};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    let build = |dir: &str, edited: bool, seed: &str| {
+        let d = tmp.path().join(dir);
+        let version = if edited { "7.0.0" } else { "6.0.0" };
+        let mut cfg = json!({"packages":["apps/*"],"peersSuffixMaxLength":4,
+            "catalogs":{"toolchain":{"is-number":version}},
+            "overrides":{"is-odd@0.1.2>is-number":"$is-number"}});
+        if edited {
+            cfg["packageExtensions"] =
+                json!({"is-even@1.0.0":{"peerDependencies":{"is-number":"^6 || ^7"}}});
+        }
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("pnpm-workspace.yaml"),
+            serde_saphyr::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let mut manifests = vec![];
+        for (id, provider) in [("a", "catalog:toolchain"), ("b", "6.0.0")] {
+            let path = format!("apps/{id}");
+            let pkg = json!({"name":id,"private":true,"dependencies":{"is-even":"1.0.0","is-number":provider}});
+            fs::create_dir_all(d.join(&path)).unwrap();
+            fs::write(d.join(&path).join("package.json"), pkg.to_string()).unwrap();
+            manifests.push((path, pkg));
+        }
+        let mut root =
+            json!({"private":true,"pnpm":cfg,"dependencies":{"kleur":seed,"is-number":version}});
+        fs::write(d.join("package.json"), root.to_string()).unwrap();
+        install(&d, &store, false);
+        root["dependencies"]["kleur"] = "^4.1.4".into();
+        fs::write(d.join("package.json"), root.to_string()).unwrap();
+        install(&d, &store, false);
+        manifests.push((".".to_owned(), root));
+        let lock =
+            Lockfile::try_from(fs::read_to_string(d.join("pnpm-lock.yaml")).unwrap()).unwrap();
+        (super::cfg(&cfg), manifests, lock, d)
+    };
+    let base = build("base", false, "4.1.4");
+    let fresh = build("fresh", true, "4.1.5");
+    let reference = build("reference", true, "4.1.4");
+    assert_ne!(
+        base.2.project().unwrap()["importers"]["."]["dependencies"]["kleur"]["version"],
+        fresh.2.project().unwrap()["importers"]["."]["dependencies"]["kleur"]["version"]
+    );
+    for (before, after, expected) in [(&base, &fresh, &reference), (&reference, &base, &base)] {
+        let changes: Vec<_> = before
+            .1
+            .iter()
+            .zip(&after.1)
+            .map(|((id, old), (_, new))| ManifestChange {
+                importer: id,
+                before: Some(old),
+                after: Some(new),
+            })
+            .collect();
+        let options = ConvergeOptions {
+            baseline_configuration: Some(&before.0),
+            configuration: Some(&after.0),
+            registry: None,
+        };
+        let result = converge(&before.2, &after.2, &changes, options).unwrap();
+        assert_eq!(result.project(), expected.2.project());
+        let raw = result.to_yaml().unwrap();
+        assert_eq!(
+            converge(&before.2, &result, &changes, options)
+                .unwrap()
+                .to_yaml()
+                .unwrap(),
+            raw
+        );
+        fs::write(after.3.join("pnpm-lock.yaml"), raw).unwrap();
+        install(&after.3, &store, true);
+    }
+}
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn adding_a_peer_preserves_the_consumers_other_binding_in_a_new_hashed_instance() {
+    use locksmith::{ConvergeOptions, ManifestChange, converge};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    let build = |name: &str, edited: bool, seed: &str| {
+        let dir = tmp.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        if super::pnpm_version().major == 9 {
+            fs::write(dir.join(".npmrc"), "peers-suffix-max-length=4\n").unwrap();
+        }
+        let mut peers = json!({"is-number":"^6 || ^7"});
+        if edited {
+            peers["kleur"] = "^4".into();
+        }
+        let cfg = json!({"packages":["."],"peersSuffixMaxLength":4,
+            "packageExtensions":{"is-even@1.0.0":{"peerDependencies":peers}}});
+        fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            serde_saphyr::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let mut pkg = json!({"name":"app","private":true,"pnpm":cfg,
+            "dependencies":{"is-even":"1.0.0","is-number":seed,"kleur":"4.1.4"}});
+        for spec in [seed, "^6 || ^7"] {
+            pkg["dependencies"]["is-number"] = spec.into();
+            fs::write(dir.join("package.json"), pkg.to_string()).unwrap();
+            install(&dir, &store, false);
+        }
+        let lock =
+            Lockfile::try_from(fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap()).unwrap();
+        (super::cfg(&cfg), pkg, lock, dir)
+    };
+    let base = build("base", false, "6.0.0");
+    let fresh = build("fresh", true, "7.0.0");
+    let expected = build("reference", true, "6.0.0");
+    let plugin = |l: &Lockfile| {
+        l.project().unwrap()["importers"]["."]["dependencies"]["is-even"]["version"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        expected.2.project().unwrap()["settings"]["peersSuffixMaxLength"],
+        4
+    );
+    assert!(!plugin(&expected.2).contains("kleur@"));
+    assert_ne!(plugin(&base.2), plugin(&expected.2));
+    assert_ne!(plugin(&fresh.2), plugin(&expected.2));
+    let opts = ConvergeOptions {
+        baseline_configuration: Some(&base.0),
+        configuration: Some(&fresh.0),
+        registry: None,
+    };
+    let changes = [ManifestChange {
+        importer: ".",
+        before: Some(&base.1),
+        after: Some(&fresh.1),
+    }];
+    let result = converge(&base.2, &fresh.2, &changes, opts).unwrap();
+    assert_eq!(result.project(), expected.2.project());
+    let output = result.to_yaml().unwrap();
+    assert_eq!(
+        converge(&base.2, &result, &changes, opts)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        output
+    );
+    fs::write(fresh.3.join("pnpm-lock.yaml"), output).unwrap();
+    install(&fresh.3, &store, true);
+}

@@ -210,49 +210,8 @@ pub(crate) fn resolve(
             }
         }
     }
-    if let Some(overrides) = &config.overrides {
-        output["overrides"] = Value::Object(
-            overrides
-                .iter()
-                .map(|(rule, value)| (rule.clone(), Value::String(value.clone())))
-                .collect(),
-        );
-        for (rule, value) in output["overrides"]
-            .as_object_mut()
-            .ok_or_else(|| missing(&["overrides"], "expected mapping"))?
-        {
-            if let Some(name) = value.as_str().and_then(|v| v.strip_prefix('$')) {
-                *value = context
-                    .manifests
-                    .get(".")
-                    .and_then(|m| {
-                        manifest::GROUPS
-                            .into_iter()
-                            .find_map(|g| m.get(g)?.get(name))
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        missing(&["overrides", rule], "missing referenced root dependency")
-                    })?;
-            }
-            if let Some(catalog) = value.as_str().and_then(|v| v.strip_prefix("catalog:")) {
-                let (_, name, _) = manifest::override_selector(rule);
-                *value = catalogs
-                    .get(if catalog.is_empty() {
-                        "default"
-                    } else {
-                        catalog
-                    })
-                    .and_then(|v| v.get(name))
-                    .map(|s| Value::String(s.clone()))
-                    .ok_or_else(|| {
-                        missing(
-                            &["overrides", rule],
-                            "missing referenced catalog declaration",
-                        )
-                    })?;
-            }
-        }
+    if let Some(rules) = effective_overrides(config, context.manifests.get("."))? {
+        output["overrides"] = rules;
     }
     if let Some(patches) = &config.patches {
         output["patchedDependencies"] = json!({});
@@ -343,4 +302,51 @@ pub(super) fn retain_used_catalogs(output: &mut Value) {
     if !groups.is_empty() {
         output["catalogs"] = catalogs;
     }
+}
+
+/// Resolve catalog and root-manifest references while preserving selector order.
+pub(crate) fn effective_overrides(
+    config: &crate::WorkspaceConfig,
+    root: Option<&Value>,
+) -> Result<Option<Value>, LockfileError> {
+    let Some(overrides) = &config.overrides else {
+        return Ok(None);
+    };
+    let mut rules = serde_json::Map::new();
+    for (selector, replacement) in overrides {
+        let mut value = replacement.as_str();
+        if let Some(name) = value.strip_prefix('$') {
+            value = root
+                .and_then(|m| {
+                    ["optionalDependencies", "dependencies", "devDependencies"]
+                        .into_iter()
+                        .find_map(|g| m.get(g)?.get(name)?.as_str())
+                })
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced root dependency",
+                    )
+                })?;
+        }
+        if let Some(catalog) = value.strip_prefix("catalog:") {
+            let (_, name, _) = manifest::override_selector(selector);
+            value = config
+                .catalogs
+                .get(if catalog.is_empty() {
+                    "default"
+                } else {
+                    catalog
+                })
+                .and_then(|c| c.get(name))
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced catalog declaration",
+                    )
+                })?;
+        }
+        rules.insert(selector.clone(), Value::from(value));
+    }
+    Ok(Some(Value::Object(rules)))
 }
