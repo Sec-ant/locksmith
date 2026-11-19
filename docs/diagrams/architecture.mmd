@@ -1,0 +1,20 @@
+flowchart TB
+  subgraph cli["CLI adapters"]
+    plain["merge BASE OURS THEIRS"]
+    contextual["merge --context or --git-driver"]
+    committed["repair [REF]"]
+    installed["converge REF"]
+    registry["Registry metadata client"]
+  end
+  subgraph core["In-memory Rust API"]
+    m["merge"]
+    r["repair"]
+    c["converge"]
+  end
+  plain -->|three locks| m
+  contextual -->|three locks and workspace intent| m
+  committed -->|committed lock and workspace| r
+  installed -->|baseline, candidate and manifest edits| c
+  registry -.->|requested release data| m
+  registry -.->|missing records| r
+  registry -.->|original dependency ranges| c

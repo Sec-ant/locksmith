@@ -1,0 +1,516 @@
+use std::{borrow::Cow, collections::BTreeMap};
+
+use crate::{LockfileError, OverrideTieBreak, Value, graph};
+
+pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
+pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
+
+pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
+    left.get("overrides") == right.get("overrides")
+        && Overrides::new(left, OverrideTieBreak::Last)
+            .same_rules(&Overrides::new(right, OverrideTieBreak::Last))
+}
+
+/// pnpm precedence: optional > production > dev > auto-installed peers.
+pub(crate) fn declarations<'a>(
+    manifest: &'a Value,
+    document: &'a Value,
+    importer: &str,
+    tie_break: OverrideTieBreak,
+) -> Result<Declarations<'a>, LockfileError> {
+    let mut result = BTreeMap::new();
+    let settings = crate::LockSettings::from_document(document);
+    let overrides = Overrides::new(document, tie_break);
+    for (field, group) in [
+        ("devDependencies", "devDependencies"),
+        ("dependencies", "dependencies"),
+        ("peerDependencies", "dependencies"),
+        ("optionalDependencies", "optionalDependencies"),
+    ] {
+        let engines = match field {
+            "devDependencies" => manifest.get("devEngines"),
+            "dependencies" => manifest.get("engines"),
+            _ => None,
+        };
+        if let Some(runtime) = engines.and_then(|v| v.get("runtime")) {
+            let runtimes = runtime
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_else(|| std::slice::from_ref(runtime));
+            for &name in &["node", "deno", "bun"] {
+                if manifest.get(field).and_then(|v| v.get(name)).is_some() {
+                    continue;
+                }
+                if let Some(runtime) = runtimes.iter().find(|v| v["name"] == name)
+                    && runtime["onFail"] == "download"
+                    && let Some(version) = runtime["version"].as_str().filter(|v| !v.is_empty())
+                {
+                    let specifier = format!("runtime:{version}");
+                    match overrides.select(manifest, name, &specifier)? {
+                        Some(value) => {
+                            if let Some(value) = overrides.resolve(importer, name, value)? {
+                                result.insert(name, (group, value));
+                            }
+                        }
+                        None => {
+                            result.insert(name, (group, Cow::Owned(specifier)));
+                        }
+                    }
+                }
+            }
+        }
+        let Some(deps) = manifest.get(field) else {
+            continue;
+        };
+        let deps = deps
+            .as_object()
+            .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
+        for (name, specifier) in deps {
+            let specifier = specifier
+                .as_str()
+                .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
+            let replacement = overrides.select(manifest, name, specifier)?;
+            let effective = match replacement {
+                Some(value) => overrides.resolve(importer, name, value)?,
+                None => Some(Cow::Borrowed(specifier)),
+            };
+            let Some(effective) = effective else { continue };
+            if field == "peerDependencies" {
+                // pnpm writes a non-peer override into regular dependencies,
+                // even if a devDependency on the same name already exists.
+                let promoted = replacement.is_some() && !valid_peer_range(&effective);
+                if !promoted && (!settings.auto_install_peers || result.contains_key(name.as_str()))
+                {
+                    continue;
+                }
+            }
+            result.insert(name.as_str(), (group, effective));
+        }
+    }
+    if settings.exclude_links_from_lockfile {
+        result.retain(|_, (_, specifier)| !specifier.starts_with("link:"));
+    }
+    Ok(result)
+}
+
+fn valid_peer_range(specifier: &str) -> bool {
+    specifier.contains("workspace:")
+        || specifier.contains("catalog:")
+        || specifier.parse::<node_semver::Range>().is_ok()
+}
+
+pub(crate) fn mismatch(
+    importer: &str,
+    side: &'static str,
+    message: impl Into<String>,
+) -> LockfileError {
+    LockfileError::ManifestMismatch {
+        importer: importer.into(),
+        side,
+        message: message.into(),
+    }
+}
+
+pub(crate) fn check(
+    document: &Value,
+    importer: &str,
+    manifest: Option<&Value>,
+    side: &'static str,
+    tie_break: OverrideTieBreak,
+) -> Result<(), LockfileError> {
+    let record = document.get("importers").and_then(|map| map.get(importer));
+    let Some(manifest) = manifest else {
+        return if record.is_none() {
+            Ok(())
+        } else {
+            Err(mismatch(
+                importer,
+                side,
+                "deleted/absent project still has an importer",
+            ))
+        };
+    };
+    if !manifest.is_object() {
+        return Err(LockfileError::InvalidManifest(importer.into()));
+    }
+    let record = record
+        .filter(|value| value.is_object())
+        .ok_or_else(|| mismatch(importer, side, "missing importer"))?;
+    let expected = declarations(manifest, document, importer, tie_break)?;
+    let mut actual = BTreeMap::new();
+    for group in GROUPS {
+        if let Some(deps) = record.get(group) {
+            let deps = deps
+                .as_object()
+                .ok_or_else(|| mismatch(importer, side, format!("{group} must be a mapping")))?;
+            for (name, dependency) in deps {
+                let specifier = dependency
+                    .get("specifier")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        mismatch(importer, side, format!("missing specifier for {name}"))
+                    })?;
+                let version = dependency
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        mismatch(importer, side, format!("missing resolution for {name}"))
+                    })?;
+                if actual
+                    .insert(name.as_str(), (group, Cow::Borrowed(specifier)))
+                    .is_some()
+                {
+                    return Err(mismatch(
+                        importer,
+                        side,
+                        format!("duplicate dependency {name}"),
+                    ));
+                }
+                // npm ranges differ from Cargo's semver ranges. Non-registry
+                // protocols (workspace, catalog, git, file) are graph-validated.
+                if version.starts_with("link:") {
+                    // The selected workspace manifest supplies the version for a link.
+                    continue;
+                }
+                let (range, version) = if let Some(alias) = specifier.strip_prefix("npm:") {
+                    let (target, range) = alias
+                        .rsplit_once('@')
+                        .filter(|(name, _)| !name.is_empty())
+                        .unwrap_or((alias, "*"));
+                    let prefix = format!("{target}@");
+                    let key =
+                        graph::snapshot_key(name, version, graph::section(document, "snapshots"));
+                    let resolved = graph::package_key(version)
+                        .strip_prefix(&prefix)
+                        .or_else(|| graph::package_key(&key).strip_prefix(&prefix))
+                        .ok_or_else(|| {
+                            mismatch(
+                                importer,
+                                side,
+                                format!("alias {name} does not resolve to {target}"),
+                            )
+                        })?;
+                    (range, Some(resolved.to_owned()))
+                } else {
+                    (specifier, Some(graph::package_key(version).to_owned()))
+                };
+                // pnpm accepts the registry's latest tag for *, including prereleases.
+                if range != "*"
+                    && let (Ok(range), Some(Ok(version))) = (
+                        range.parse::<node_semver::Range>(),
+                        version.map(|v| v.parse::<node_semver::Version>()),
+                    )
+                    && !version.satisfies(&range)
+                {
+                    return Err(mismatch(
+                        importer,
+                        side,
+                        format!("resolution of {name} does not satisfy {specifier}"),
+                    ));
+                }
+            }
+        }
+    }
+    if actual != expected {
+        let name = expected
+            .keys()
+            .chain(actual.keys())
+            .find(|name| expected.get(**name) != actual.get(**name))
+            .expect("different maps have a differing key");
+        return Err(mismatch(
+            importer,
+            side,
+            format!(
+                "dependency {name}: expected {:?}, found {:?}",
+                expected.get(*name),
+                actual.get(*name)
+            ),
+        ));
+    }
+    let empty = serde_json::json!({});
+    if manifest.get("dependenciesMeta").unwrap_or(&empty)
+        != record.get("dependenciesMeta").unwrap_or(&empty)
+    {
+        return Err(mismatch(importer, side, "dependenciesMeta differs"));
+    }
+    if manifest
+        .get("publishConfig")
+        .and_then(|v| v.get("directory"))
+        != record.get("publishDirectory")
+    {
+        return Err(mismatch(importer, side, "publishDirectory differs"));
+    }
+    Ok(())
+}
+
+pub(crate) fn matches_version(range: &str, version: Option<&str>) -> bool {
+    let range = range.parse::<node_semver::Range>();
+    let version = version.and_then(|s| s.parse::<node_semver::Version>().ok());
+    matches!((range, version), (Ok(range), Some(version)) if version.satisfies(&range))
+}
+
+fn selector(value: &str) -> (&str, Option<&str>) {
+    value
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| *c == '@')
+        .map_or((value, None), |(i, _)| (&value[..i], Some(&value[i + 1..])))
+}
+fn intersects(selector: Option<&str>, specifier: &str) -> bool {
+    let Some(selector) = selector else {
+        return true;
+    };
+    if selector == specifier {
+        return true;
+    }
+    let selector = selector.parse::<node_semver::Range>();
+    let declared = specifier.parse::<node_semver::Range>();
+    matches!((selector, declared), (Ok(selector), Ok(declared)) if selector.allows_any(&declared))
+}
+
+pub(crate) fn override_selector(rule: &str) -> (Option<&str>, &str, Option<&str>) {
+    let delimiter = rule
+        .char_indices()
+        .find(|(i, c)| *c == '>' && *i > 0 && !b" |@".contains(&rule.as_bytes()[i - 1]))
+        .map(|(i, _)| i);
+    let (parent, target) = delimiter.map_or((None, rule), |i| (Some(&rule[..i]), &rule[i + 1..]));
+    let (name, range) = selector(target);
+    (parent, name, range)
+}
+
+pub(crate) fn override_scope(rule: &str) -> (&str, Option<&str>) {
+    let (parent, name, _) = override_selector(rule);
+    (name, parent.map(|parent| selector(parent).0))
+}
+
+/// Registry overrides whose effective direct specifier is known without a
+/// manifest. Qualified rules require the original declaration or parent identity,
+/// neither of which is fully represented in an importer.
+pub(crate) fn unconditional_overrides(document: &Value) -> BTreeMap<&str, &str> {
+    let mut candidates = BTreeMap::new();
+    let rules = graph::section(document, "overrides");
+    for (rule, value) in rules.into_iter().flatten() {
+        let (parent, name, range) = override_selector(rule);
+        if parent.is_none()
+            && range.is_none()
+            && let Some(value) = value.as_str()
+            && value.parse::<node_semver::Range>().is_ok()
+        {
+            candidates.insert(name, value);
+        }
+    }
+    for (rule, _) in rules.into_iter().flatten() {
+        let (parent, name, range) = override_selector(rule);
+        if parent.is_some() || range.is_some() {
+            candidates.remove(name);
+        }
+    }
+    candidates
+}
+
+#[derive(PartialEq)]
+struct OverrideRule<'a> {
+    selector: &'a str,
+    parent: Option<&'a str>,
+    range: Option<&'a str>,
+    value: &'a Value,
+}
+
+/// Index once per manifest so unrelated selectors are not reparsed for each
+/// dependency. Rules for one name retain their declaration order.
+pub(crate) struct Overrides<'a> {
+    document: &'a Value,
+    by_name: BTreeMap<&'a str, Vec<OverrideRule<'a>>>,
+    tie_break: OverrideTieBreak,
+}
+
+impl<'a> Overrides<'a> {
+    pub(crate) fn relevant(
+        &self,
+        name: &str,
+        parent: &str,
+        version: &str,
+    ) -> Vec<(&'a str, &'a Value)> {
+        self.by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|rule| {
+                rule.parent
+                    .is_none_or(|s| parent_matches(s, parent, version))
+            })
+            .map(|rule| (rule.selector, rule.value))
+            .collect()
+    }
+
+    pub(crate) fn new(document: &'a Value, tie_break: OverrideTieBreak) -> Self {
+        let mut by_name: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (rule, value) in graph::section(document, "overrides").into_iter().flatten() {
+            let (parent, name, range) = override_selector(rule);
+            by_name.entry(name).or_default().push(OverrideRule {
+                selector: rule,
+                parent,
+                range,
+                value,
+            });
+        }
+        Self {
+            document,
+            by_name,
+            tie_break,
+        }
+    }
+
+    pub(crate) fn same_rules(&self, other: &Self) -> bool {
+        if self.tie_break != other.tie_break && self.by_name.values().any(|rules| rules.len() > 1) {
+            return false;
+        }
+        self.by_name.len() == other.by_name.len()
+            && self.by_name.iter().all(|(name, left)| {
+                other.by_name.get(name).is_some_and(|right| {
+                    if left == right {
+                        return true;
+                    }
+                    // Different parent packages never compete. Parent-qualified
+                    // rules also take precedence over generic rules regardless
+                    // of their relative position in the configuration.
+                    let mut left: Vec<_> = left.iter().collect();
+                    let mut right: Vec<_> = right.iter().collect();
+                    left.sort_by_key(|rule| rule.parent.map(|parent| selector(parent).0));
+                    right.sort_by_key(|rule| rule.parent.map(|parent| selector(parent).0));
+                    left == right
+                })
+            })
+    }
+
+    /// Mirror pnpm's direct-dependency override selection. Parent-qualified rules
+    /// take precedence; overlapping rules use pnpm's most-specific selection order.
+    pub(crate) fn apply(
+        &self,
+        manifest: &Value,
+        importer: &str,
+        name: &str,
+        specifier: &'a str,
+    ) -> Result<Option<Cow<'a, str>>, LockfileError> {
+        match self.select(manifest, name, specifier)? {
+            Some(value) => self.resolve(importer, name, value),
+            None => Ok(Some(Cow::Borrowed(specifier))),
+        }
+    }
+
+    fn select(
+        &self,
+        manifest: &Value,
+        name: &str,
+        specifier: &str,
+    ) -> Result<Option<&'a str>, LockfileError> {
+        let mut generic: Option<(Option<&str>, &str)> = None;
+        let mut qualified: Option<(Option<&str>, &str)> = None;
+        for rule in self.by_name.get(name).into_iter().flatten() {
+            let OverrideRule {
+                selector: rule,
+                parent,
+                range,
+                value,
+            } = *rule;
+            if let Some(parent) = parent {
+                let (parent_name, range) = selector(parent);
+                if manifest.get("name").and_then(Value::as_str) != Some(parent_name) {
+                    continue;
+                }
+                if let Some(range) = range
+                    && !matches_version(range, manifest["version"].as_str())
+                {
+                    continue;
+                }
+            }
+            if !intersects(range, specifier) {
+                continue;
+            }
+            let value = value.as_str().ok_or_else(|| {
+                LockfileError::InvalidDocument(format!("override {rule:?} must be a string"))
+            })?;
+            let best = if parent.is_some() {
+                &mut qualified
+            } else {
+                &mut generic
+            };
+            if best.is_none_or(|(old, _)| {
+                intersects(old, range.unwrap_or(""))
+                    && (self.tie_break == OverrideTieBreak::Last
+                        || !intersects(range, old.unwrap_or("")))
+            }) {
+                *best = Some((range, value));
+            }
+        }
+        Ok(qualified.or(generic).map(|(_, value)| value))
+    }
+
+    fn resolve(
+        &self,
+        importer: &str,
+        name: &str,
+        mut value: &'a str,
+    ) -> Result<Option<Cow<'a, str>>, LockfileError> {
+        if value == "-" {
+            return Ok(None);
+        }
+        if let Some(catalog) = value.strip_prefix("catalog:") {
+            value = self
+                .document
+                .get("catalogs")
+                .and_then(|v| {
+                    v.get(if catalog.is_empty() {
+                        "default"
+                    } else {
+                        catalog
+                    })
+                })
+                .and_then(|v| v.get(name))
+                .and_then(|v| v.get("specifier"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LockfileError::InvalidDocument(format!(
+                        "override for {name} references a missing catalog entry"
+                    ))
+                })?;
+        }
+        for protocol in ["link:", "file:"] {
+            if let Some(path) = value.strip_prefix(protocol)
+                && !path.starts_with('/')
+                && path.as_bytes().get(1) != Some(&b':')
+            {
+                let path = graph::linked_importer(".", path);
+                let from: Vec<_> = importer
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .collect();
+                let to: Vec<_> = path
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .collect();
+                let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+                let relative = std::iter::repeat_n("..", from.len() - common)
+                    .chain(to[common..].iter().copied())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                return Ok(Some(Cow::Owned(format!(
+                    "{protocol}{}",
+                    if relative.is_empty() { "." } else { &relative }
+                ))));
+            }
+        }
+        Ok(Some(Cow::Borrowed(value)))
+    }
+}
+
+pub(crate) fn parent_matches(selector: &str, name: &str, version: &str) -> bool {
+    selector == name
+        || selector
+            .strip_prefix(name)
+            .and_then(|s| s.strip_prefix('@'))
+            .is_some_and(|r| {
+                matches!((r.parse::<node_semver::Range>(), version.parse::<node_semver::Version>()),
+            (Ok(range), Ok(version)) if version.satisfies(&range))
+            })
+}
