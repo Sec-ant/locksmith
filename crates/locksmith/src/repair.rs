@@ -28,84 +28,99 @@ pub struct RepairContext<'a> {
     pub registry: Option<&'a RegistryMetadata>,
 }
 
+/// A parsed repair source that can be reused when more evidence becomes available.
+pub struct RepairInput(Lockfile);
+
 /// Repair the supplied YAML against the final workspace. A healthy input is
 /// returned byte-for-byte. Missing or ambiguous evidence produces an error.
 pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
-    let lock = edit::parse_for_repair(text)?;
-    let doc = lock
-        .project()
-        .ok_or_else(|| missing(&[], "missing project document"))?;
-    let root = context
-        .manifests
-        .get(".")
-        .ok_or_else(|| missing(&["manifests", "."], "the root manifest is required"))?;
-    if let Some(env) = lock.environment() {
-        let issues = graph::validate(env, DocumentKind::Environment);
-        if !issues.is_empty() {
-            return Err(LockfileError::InvalidGraph(issues));
-        }
-        if let (Some(pin), Some(manager)) = (
-            env["importers"]["."]["packageManagerDependencies"]["pnpm"]["specifier"].as_str(),
-            root["packageManager"]
-                .as_str()
-                .and_then(|v| v.strip_prefix("pnpm@")),
-        ) && manager.split('+').next() != Some(pin)
-        {
-            return Err(missing(
-                &["packageManagerDependencies", "pnpm"],
-                "bootstrap graph does not match the declared package manager",
-            ));
-        }
+    RepairInput::parse(text)?.apply(context)
+}
+
+impl RepairInput {
+    /// Accept the same YAML and identical duplicate records as [`repair`].
+    pub fn parse(text: &str) -> Result<Self, LockfileError> {
+        edit::parse_for_repair(text).map(Self)
     }
-    let mut evidence = Evidence::new(&lock, context);
-    let current = (&lock, context.configuration);
-    let sources = [
-        current,
-        context.parents.first().copied().unwrap_or(current),
-        context.parents.get(1).copied().unwrap_or(current),
-    ];
-    let docs = sources.map(|(lock, _)| {
-        lock.project()
-            .ok_or_else(|| missing(&["parents"], "expected a project lockfile"))
-    });
-    let [d, a, b] = docs;
-    let metadata = reconcile::metadata::resolve(
-        [d?, a?, b?],
-        [0, 1, 2],
-        &evidence.merge_context(sources.map(|(_, cfg)| cfg)),
-    )?;
-    check_configuration(doc, &metadata, context.configuration)?;
-    let mut result = importers::repair(doc, &metadata, &mut evidence)?;
-    let roots = context.manifests.keys().cloned().collect();
-    let mut checked_extensions = false;
-    loop {
-        if graph::closure(&result, DocumentKind::Project, &roots).is_err() {
-            fill_missing(&mut result, &mut evidence)?;
-            graph::closure(&result, DocumentKind::Project, &roots)?;
-        }
-        if !checked_extensions {
-            checked_extensions = true;
-            let plan = crate::extensions::plan(&result, context.configuration, None)?;
-            if !plan.is_empty() {
-                plan.apply(result.to_mut());
-                continue;
+
+    /// Repair the original source against this context.
+    pub fn apply(&self, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
+        let lock = &self.0;
+        let doc = lock
+            .project()
+            .ok_or_else(|| missing(&[], "missing project document"))?;
+        let root = context
+            .manifests
+            .get(".")
+            .ok_or_else(|| missing(&["manifests", "."], "the root manifest is required"))?;
+        if let Some(env) = lock.environment() {
+            let issues = graph::validate(env, DocumentKind::Environment);
+            if !issues.is_empty() {
+                return Err(LockfileError::InvalidGraph(issues));
+            }
+            if let (Some(pin), Some(manager)) = (
+                env["importers"]["."]["packageManagerDependencies"]["pnpm"]["specifier"].as_str(),
+                root["packageManager"]
+                    .as_str()
+                    .and_then(|v| v.strip_prefix("pnpm@")),
+            ) && manager.split('+').next() != Some(pin)
+            {
+                return Err(missing(
+                    &["packageManagerDependencies", "pnpm"],
+                    "bootstrap graph does not match the declared package manager",
+                ));
             }
         }
-        if matches!(result, Cow::Borrowed(_)) {
-            break;
+        let mut evidence = Evidence::new(lock, context);
+        let current = (lock, context.configuration);
+        let sources = [
+            current,
+            context.parents.first().copied().unwrap_or(current),
+            context.parents.get(1).copied().unwrap_or(current),
+        ];
+        let docs = sources.map(|(lock, _)| {
+            lock.project()
+                .ok_or_else(|| missing(&["parents"], "expected a project lockfile"))
+        });
+        let [d, a, b] = docs;
+        let metadata = reconcile::metadata::resolve(
+            [d?, a?, b?],
+            [0, 1, 2],
+            &evidence.merge_context(sources.map(|(_, cfg)| cfg)),
+        )?;
+        check_configuration(doc, &metadata, context.configuration)?;
+        let mut result = importers::repair(doc, &metadata, &mut evidence)?;
+        let roots = context.manifests.keys().cloned().collect();
+        let mut checked_extensions = false;
+        loop {
+            if graph::closure(&result, DocumentKind::Project, &roots).is_err() {
+                fill_missing(&mut result, &mut evidence)?;
+                graph::closure(&result, DocumentKind::Project, &roots)?;
+            }
+            if !checked_extensions {
+                checked_extensions = true;
+                let plan = crate::extensions::plan(&result, context.configuration, None)?;
+                if !plan.is_empty() {
+                    plan.apply(result.to_mut());
+                    continue;
+                }
+            }
+            if matches!(result, Cow::Borrowed(_)) {
+                break;
+            }
+            let edits = peers::affected(&result, &mut evidence)?;
+            if edits.is_empty() {
+                break;
+            }
+            for (id, group, name, pin) in edits {
+                result.to_mut()["importers"][id][group][name]["version"] = Value::String(pin);
+            }
         }
-        let edits = peers::affected(&result, &mut evidence)?;
-        if edits.is_empty() {
-            break;
+        drop(evidence);
+        match result {
+            Cow::Borrowed(_) => Ok(lock.clone()),
+            Cow::Owned(doc) => edit::project(lock, &doc),
         }
-        for (id, group, name, pin) in edits {
-            result.to_mut()["importers"][id][group][name]["version"] = Value::String(pin);
-        }
-    }
-    drop(evidence);
-    match result {
-        Cow::Borrowed(_) => Ok(lock),
-        Cow::Owned(doc) => edit::project(&lock, &doc),
     }
 }
 

@@ -30,6 +30,8 @@ With `None`, Locksmith compares both branches with the ancestor and reports reac
 
 **Repair a committed lock** with `repair(yaml, &context)`. `RepairContext` supplies the final manifests, workspace configuration, patches, and available evidence. Repair starts from the current pins. It removes identical duplicate package or snapshot records, reconciles stale importer declarations, and restores missing records reachable from those importers. For required package-extension dependencies with an exact override, repair checks the pin in each consumer snapshot. A replacement instance must fit that consumer’s peer providers. Two catalog pins may differ when both satisfy the configured range. Conflicting duplicate contents, missing workspace intent, and configuration changes whose effects cannot be isolated produce diagnostics.
 
+If you collect additional evidence after a repair attempt, call `RepairInput::parse(yaml)` once and reuse the result with `.apply(&context)`. Each attempt starts from the original input.
+
 **Reduce changes after an install** with `converge(baseline, candidate, changes, options)`. Supply both parsed locks and the before/after manifests. Locksmith keeps a baseline pin when the new range still accepts it. For example, changing `^1.0.0` to `>=1 <2` can keep `1.0.0` even if the install chose `1.1.0`. Adding a dependency in the same edit still brings in its required graph.
 
 When workspace rules change, pass the baseline settings in `ConvergeOptions::baseline_configuration` and the installed settings in `configuration`. Keep other resolution settings, workspace membership patterns, hooks, and patches the same across the two inputs.

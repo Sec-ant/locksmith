@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use serde_json::Map;
 
@@ -227,19 +227,9 @@ fn closure_with_snapshots(
     let mut issues = Vec::new();
     let mut importers: VecDeque<_> = roots.iter().map(|key| (key.clone(), true)).collect();
     let mut queued_importers = roots.clone();
-    let records: Vec<_> = section(document, "snapshots")
-        .into_iter()
-        .flatten()
-        .map(|(key, value)| (key.as_str(), value))
-        .collect();
     let mut traversal = Traversal {
-        index: records
-            .iter()
-            .enumerate()
-            .map(|(id, (key, _))| (*key, id))
-            .collect(),
-        visited: vec![false; records.len()],
-        pending: Vec::new(),
+        snapshots: section(document, "snapshots"),
+        ..Traversal::default()
     };
     for key in snapshot_roots {
         traversal.push("", key, kind, "snapshots", key, &mut issues);
@@ -268,8 +258,7 @@ fn closure_with_snapshots(
             }
         }
     }
-    while let Some(id) = traversal.pending.pop() {
-        let (key, snapshot) = records[id];
+    while let Some((key, snapshot)) = traversal.pending.pop() {
         let package = package_key(key);
         reached.packages.insert(package.to_owned());
         check_package(document, kind, key, &mut issues);
@@ -279,12 +268,7 @@ fn closure_with_snapshots(
             }
         }
     }
-    reached.snapshots = records
-        .iter()
-        .zip(&traversal.visited)
-        .filter(|(_, visited)| **visited)
-        .map(|((key, _), _)| (*key).to_owned())
-        .collect();
+    reached.snapshots = traversal.visited.into_iter().map(str::to_owned).collect();
     if issues.is_empty() {
         Ok(reached)
     } else {
@@ -292,12 +276,13 @@ fn closure_with_snapshots(
     }
 }
 
-/// Dense node IDs bound the pending work to V entries, even in cyclic or highly
-/// shared graphs. Borrowed keys avoid copying peer suffixes into the work queue.
+/// Use the lock's existing key index. Only reachable entries need traversal state.
+#[derive(Default)]
 struct Traversal<'a> {
-    index: HashMap<&'a str, usize>,
-    visited: Vec<bool>,
-    pending: Vec<usize>,
+    snapshots: Option<&'a Map<String, Value>>,
+    visited: HashSet<&'a str>,
+    pending: Vec<(&'a str, &'a Value)>,
+    named: String,
 }
 
 impl Traversal<'_> {
@@ -310,22 +295,23 @@ impl Traversal<'_> {
         from: &str,
         issues: &mut Vec<ValidationIssue>,
     ) {
-        let named = format!("{name}@{reference}");
-        match self
-            .index
-            .get(named.as_str())
-            .or_else(|| self.index.get(reference))
-            .copied()
-        {
-            Some(id) if !self.visited[id] => {
-                self.visited[id] = true;
-                self.pending.push(id);
+        self.named.clear();
+        self.named.push_str(name);
+        self.named.push('@');
+        self.named.push_str(reference);
+        match self.snapshots.and_then(|entries| {
+            entries
+                .get_key_value(&self.named)
+                .or_else(|| entries.get_key_value(reference))
+        }) {
+            Some((key, record)) if self.visited.insert(key) => {
+                self.pending.push((key, record));
             }
             Some(_) => {}
             None => issues.push(issue(
                 kind,
                 &[section, from, name],
-                format!("missing snapshot {named}"),
+                format!("missing snapshot {}", self.named),
             )),
         }
     }
@@ -540,15 +526,9 @@ fn refresh_optional_in(
     let Some(snapshots) = section(document, "snapshots") else {
         return Ok(());
     };
-    let records: Vec<_> = snapshots.iter().collect();
     let mut traversal = Traversal {
-        index: records
-            .iter()
-            .enumerate()
-            .map(|(id, (key, _))| (key.as_str(), id))
-            .collect(),
-        visited: vec![false; records.len()],
-        pending: Vec::new(),
+        snapshots: Some(snapshots),
+        ..Traversal::default()
     };
     let mut issues = Vec::new();
     for (id, importer) in section(document, "importers").into_iter().flatten() {
@@ -573,8 +553,7 @@ fn refresh_optional_in(
             }
         }
     }
-    while let Some(id) = traversal.pending.pop() {
-        let (key, record) = records[id];
+    while let Some((key, record)) = traversal.pending.pop() {
         for (name, value) in section(record, "dependencies").into_iter().flatten() {
             let reference = value.as_str().expect("validated snapshot reference");
             if !reference.starts_with("link:") {
@@ -592,7 +571,10 @@ fn refresh_optional_in(
     if !issues.is_empty() {
         return Err(LockfileError::InvalidGraph(issues));
     }
-    let required = traversal.visited;
+    let required: Vec<_> = snapshots
+        .keys()
+        .map(|key| traversal.visited.contains(key.as_str()))
+        .collect();
     for ((key, record), required) in document["snapshots"]
         .as_object_mut()
         .expect("snapshots")

@@ -51,6 +51,6 @@ pub use lockfile::{DocumentKind, Lockfile};
 pub use merge::{MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
-pub use repair::{RepairContext, repair};
+pub use repair::{RepairContext, RepairInput, repair};
 pub use scope::{ConvergeOptions, ManifestChange, converge};
 pub use serde_json::Value;

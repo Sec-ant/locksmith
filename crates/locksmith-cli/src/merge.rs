@@ -8,20 +8,16 @@ use crate::{Result, policy::Policy};
 
 type ReadResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-pub fn read(path: impl AsRef<Path>) -> Result<Lockfile> {
-    read_source(path.as_ref()).map_err(|e| e as Box<dyn Error>)
-}
-
 fn read_source(path: &Path) -> ReadResult<Lockfile> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(Lockfile::try_from(text)?)
 }
 
-fn read_three(paths: [&Path; 3]) -> ReadResult<[Lockfile; 3]> {
+pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile; 3]> {
+    let paths = files.map(AsRef::as_ref);
     if paths[0]
         .metadata()
-        .is_ok_and(|file| file.len() >= 1024 * 1024)
-        && thread::available_parallelism().is_ok_and(|n| n.get() >= 3)
+        .is_ok_and(|file| crate::parallel_parse(file.len()))
     {
         return thread::scope(|scope| {
             let spawn =
@@ -37,9 +33,7 @@ fn read_three(paths: [&Path; 3]) -> ReadResult<[Lockfile; 3]> {
                         Err(_) => read_source(path),
                     }
                 };
-            let base = finish(base, paths[0]);
-            let ours = finish(ours, paths[1]);
-            Ok([base?, ours?, theirs?])
+            Ok([finish(base, paths[0])?, finish(ours, paths[1])?, theirs?])
         });
     }
     Ok([
@@ -56,7 +50,7 @@ pub fn with_context<P: AsRef<Path>>(
     raw: &Value,
     network: Option<ProjectRc<'_>>,
 ) -> Result<Lockfile> {
-    let parsed = read_three(files.map(AsRef::as_ref));
+    let parsed = read_three(files);
     let parsed = match parsed {
         Ok(locks) => Ok(locks),
         Err(e)

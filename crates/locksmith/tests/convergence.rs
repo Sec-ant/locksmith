@@ -37,6 +37,88 @@ fn fixture() -> (Lockfile, Lockfile, Value, Value) {
         after,
     )
 }
+
+#[test]
+fn convergence_minimizes_provider_changes_across_two_consumers() {
+    let versions = ["1.0.0", "2.0.0"];
+    let assignments = versions.map(|a| versions.map(|b| [a, b])).concat();
+    let apps = ["a", "b"];
+    let manifest = |range: &str| json!({"dependencies":{"host":range, "widget":"1.0.0"}});
+    let make = |ranges: [&str; 2], pins: [&str; 2]| {
+        let mut importers = json!({});
+        let mut snapshots = json!({});
+        let mut packages = json!({"widget@1.0.0":{
+            "resolution":{"integrity":"sha512-widget"}, "peerDependencies":{"host":"*"}
+        }});
+        for ((app, range), host) in apps.into_iter().zip(ranges).zip(pins) {
+            let widget = format!("1.0.0(host@{host})");
+            importers[app] = json!({"dependencies":{
+                "host":{"specifier":range,"version":host}, "widget":{"specifier":"1.0.0","version":widget}
+            }});
+            packages[format!("host@{host}")] =
+                json!({"resolution":{"integrity":format!("sha512-host-{host}")}});
+            snapshots[format!("host@{host}")] = json!({});
+            snapshots[format!("widget@{widget}")] = json!({"dependencies":{"host":host}});
+        }
+        parse(
+            json!({"lockfileVersion":"9.0","importers":importers,"packages":packages,"snapshots":snapshots}),
+        )
+    };
+    let before = manifest("*");
+    for &original in &assignments {
+        let base = make(["*"; 2], original);
+        for a in ["*", versions[0], versions[1]] {
+            for b in ["*", versions[0], versions[1]] {
+                let ranges = [a, b];
+                let allowed: Vec<_> = assignments
+                    .iter()
+                    .copied()
+                    .filter(|pins| {
+                        ranges
+                            .iter()
+                            .zip(pins)
+                            .all(|(&range, &pin)| range == "*" || range == pin)
+                    })
+                    .collect();
+                let edits = |pins: &[&str; 2]| {
+                    pins.iter()
+                        .zip(original)
+                        .filter(|(new, old)| **new != *old)
+                        .count()
+                };
+                let minimum = allowed.iter().map(edits).min().unwrap();
+                let after = ranges.map(manifest);
+                let changes = [
+                    change("a", &before, &after[0]),
+                    change("b", &before, &after[1]),
+                ];
+                for &installed in &allowed {
+                    let donor = make(ranges, installed);
+                    let result = converge(&base, &donor, &changes, Default::default()).unwrap();
+                    let doc = result.project().unwrap();
+                    let selected = apps.map(|app| {
+                        let deps = &doc["importers"][app]["dependencies"];
+                        let host = deps["host"]["version"].as_str().unwrap();
+                        let widget = deps["widget"]["version"].as_str().unwrap();
+                        assert_eq!(widget, format!("1.0.0(host@{host})"));
+                        assert_eq!(
+                            doc["snapshots"][format!("widget@{widget}")]["dependencies"]["host"],
+                            host
+                        );
+                        host
+                    });
+                    assert!(allowed.contains(&selected));
+                    assert_eq!(
+                        edits(&selected),
+                        minimum,
+                        "{original:?} {ranges:?} {installed:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn changed_dependency_adopts_its_closure_and_retains_unchanged_sibling() {
     let (base, donor, before, after) = fixture();

@@ -73,10 +73,21 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
     let (baseline, candidate, [before, after]) = std::thread::scope(|scope| -> Result<_> {
-        // Parsing the baseline can overlap Git reads and the installed lock parse.
+        let parallel = candidate_text
+            .as_ref()
+            .is_some_and(|text| crate::parallel_parse(text.len() as u64));
         let baseline = scope.spawn(move || Lockfile::try_from(baseline_text));
-        let manifests = workspace_manifests(&project, blobs, tree, prefix)?;
-        let candidate = candidate_text.map(Lockfile::try_from).transpose();
+        let manifests = || workspace_manifests(&project, blobs, tree, prefix);
+        let candidate = || candidate_text.map(Lockfile::try_from).transpose();
+        let (manifests, candidate) = if parallel {
+            let worker = scope.spawn(candidate);
+            (
+                manifests()?,
+                worker.join().expect("lockfile parser panicked"),
+            )
+        } else {
+            (manifests()?, candidate())
+        };
         let baseline = baseline.join().expect("lockfile parser panicked")?;
         let candidate = candidate?.unwrap_or_else(|| baseline.clone());
         Ok((baseline, candidate, manifests))

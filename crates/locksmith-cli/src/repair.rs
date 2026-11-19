@@ -4,7 +4,7 @@ use crate::{
     registry,
     workspace::{self, Project},
 };
-use locksmith::{Lockfile, LockfileError, RepairContext};
+use locksmith::{Lockfile, LockfileError, RepairContext, RepairInput};
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let revision = git::output(&[
@@ -35,7 +35,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         parents: &[],
         registry: None,
     };
-    let result = match locksmith::repair(&text, &context) {
+    let input = RepairInput::parse(&text)?;
+    let result = match input.apply(&context) {
         Err(LockfileError::ResolutionRequired { .. }) => {
             let revisions = git::output(&["rev-list", "--parents", "-1", commit])?;
             let mut blobs = git::Blobs::open()?;
@@ -77,14 +78,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 &project.config,
                 &project.root,
                 |registry| {
-                    locksmith::repair(
-                        &text,
-                        &RepairContext {
-                            parents: &parents,
-                            registry,
-                            ..context
-                        },
-                    )
+                    input.apply(&RepairContext {
+                        parents: &parents,
+                        registry,
+                        ..context
+                    })
                 },
             )?
         }

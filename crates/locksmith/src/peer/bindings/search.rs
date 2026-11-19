@@ -2,6 +2,7 @@
 use super::{Bindings, optional_requirement};
 use crate::peer::identity::{HashStyle, digest, peer_id};
 use crate::{LinkedPeerEncoding, Value, graph};
+use sha2::{Digest, Sha256};
 use std::{
     cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
@@ -152,6 +153,7 @@ pub(super) fn recover(
             }
             let search = |range: std::ops::Range<usize>| {
                 let mut text = String::new();
+                let mut prefix = Sha256Prefix::default();
                 for plan in &plans {
                     if range.end <= plan.start {
                         break;
@@ -174,7 +176,7 @@ pub(super) fn recover(
                         &selected,
                         plan.names,
                         plan.size,
-                        &fingerprint,
+                        |text| fingerprint.matches(text, &mut prefix),
                         &mut text,
                         begin - plan.start..end - plan.start,
                     ) {
@@ -272,14 +274,43 @@ impl<'a> Fingerprint<'a> {
             }
         }
     }
-    fn matches(&self, text: &str) -> bool {
-        use sha2::Digest;
+    fn matches(&self, text: &str, prefix: &mut Sha256Prefix) -> bool {
         match self {
             Self::Text(expected) => text == *expected,
-            Self::Sha256(bytes) => bytes
-                .is_some_and(|expected| sha2::Sha256::digest(text.as_bytes())[..16] == expected),
+            Self::Sha256(bytes) => {
+                bytes.is_some_and(|expected| prefix.digest(text.as_bytes())[..16] == expected)
+            }
             Self::Md5Base32(expected) => digest(text, HashStyle::Md5Base32) == *expected,
         }
+    }
+}
+
+/// Adjacent candidates often share long nested peer IDs. One SHA-256 state
+/// per worker lets those candidates start at an already hashed block boundary.
+#[derive(Default)]
+struct Sha256Prefix {
+    bytes: Vec<u8>,
+    state: Sha256,
+}
+
+impl Sha256Prefix {
+    fn digest(&mut self, text: &[u8]) -> [u8; 32] {
+        if text.len() < 512 {
+            return Sha256::digest(text).into();
+        }
+        if self.bytes.is_empty() || !text.starts_with(&self.bytes) {
+            // Keep at most 8 KiB of complete SHA-256 blocks. The varying tail
+            // is typically near the end of a sorted peer list.
+            let len = (text.len() / 2).min(8192) / 64 * 64;
+            self.bytes.clear();
+            self.bytes.extend_from_slice(&text[..len]);
+            self.state = Sha256::new_with_prefix(&self.bytes);
+        }
+        self.state
+            .clone()
+            .chain_update(&text[self.bytes.len()..])
+            .finalize()
+            .into()
     }
 }
 
@@ -332,7 +363,7 @@ fn match_candidates(
     selected: &[&Candidate<'_>],
     names: &[&str],
     size: usize,
-    fingerprint: &Fingerprint<'_>,
+    mut matches: impl FnMut(&str) -> bool,
     text: &mut String,
     probes: std::ops::Range<usize>,
 ) -> Option<(Vec<usize>, LinkedPeerEncoding)> {
@@ -370,7 +401,7 @@ fn match_candidates(
                     }
                     text.push_str(id);
                 }
-                if fingerprint.matches(text) {
+                if matches(text) {
                     return Some((indices, *encoding));
                 }
             }

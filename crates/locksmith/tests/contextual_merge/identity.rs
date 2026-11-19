@@ -234,9 +234,13 @@ fn workspace_context_recovers_hashes_with_shadowed_transitive_peers() {
 #[test]
 fn hashed_parents_recover_peers_bound_only_in_deduplicated_descendants() {
     use sha2::{Digest, Sha256};
+    let fixed: Vec<_> = (0..3)
+        .map(|i| format!("@scope/{i}-{}", "provider-".repeat(22)))
+        .collect();
+    let prefix: String = fixed.iter().map(|name| format!("{name}@1.0.0)(")).collect();
     for optional in [true, false] {
         let identity = |a, b| {
-            let hash: String = Sha256::digest(format!("a@{a}.0.0)(b@{b}.0.0").as_bytes())[..16]
+            let hash: String = Sha256::digest(format!("{prefix}a@{a}.0.0)(b@{b}.0.0"))[..16]
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
@@ -262,6 +266,16 @@ fn hashed_parents_recover_peers_bound_only_in_deduplicated_descendants() {
             data["snapshots"][format!("wrapper@{}", identity(a, b))] = json!({"dependencies":{
             "lib":format!("1.0.0(a@{a}.0.0)(b@{b}.0.0)"),"optional":"1.0.0(x@1.0.0)(y@1.0.0)"
         },"transitivePeerDependencies":["a","b","x","y"]});
+            for name in &fixed {
+                data["packages"][format!("{name}@1.0.0")] =
+                    json!({"resolution":{"integrity":"sha512-fixed"}});
+                data["snapshots"][format!("{name}@1.0.0")] = json!({});
+                data["packages"]["wrapper@1.0.0"]["peerDependencies"][name] = json!("*");
+                data["snapshots"][format!("wrapper@{}", identity(a, b))]["dependencies"][name] =
+                    json!("1.0.0");
+                data["importers"]["."]["dependencies"][name] =
+                    json!({"specifier":"1.0.0","version":"1.0.0"});
+            }
             data["importers"]["."]["dependencies"]
                 .as_object_mut()
                 .unwrap()
@@ -270,10 +284,11 @@ fn hashed_parents_recover_peers_bound_only_in_deduplicated_descendants() {
                 json!({"specifier":"1.0.0","version":identity(a,b)});
             Lockfile::parse(&data.to_string()).unwrap()
         };
-        let manifests = BTreeMap::from([(
-            ".".into(),
-            json!({"dependencies":{"a":"2.0.0","b":"2.0.0","wrapper":"1.0.0","x":"1.0.0","y":"1.0.0"}}),
-        )]);
+        let mut root = json!({"dependencies":{"a":"2.0.0","b":"2.0.0","wrapper":"1.0.0","x":"1.0.0","y":"1.0.0"}});
+        for name in &fixed {
+            root["dependencies"][name] = json!("1.0.0");
+        }
+        let manifests = BTreeMap::from([(".".into(), root)]);
         let config = cfg(&json!({}));
         let patches = BTreeMap::new();
         let result = merge(

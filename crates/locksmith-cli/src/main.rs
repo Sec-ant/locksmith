@@ -25,16 +25,16 @@ mod workspace;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+fn parallel_parse(bytes: u64) -> bool {
+    bytes >= 128 * 1024 && std::thread::available_parallelism().is_ok_and(|n| n.get() >= 3)
+}
+
 fn run(command: Command) -> Result<()> {
     let result = match command {
         Command::Merge(Merge::Files(inputs)) => {
-            let [base, ours, theirs] = inputs.files();
-            locksmith::merge(
-                &merge::read(base)?,
-                &merge::read(ours)?,
-                &merge::read(theirs)?,
-                None,
-            )?
+            let [base, ours, theirs] =
+                merge::read_three(inputs.files()).map_err(|e| e as Box<dyn Error>)?;
+            locksmith::merge(&base, &ours, &theirs, None)?
         }
         Command::Merge(Merge::Workspace {
             inputs,

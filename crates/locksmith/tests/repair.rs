@@ -206,7 +206,7 @@ fn changing_a_direct_provider_repairs_only_its_consumers_peer_identity() {
 
 #[test]
 fn registry_evidence_restores_the_named_release_and_its_exact_optional_peer() {
-    use locksmith::{RegistryMetadata, RegistryRequest};
+    use locksmith::{RegistryMetadata, RegistryRequest, RepairInput};
     let input = LOCK.replace(
         "  chosen@1.0.1: {}",
         "  chosen@1.0.1:\n    dependencies:\n      transport: 3.0.0(stable@2.0.2)",
@@ -223,10 +223,11 @@ fn registry_evidence_restores_the_named_release_and_its_exact_optional_peer() {
         parents: &[],
         registry: None,
     };
+    let source = RepairInput::parse(&input).unwrap();
     let LockfileError::ResolutionRequired {
         request: Some(request),
         ..
-    } = repair(&input, &ctx).unwrap_err()
+    } = source.apply(&ctx).unwrap_err()
     else {
         panic!("expected an exact registry request")
     };
@@ -239,14 +240,12 @@ fn registry_evidence_restores_the_named_release_and_its_exact_optional_peer() {
     );
     let mut registry = RegistryMetadata::default();
     registry.insert(&request,json!({"name":"transport","version":"3.0.0","peerDependencies":{"stable":"^2"},"peerDependenciesMeta":{"stable":{"optional":true}},"dist":{"integrity":"sha512-T06YHNwS+4WJyrYrEWmZa+Iy87bJlWYDYrMBD48tiSqTPPrkMmfPy9zmtJ8bPYCpkFWc4CiQXk79Aml3c+rwvA==","tarball":"https://registry.example/transport/-/transport-3.0.0.tgz"}}),"https://registry.example/",false).unwrap();
-    let output = repair(
-        &input,
-        &RepairContext {
+    let output = source
+        .apply(&RepairContext {
             registry: Some(&registry),
             ..ctx
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     let doc = output.project().unwrap();
     assert_eq!(
         doc["importers"],
