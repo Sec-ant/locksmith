@@ -1,5 +1,7 @@
 # locksmith
 
+**English** · [简体中文](README.zh-CN.md)
+
 Locksmith merges and repairs pnpm lockfiles and reduces unrelated changes after an install.
 
 ## Install
