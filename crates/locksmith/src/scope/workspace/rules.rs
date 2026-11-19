@@ -104,16 +104,11 @@ pub(super) fn catalogs(
                     .flatten();
                 for (id, group, dep) in users.clone() {
                     if !dep["version"].as_str().is_some_and(|pin| {
-                        reconcile::accepts(
-                            name,
-                            dep["specifier"].as_str().expect("catalog reference"),
-                            pin,
-                            docs[1],
-                        )
+                        metadata::catalog_consumer_fits(name, spec, pin, Some(installed))
                     }) {
                         return Err(missing(
                             &["importers", id, group, name],
-                            "installed pin differs from its catalog entry",
+                            "installed pin does not satisfy its catalog declaration",
                         ));
                     }
                 }
@@ -148,18 +143,21 @@ pub(super) fn catalogs(
                             .as_str()
                             .is_some_and(|v| graph::package_key(v) == reference)
                     };
-                    if users.clone().all(|(id, _, dep)| {
-                        fits(dep)
-                            || portable
-                            || importer_dependency(docs[0], id, name).is_some_and(|(_, d)| fits(d))
-                    }) {
+                    let retains_own_pin = |id: &str| {
+                        importer_dependency(docs[0], id, name)
+                            .and_then(|(_, dep)| dep["version"].as_str())
+                            .is_some_and(|p| {
+                                metadata::catalog_consumer_fits(name, spec, p, Some(installed))
+                            })
+                    };
+                    if users
+                        .clone()
+                        .all(|(id, _, dep)| fits(dep) || portable || retains_own_pin(id))
+                    {
                         entry["version"] = pin.into();
                         if portable {
                             for (id, _, dep) in users.clone() {
-                                if !fits(dep)
-                                    && !importer_dependency(docs[0], id, name)
-                                        .is_some_and(|(_, d)| fits(d))
-                                {
+                                if !fits(dep) && !retains_own_pin(id) {
                                     let mut record = (*dep).clone();
                                     record["version"] = reference.as_str().into();
                                     choices
@@ -294,9 +292,9 @@ pub(super) fn importer_choices(
                         ));
                     }
                     let fits_catalog = entry.is_none()
-                        || left["version"]
-                            .as_str()
-                            .is_some_and(|p| reconcile::accepts(name, spec, p, output));
+                        || left["version"].as_str().is_some_and(|p| {
+                            metadata::catalog_consumer_fits(name, effective, p, entry)
+                        });
                     if accepts(left, docs[0]) && fits_catalog {
                         RootChoice::Baseline
                     } else {

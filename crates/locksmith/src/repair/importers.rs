@@ -15,6 +15,7 @@ pub(super) fn repair<'a>(
     let context = evidence.context;
     let mut result = Cow::Borrowed(doc);
     let mut used_catalogs = BTreeSet::new();
+    let overrides = manifest::Overrides::new(metadata, context.configuration.override_tie_break);
     for id in graph::section(doc, "importers")
         .into_iter()
         .flat_map(|m| m.keys())
@@ -36,12 +37,7 @@ pub(super) fn repair<'a>(
         if !old.is_object() {
             return Err(missing(&["importers", id], "expected an importer mapping"));
         }
-        let desired = manifest::declarations(
-            manifest,
-            metadata,
-            id,
-            context.configuration.override_tie_break,
-        )?;
+        let desired = manifest::declarations(manifest, &overrides, id)?;
         let mut next = Cow::Borrowed(old);
         for group in manifest::GROUPS {
             for key in graph::section(old, group)

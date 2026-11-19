@@ -125,26 +125,23 @@ pub fn converge(
             options.configuration.expect("verified configuration"),
         )?;
     }
+    let overrides = manifest::Overrides::new(
+        result.project().unwrap(),
+        options
+            .configuration
+            .map(|c| c.override_tie_break)
+            .unwrap_or_default(),
+    );
     for change in changes {
-        manifest::check(
-            result.project().unwrap(),
-            change.importer,
-            change.after,
-            "output",
-            options
-                .configuration
-                .map(|c| c.override_tie_break)
-                .unwrap_or_default(),
-        )?;
+        manifest::check(&overrides, change.importer, change.after, "output")?;
     }
     Ok(result)
 }
 
 fn check_baseline_manifest(
-    original: &Value,
+    overrides: &manifest::Overrides<'_>,
     change: &ManifestChange<'_>,
     has_configuration: bool,
-    override_tie_break: crate::OverrideTieBreak,
 ) -> Result<(), LockfileError> {
     if change.before.is_none() && change.after.is_none() {
         return Err(LockfileError::InvalidManifest(change.importer.into()));
@@ -186,13 +183,7 @@ fn check_baseline_manifest(
             });
         }
     }
-    manifest::check(
-        original,
-        change.importer,
-        change.before,
-        "baseline",
-        override_tie_break,
-    )
+    manifest::check(overrides, change.importer, change.before, "baseline")
 }
 
 fn converge_manifests(
@@ -214,6 +205,11 @@ fn converge_manifests(
     let donor = candidate.project().ok_or_else(|| {
         LockfileError::InvalidDocument("missing candidate project document".into())
     })?;
+    let baseline_rules = manifest::Overrides::new(
+        original.project().expect("baseline project"),
+        override_tie_break,
+    );
+    let candidate_rules = manifest::Overrides::new(donor, override_tie_break);
     let mut changed = BTreeMap::new();
     let mut specifiers = BTreeMap::new();
     let mut only_specifiers = true;
@@ -226,10 +222,9 @@ fn converge_manifests(
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
         check_baseline_manifest(
-            original.project().expect("baseline project"),
+            &baseline_rules,
             change,
             options.baseline_configuration.is_some(),
-            override_tie_break,
         )?;
         manifests.insert(change.importer, change);
         let metadata = METADATA
@@ -248,13 +243,7 @@ fn converge_manifests(
         {
             continue;
         }
-        manifest::check(
-            donor,
-            change.importer,
-            change.after,
-            "candidate",
-            override_tie_break,
-        )?;
+        manifest::check(&candidate_rules, change.importer, change.after, "candidate")?;
         if metadata || change.before.is_none() {
             metadata_importers.insert(change.importer);
         }
@@ -433,13 +422,7 @@ fn converge_manifests(
                         "include before/after manifests for this affected local dependency",
                     )
                 })?;
-                manifest::check(
-                    donor,
-                    target,
-                    context.after,
-                    "candidate",
-                    override_tie_break,
-                )?;
+                manifest::check(&candidate_rules, target, context.after, "candidate")?;
                 affected.insert(target.clone());
             }
         }

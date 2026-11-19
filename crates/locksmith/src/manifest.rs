@@ -22,13 +22,11 @@ pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
 /// pnpm precedence: optional > production > dev > auto-installed peers.
 pub(crate) fn declarations<'a>(
     manifest: &'a Value,
-    document: &'a Value,
+    overrides: &Overrides<'a>,
     importer: &str,
-    tie_break: OverrideTieBreak,
 ) -> Result<Declarations<'a>, LockfileError> {
     let mut result = BTreeMap::new();
-    let settings = crate::LockSettings::from_document(document);
-    let overrides = Overrides::new(document, tie_break);
+    let settings = crate::LockSettings::from_document(overrides.document);
     for (field, group) in [
         ("devDependencies", "devDependencies"),
         ("dependencies", "dependencies"),
@@ -120,12 +118,12 @@ pub(crate) fn mismatch(
 }
 
 pub(crate) fn check(
-    document: &Value,
+    overrides: &Overrides<'_>,
     importer: &str,
     manifest: Option<&Value>,
     side: &'static str,
-    tie_break: OverrideTieBreak,
 ) -> Result<(), LockfileError> {
+    let document = overrides.document;
     let record = document.get("importers").and_then(|map| map.get(importer));
     let Some(manifest) = manifest else {
         return if record.is_none() {
@@ -144,7 +142,7 @@ pub(crate) fn check(
     let record = record
         .filter(|value| value.is_object())
         .ok_or_else(|| mismatch(importer, side, "missing importer"))?;
-    let expected = declarations(manifest, document, importer, tie_break)?;
+    let expected = declarations(manifest, overrides, importer)?;
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {
@@ -180,17 +178,18 @@ pub(crate) fn check(
                     // The selected workspace manifest supplies the version for a link.
                     continue;
                 }
+                let resolved_key;
                 let (range, version) = if let Some(alias) = specifier.strip_prefix("npm:") {
                     let (target, range) = alias
                         .rsplit_once('@')
                         .filter(|(name, _)| !name.is_empty())
                         .unwrap_or((alias, "*"));
                     let prefix = format!("{target}@");
-                    let key =
+                    resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));
                     let resolved = graph::package_key(version)
                         .strip_prefix(&prefix)
-                        .or_else(|| graph::package_key(&key).strip_prefix(&prefix))
+                        .or_else(|| graph::package_key(&resolved_key).strip_prefix(&prefix))
                         .ok_or_else(|| {
                             mismatch(
                                 importer,
@@ -198,16 +197,14 @@ pub(crate) fn check(
                                 format!("alias {name} does not resolve to {target}"),
                             )
                         })?;
-                    (range, Some(resolved.to_owned()))
+                    (range, resolved)
                 } else {
-                    (specifier, Some(graph::package_key(version).to_owned()))
+                    (specifier, graph::package_key(version))
                 };
                 // pnpm accepts the registry's latest tag for *, including prereleases.
                 if range != "*"
-                    && let (Ok(range), Some(Ok(version))) = (
-                        range.parse::<node_semver::Range>(),
-                        version.map(|v| v.parse::<node_semver::Version>()),
-                    )
+                    && let Ok(range) = range.parse::<node_semver::Range>()
+                    && let Ok(version) = version.parse::<node_semver::Version>()
                     && !version.satisfies(&range)
                 {
                     return Err(mismatch(

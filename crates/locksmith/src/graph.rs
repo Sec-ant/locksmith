@@ -408,36 +408,19 @@ fn check_catalogs(
                 .get("catalogs")
                 .and_then(|v| v.get(catalog))
                 .and_then(|v| v.get(name));
-            // pnpm can omit a catalog record when the importer already has a
-            // matching resolution. The workspace declaration supplies the range.
-            if entry.is_none()
-                && let Some(range) = config.and_then(|c| c.catalogs.get(catalog)?.get(name))
-                && let Some(pin) = dependency["version"].as_str()
-                && crate::reconcile::accepts(name, range, pin, document)
-            {
-                continue;
-            }
-            let catalog_version = entry.and_then(|v| v.get("version")).and_then(Value::as_str);
-            let actual_name = entry
-                .and_then(|v| v.get("specifier"))
-                .and_then(Value::as_str)
-                .and_then(|specifier| specifier.strip_prefix("npm:"))
-                .map(|alias| {
-                    alias
-                        .char_indices()
-                        .skip(1)
-                        .find(|(_, character)| *character == '@')
-                        .map_or(alias, |(at, _)| &alias[..at])
+            let spec = match config {
+                Some(c) => c
+                    .catalogs
+                    .get(catalog)
+                    .and_then(|m| m.get(name))
+                    .map(String::as_str),
+                None => entry.and_then(|v| v["specifier"].as_str()),
+            };
+            if !spec
+                .zip(dependency["version"].as_str())
+                .is_some_and(|(spec, pin)| {
+                    crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)
                 })
-                .unwrap_or(name);
-            let expected = catalog_version
-                .map(|version| snapshot_key(actual_name, version, section(document, "snapshots")));
-            let version = dependency
-                .get("version")
-                .and_then(Value::as_str)
-                .map(|version| snapshot_key(name, version, section(document, "snapshots")));
-            if expected.is_none()
-                || version.as_deref().map(package_key) != expected.as_deref().map(package_key)
             {
                 issues.push(issue(
                     kind,

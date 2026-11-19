@@ -218,19 +218,15 @@ fn check_manifests(
     before: &WorkspaceConfig,
     after: &WorkspaceConfig,
 ) -> Result<(), LockfileError> {
+    let baseline_rules = manifest::Overrides::new(base, before.override_tie_break);
+    let candidate_rules = manifest::Overrides::new(donor, after.override_tie_break);
     let mut supplied = HashSet::new();
     for change in changes {
         if !supplied.insert(change.importer) {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        super::check_baseline_manifest(base, change, true, before.override_tie_break)?;
-        manifest::check(
-            donor,
-            change.importer,
-            change.after,
-            "candidate",
-            after.override_tie_break,
-        )?;
+        super::check_baseline_manifest(&baseline_rules, change, true)?;
+        manifest::check(&candidate_rules, change.importer, change.after, "candidate")?;
     }
     // Importer pins can legitimately drift without a manifest change. A new
     // declaration or a different project needs the caller's manifest as evidence.

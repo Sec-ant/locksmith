@@ -56,6 +56,87 @@ impl Projector<'_> {
         Ok(exposed)
     }
 
+    /// An exact override can repair an ordinary edge when both consumer scopes
+    /// witness every concrete peer of one already locked artifact.
+    pub(super) fn exact_override(
+        &self,
+        parents: [&str; 2],
+        name: &str,
+        spec: &str,
+    ) -> Option<String> {
+        let (target, version) = crate::reconcile::alias(spec).unwrap_or((name, spec));
+        let version = version.parse::<node_semver::Version>().ok()?.to_string();
+        let release = format!("{target}@{version}");
+        let [base, donor] = self.docs;
+        let artifact = donor["packages"].get(&release)?.get("resolution")?;
+        if !artifact["integrity"].is_string()
+            || base["packages"]
+                .get(&release)
+                .is_some_and(|v| v.get("resolution") != Some(artifact))
+            || self
+                .config
+                .patches
+                .iter()
+                .flatten()
+                .any(|(selector, _)| crate::manifest::parent_matches(selector, target, &version))
+        {
+            return None;
+        }
+        let scopes = parents.map(peer::explicit_bindings);
+        let mut chosen = None;
+        for key in self.peers.locked_instances(1, &release) {
+            let body = &donor["snapshots"][key];
+            let bindings = peer::explicit_bindings(key)?;
+            if peer::patch(key).is_some() || transitive(body).next().is_some() {
+                return None;
+            }
+            let declared = graph::section(&donor["packages"][&release], "peerDependencies");
+            if declared.map_or(0, |d| d.len()) != bindings.len() {
+                return None;
+            }
+            let witnessed = bindings.iter().all(|(&peer_name, &token)| {
+                let Some((_, pin)) = dependency(body, peer_name) else {
+                    return false;
+                };
+                let fits = declared
+                    .and_then(|d| d.get(peer_name))
+                    .and_then(Value::as_str)
+                    .zip(graph::package_key(pin).parse::<node_semver::Version>().ok())
+                    .is_some_and(|(range, v)| peer::satisfies_peer(&v, range));
+                if !fits || !self.same_binding(token, pin) {
+                    return false;
+                }
+                let provider = format!("{peer_name}@{pin}");
+                self.docs.iter().enumerate().all(|(side, doc)| {
+                    if doc["snapshots"].get(&provider).is_none() {
+                        return false;
+                    }
+                    if let Some((_, local)) =
+                        dependency(&doc["snapshots"][parents[side]], peer_name)
+                    {
+                        return local == pin;
+                    }
+                    let Some(exposed) = scopes[side].as_ref().and_then(|b| b.get(peer_name)) else {
+                        return false;
+                    };
+                    *exposed == pin
+                        || self.same_binding(exposed, pin)
+                            && self
+                                .peers
+                                .locked_instances(side, graph::package_key(&provider))
+                                .all(|k| k == provider)
+                })
+            });
+            if witnessed {
+                if chosen.is_some_and(|k| k != key) {
+                    return None;
+                }
+                chosen = Some(key);
+            }
+        }
+        chosen.map(|k| crate::reconcile::reference(name, k))
+    }
+
     /// A dependency edited by an extension can itself provide a peer for a
     /// sibling. Only retain that sibling when its binding still fits the scope.
     pub(super) fn verify_local_providers(

@@ -214,14 +214,9 @@ pub(crate) fn resolve(
         if extended || context.configuration.auto_dedupe {
             graph::refresh_optional(&mut output)?;
         }
+        let overrides = manifest::Overrides::new(&output, context.configuration.override_tie_break);
         for (id, value) in context.manifests {
-            manifest::check(
-                &output,
-                id,
-                Some(value),
-                "merged",
-                context.configuration.override_tie_break,
-            )?;
+            manifest::check(&overrides, id, Some(value), "merged")?;
         }
         let environment = environment_source(locks, branch_order, &context.manifests["."])?;
         let mut documents = BTreeMap::new();
@@ -326,13 +321,21 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
         let Some(version) = entry.get("version").and_then(Value::as_str) else {
             return false;
         };
-        let pin = graph::package_key(reference);
-        if let Some((target, _)) = entry["specifier"].as_str().and_then(alias) {
-            return (target == name && pin == version)
-                || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
-        }
-        return pin == version;
+        return catalog_pin_matches(name, entry["specifier"].as_str(), version, reference);
     }
+    range_accepts(name, specifier, reference)
+}
+
+fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
+    let pin = graph::package_key(reference);
+    if let Some((target, _)) = spec.and_then(alias) {
+        return (target == name && pin == version)
+            || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
+    }
+    pin == version
+}
+
+fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
     let (range, version) = if let Some((target, range)) = alias(specifier) {
         let Some(version) = reference
             .strip_prefix(&format!("{target}@"))

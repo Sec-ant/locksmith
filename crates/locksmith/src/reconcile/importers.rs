@@ -50,6 +50,7 @@ pub(super) fn select(
     };
     let mut configured_roots = BTreeMap::new();
     let mut configured_sources = BTreeMap::new();
+    let overrides = manifest::Overrides::new(output, context.configuration.override_tie_break);
     for (id, package) in context.manifests {
         let mut record = sources
             .order
@@ -78,12 +79,7 @@ pub(super) fn select(
                 record.as_object_mut().unwrap().remove(field);
             }
         }
-        let declarations = manifest::declarations(
-            package,
-            output,
-            id,
-            context.configuration.override_tie_break,
-        )?;
+        let declarations = manifest::declarations(package, &overrides, id)?;
         let mut roots = BTreeMap::new();
         for (name, (group, specifier)) in &declarations {
             let pin = selector.select(

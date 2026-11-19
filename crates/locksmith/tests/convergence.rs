@@ -1062,3 +1062,139 @@ fn a_shared_peer_context_can_keep_the_installed_assignment_and_restore_independe
         json!({"transitivePeerDependencies":["host"]});
     assert!(converge(&base, &parse(invalid), &[], options).is_err());
 }
+
+#[test]
+fn a_catalog_consumer_keeps_its_compatible_pin_when_the_cached_release_changes() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+
+    let manifest = json!({"dependencies":{"tool":"catalog:tools"}});
+    let range = "npm:@scope/tool@^1.0.0";
+    let config = json!({"catalogs":{"tools":{"tool":range}}});
+    let before = WorkspaceConfig::from_pnpm(&config).unwrap();
+    let mut changed = config;
+    changed["catalog"] = json!({"unrelated":"2.0.0"});
+    let after = WorkspaceConfig::from_pnpm(&changed).unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let make = |cached: &str, imported: &str| {
+        let source = lock(
+            json!({
+                "app":{"dependencies":{"tool":{"specifier":"catalog:tools","version":imported}}},
+                "second":{"dependencies":{"tool":{"specifier":"catalog:tools","version":"@scope/tool@1.0.0"}}}
+            }),
+            json!({"@scope/tool@1.0.0":{},"@scope/tool@1.0.1":{},"@scope/tool@2.0.0":{},"other@1.0.1":{}}),
+        );
+        let mut doc = source.project().unwrap().clone();
+        doc["catalogs"] = json!({"tools":{"tool":{"specifier":range,"version":cached}}});
+        parse(doc)
+    };
+    let base = make("1.0.1", "@scope/tool@1.0.1");
+    let installed = make("1.0.0", "@scope/tool@1.0.1");
+    let changes = [
+        change("app", &manifest, &manifest),
+        change("second", &manifest, &manifest),
+    ];
+    let result = converge(&base, &installed, &changes, options).unwrap();
+    assert_eq!(
+        result.project().unwrap()["importers"],
+        base.project().unwrap()["importers"]
+    );
+    assert_eq!(
+        result.project().unwrap()["catalogs"],
+        base.project().unwrap()["catalogs"]
+    );
+    installed.validate().unwrap();
+    assert_eq!(
+        converge(&base, &result, &changes, options)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+
+    for (cached, imported) in [
+        ("1.0.0", "@scope/tool@2.0.0"),
+        ("1.0.0", "other@1.0.1"),
+        ("2.0.0", "@scope/tool@1.0.1"),
+    ] {
+        let invalid = make(cached, imported);
+        assert!(invalid.validate().is_err());
+        assert!(converge(&base, &invalid, &changes, options).is_err());
+    }
+}
+
+#[test]
+fn an_exact_override_restores_the_required_extension_in_each_consumers_peer_scope() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+
+    let extension = json!({"host@1.0.0":{"dependencies":{"addon":"1.0.0"}}});
+    let overrides = json!({"addon":"2.0.0"});
+    let before = WorkspaceConfig::from_pnpm(&json!({"overrides":overrides})).unwrap();
+    let after =
+        WorkspaceConfig::from_pnpm(&json!({"overrides":overrides, "packageExtensions":extension}))
+            .unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let make = |installed: bool, second_witness: bool| {
+        let mut importers = json!({});
+        let mut snapshots = json!({});
+        for (i, ui) in [("a", "1.0.0"), ("b", "2.0.0")] {
+            let host = format!("1.0.0(ui@{ui})");
+            let addon = format!("2.0.0(ui@{ui})");
+            importers[i] = json!({"dependencies":{"host":{"specifier":"1.0.0","version":host}}});
+            let mut deps = json!({"ui":ui});
+            if installed && i == "a" {
+                deps["addon"] = "1.0.0".into();
+                snapshots["addon@1.0.0"] = json!({});
+            }
+            snapshots[format!("host@{host}")] = json!({"dependencies":deps});
+            snapshots[format!("ui@{ui}")] = json!({});
+            if i == "a" || second_witness {
+                importers[i]["dependencies"]["addon"] =
+                    json!({"specifier":"2.0.0","version":addon});
+                snapshots[format!("addon@{addon}")] = json!({"dependencies":{"ui":ui}});
+            }
+        }
+        let mut doc = lock(importers, snapshots).project().unwrap().clone();
+        doc["overrides"] = overrides.clone();
+        for pkg in ["addon@2.0.0", "host@1.0.0"] {
+            doc["packages"][pkg]["peerDependencies"] = json!({"ui":"*"});
+        }
+        if installed {
+            doc["packageExtensionsChecksum"] =
+                format!("{:x}", Md5::digest(extension.to_string())).into();
+        }
+        parse(doc)
+    };
+    let base = make(false, true);
+    let installed = make(true, true);
+    let result = converge(&base, &installed, &[], options).unwrap();
+    result.validate().unwrap();
+    for ui in ["1.0.0", "2.0.0"] {
+        assert_eq!(
+            result.project().unwrap()["snapshots"][format!("host@1.0.0(ui@{ui})")]["dependencies"],
+            json!({"ui":ui,"addon":format!("2.0.0(ui@{ui})")})
+        );
+    }
+    assert_eq!(
+        converge(&base, &result, &[], options)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+
+    let base = make(false, false);
+    let installed = make(true, false);
+    installed.validate().unwrap();
+    assert!(
+        matches!(converge(&base,&installed,&[],options), Err(LockfileError::ResolutionRequired { path, .. }) if path.last().is_some_and(|n| n=="addon"))
+    );
+}

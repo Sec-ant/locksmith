@@ -13,6 +13,27 @@ pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Opt
     }
 }
 
+/// pnpm can retain distinct catalog and importer pins within the declared range.
+pub(crate) fn catalog_consumer_fits(
+    name: &str,
+    spec: &str,
+    reference: &str,
+    entry: Option<&Value>,
+) -> bool {
+    if let Some(entry) = entry {
+        let Some(version) = entry["version"].as_str() else {
+            return false;
+        };
+        if entry["specifier"] != spec || !catalog_version_fits(spec, version, Some(spec)) {
+            return false;
+        }
+        if super::catalog_pin_matches(name, Some(spec), version, reference) {
+            return true;
+        }
+    }
+    super::range_accepts(name, spec, reference)
+}
+
 pub(crate) fn resolve(
     docs: [&Value; 3],
     order: [usize; 3],

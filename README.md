@@ -71,7 +71,7 @@ These offline benchmarks replayed one monorepo’s history on x86-64 Linux. It h
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `merge --context` | 461 | 1.41 s | 4.47 s | 261 MiB | 303 MiB |
 | `converge` | 68 | 1.74 s | 2.15 s | 231 MiB | 246 MiB |
-| `converge` with workspace rule edits | 186 | 2.01 s | 2.23 s | 217 MiB | 231 MiB |
+| `converge` with workspace rule edits | 186 | 1.57 s | 1.85 s | 213 MiB | 225 MiB |
 | `repair` | 796 | 0.86 s | 1.07 s | 280 MiB | 331 MiB |
 
 `merge` received a prepared workspace context. The `converge` and `repair` timings include reading from Git. The 186-case sample covers 90 days of edits to catalogs, overrides, and package extensions.

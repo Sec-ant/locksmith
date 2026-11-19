@@ -673,27 +673,42 @@ impl Projector<'_> {
                     "installed snapshot contains a dependency removed by an override",
                 ));
             }
+            let mut installed_edge = installed_edge;
+            let recovered;
             if let Some(spec) = constraint.as_deref() {
-                if installed_edge.is_none()
+                let required_missing = installed_edge.is_none()
                     && rules[1][0].contains_key(name)
-                    && !rules[1][1].contains_key(name)
-                {
-                    return Err(missing(
-                        &["snapshots", next, name],
-                        "installed snapshot is missing the required extension dependency",
-                    ));
-                }
-                if (old_edge.is_none() || unconditional)
+                    && !rules[1][1].contains_key(name);
+                let wrong_pin = (old_edge.is_none() || unconditional)
                     && !peer_names.contains(name)
-                    && let Some((_, pin)) = installed_edge
-                    && (spec.parse::<node_semver::Range>().is_ok()
-                        || reconcile::alias(spec).is_some())
-                    && !reconcile::accepts(name, spec, pin, donor)
-                {
-                    return Err(missing(
-                        &["snapshots", next, name],
-                        "installed pin does not satisfy the extension",
-                    ));
+                    && installed_edge.is_some_and(|(_, pin)| {
+                        (spec.parse::<node_semver::Range>().is_ok()
+                            || reconcile::alias(spec).is_some())
+                            && !reconcile::accepts(name, spec, pin, donor)
+                    });
+                if required_missing || wrong_pin {
+                    if old_edge.is_none()
+                        && self.config.resolution.pnpmfile_checksum.is_none()
+                        && peer::patch(old).is_none()
+                        && declaration.is_some_and(|d| d != spec)
+                        && rules[1][0].contains_key(name)
+                        && !rules[1][1].contains_key(name)
+                        && new_pkg["peerDependencies"].get(name).is_none()
+                        && let Some(pin) = self.exact_override([old, next], name, spec)
+                    {
+                        recovered = pin;
+                        installed_edge = Some(("dependencies", recovered.as_str()));
+                    } else {
+                        let reason = match installed_edge {
+                            Some((_, pin)) => format!(
+                                "installed pin {pin} does not satisfy the effective workspace rule {spec}"
+                            ),
+                            None => format!(
+                                "installed snapshot is missing the required extension dependency {spec}"
+                            ),
+                        };
+                        return Err(missing(&["snapshots", next, name], reason));
+                    }
                 }
             }
             // A range edit permits the original version even if pnpm updated

@@ -212,6 +212,25 @@ impl<'a> Merger<'a> {
         self.index.candidates().contains_key(key)
     }
 
+    pub(crate) fn locked_instances(
+        &self,
+        side: usize,
+        release: &str,
+    ) -> impl Iterator<Item = &'a str> + '_ {
+        let snapshots = self.documents[side].and_then(|d| graph::section(d, "snapshots"));
+        self.index
+            .candidates()
+            .get(release)
+            .into_iter()
+            .flatten()
+            .filter_map(move |&(key, record)| {
+                snapshots?
+                    .get(key)
+                    .filter(|v| std::ptr::eq(*v, record))
+                    .map(|_| key)
+            })
+    }
+
     pub(crate) fn origin_side(&self, key: &str) -> Option<usize> {
         self.origins.get(key).map(|(side, _, _)| *side)
     }
