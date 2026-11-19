@@ -309,12 +309,38 @@ fn ordered_importer(record: &Value) -> bool {
     })
 }
 
+/// Use the installed order when it preserves the relative order of projects
+/// from the baseline, including when a project was added or removed.
+pub(crate) fn importer_order<'a>(
+    sources: &'a [Arc<Source>],
+    kind: DocumentKind,
+    doc: &Value,
+) -> Option<&'a Map<String, Value>> {
+    let output = doc["importers"].as_object()?;
+    let maps = || {
+        sources
+            .iter()
+            .filter_map(|s| s.documents.get(&kind)?["importers"].as_object())
+    };
+    maps().rev().find(|order| {
+        order.len() == output.len()
+            && order.keys().all(|k| output.contains_key(k))
+            && maps().all(|source| {
+                source
+                    .keys()
+                    .filter(|k| order.contains_key(*k))
+                    .eq(order.keys().filter(|k| source.contains_key(*k)))
+            })
+    })
+}
+
 impl Source {
     pub(crate) fn reusable_field(
         &self,
         kind: DocumentKind,
         key: &str,
         preserve_spelling: bool,
+        keep_importer_order: bool,
     ) -> bool {
         if !SECTIONS.contains(&key) && key != "catalogs" {
             return true;
@@ -330,7 +356,7 @@ impl Source {
         self.documents[&kind][key]
             .as_object()
             .is_none_or(|entries| {
-                entries.keys().is_sorted()
+                (key == "importers" && keep_importer_order || entries.keys().is_sorted())
                     && match key {
                         "importers" => entries.values().all(ordered_importer),
                         "catalogs" => entries
@@ -371,11 +397,14 @@ pub(crate) fn render(
         .iter()
         .collect();
     fields.sort_unstable_by(|(a, _), (b, _)| yaml::root_order(a, b));
+    let order = preserve_baseline
+        .then(|| importer_order(sources, kind, document))
+        .flatten();
     for (key, value) in fields {
         let original = sources.iter().enumerate().find_map(|(i, source)| {
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
-                || !source.reusable_field(kind, key, preserve_baseline && i == 0)
+                || !source.reusable_field(kind, key, preserve_baseline && i == 0, order.is_some())
                 || (key == "overrides" && !crate::manifest::same_override_order(original, document))
             {
                 return None;
@@ -390,11 +419,14 @@ pub(crate) fn render(
             && value.as_object().is_some_and(|map| !map.is_empty())
         {
             output.push_str(&format!("{key}:\n\n"));
-            let entries: BTreeMap<_, _> = value
-                .as_object()
-                .expect("section is a mapping")
-                .iter()
-                .collect();
+            let map = value.as_object().expect("section is a mapping");
+            let entries = if let Some(order) = order.filter(|_| key == "importers") {
+                order.keys().map(|k| (k, &map[k])).collect()
+            } else {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                entries
+            };
             for (entry, value) in entries {
                 let original = sources.iter().enumerate().find_map(|(i, source)| {
                     let record = source.documents.get(&kind)?.get(key)?.get(entry)?;

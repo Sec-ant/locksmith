@@ -927,3 +927,56 @@ fn a_new_consumer_can_reuse_an_exact_catalog_release_without_adding_a_catalog_re
         result.to_yaml().unwrap()
     );
 }
+
+#[test]
+fn convergence_keeps_a_workspace_project_order_shared_by_both_locks() {
+    let make = |foo: &str, stable: &str, extra: bool| {
+        let mut importers = json!({"z":{"dependencies":{"foo":{"specifier":foo,"version":foo}}}});
+        if extra {
+            importers["m"] = json!({});
+        }
+        importers["a"] = json!({"dependencies":{"stable":{"specifier":"^1","version":stable}}});
+        lock(
+            importers,
+            json!({format!("foo@{foo}"): {},format!("stable@{stable}"): {}}),
+        )
+    };
+    let base = make("1.0.0", "1.0.0", false);
+    let before = json!({"dependencies":{"foo":"1.0.0"}});
+    let after = json!({"dependencies":{"foo":"2.0.0"}});
+    let added = json!({"name":"m"});
+    for (pin, extra) in [("1.0.0", false), ("1.1.0", false), ("1.1.0", true)] {
+        let mut changes = vec![change("z", &before, &after)];
+        if extra {
+            changes.push(ManifestChange {
+                importer: "m",
+                before: None,
+                after: Some(&added),
+            });
+        }
+        let installed = make("2.0.0", pin, extra);
+        let result = converge(&base, &installed, &changes, Default::default()).unwrap();
+        let raw = result.to_yaml().unwrap();
+        let parsed = Lockfile::parse(&raw).unwrap();
+        let importers = parsed.project().unwrap()["importers"].as_object().unwrap();
+        let expected = if extra {
+            &["z", "m", "a"][..]
+        } else {
+            &["z", "a"][..]
+        };
+        assert!(
+            importers
+                .keys()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        );
+        assert_eq!(importers["a"]["dependencies"]["stable"]["version"], "1.0.0");
+        assert_eq!(
+            converge(&base, &parsed, &changes, Default::default())
+                .unwrap()
+                .to_yaml()
+                .unwrap(),
+            raw
+        );
+    }
+}

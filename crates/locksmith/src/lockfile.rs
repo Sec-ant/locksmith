@@ -100,16 +100,22 @@ impl Lockfile {
             if source.documents == self.documents
                 && self.documents.iter().all(|(kind, document)| {
                     crate::manifest::same_override_order(document, &source.documents[kind])
-                        && (Arc::ptr_eq(document, &source.documents[kind])
-                            || crate::source::SECTIONS.into_iter().chain(["catalogs"]).all(
-                                |section| {
+                        && (Arc::ptr_eq(document, &source.documents[kind]) || {
+                            let keep_importer_order = self.preserve_baseline
+                                && crate::source::importer_order(&self.sources, *kind, document)
+                                    .is_some();
+                            crate::source::SECTIONS
+                                .into_iter()
+                                .chain(["catalogs"])
+                                .all(|section| {
                                     source.reusable_field(
                                         *kind,
                                         section,
                                         self.preserve_baseline && i == 0,
+                                        keep_importer_order,
                                     )
-                                },
-                            ))
+                                })
+                        })
                 })
             {
                 return Ok(source.text.to_string());
