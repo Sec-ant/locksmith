@@ -21,7 +21,7 @@ class LocksmithReleaseDownloadStrategy < CurlDownloadStrategy
   def _fetch(url:, resolved_url:, timeout:)
     super
   rescue ErrorDuringExecution => e
-    raise unless e.exitstatus == 22
+    raise unless e.stderr.match?(/\b(?:401|403|404)\b/)
 
     system_command! "gh", args: ["release", "download", File.basename(File.dirname(url)),
                                  "--repo", "Sec-ant/locksmith", "--pattern", File.basename(url),
