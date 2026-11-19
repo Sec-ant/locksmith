@@ -22,29 +22,29 @@ end
 class Locksmith < Formula
   desc "Merge, repair, and converge pnpm lockfiles"
   homepage "https://github.com/Sec-ant/locksmith"
-  version "0.1.0"
+  version "0.1.1"
 
   on_macos do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.0/locksmith-aarch64-apple-darwin.tar.gz", using: LocksmithReleaseDownloadStrategy
-      sha256 "ed525a7e16169908446e12a4dc8439c607e08281b3b68f5e1d9f3fad49165ea7"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.1/locksmith-aarch64-apple-darwin.tar.gz", using: LocksmithReleaseDownloadStrategy
+      sha256 "fc14f4defad67a7e74452a0db3068e80a7ad017d29327fe37406dd002f7c3049"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.0/locksmith-x86_64-apple-darwin.tar.gz", using: LocksmithReleaseDownloadStrategy
-      sha256 "7abf0e594d078428dc1b52892bc3eca4f1aaf8bfd6d749c4f27b4101aba52e07"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.1/locksmith-x86_64-apple-darwin.tar.gz", using: LocksmithReleaseDownloadStrategy
+      sha256 "78d3ccb2aee392e41e29f285fd661ca46b460475ec5cfef0314d50a67d83c024"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.0/locksmith-aarch64-unknown-linux-gnu.tar.gz", using: LocksmithReleaseDownloadStrategy
-      sha256 "2a1a276f28181096d1d60ad61414a27804a52a52f3902a5ca2b758ab23d529c9"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.1/locksmith-aarch64-unknown-linux-gnu.tar.gz", using: LocksmithReleaseDownloadStrategy
+      sha256 "9a7c5317f43a283e0b0006d2c5f0f13832da90f1fd1832583589a6c5a7615392"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.0/locksmith-x86_64-unknown-linux-gnu.tar.gz", using: LocksmithReleaseDownloadStrategy
-      sha256 "fb6d1240a79bc1414d8226d354a3c2bf7e8be5d2a739c18725a9f388b434e575"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.1.1/locksmith-x86_64-unknown-linux-gnu.tar.gz", using: LocksmithReleaseDownloadStrategy
+      sha256 "2b1024b24b73a7d3ab97823c2e5275f45306c328762ed601ab894af813f58b91"
     end
   end
 
