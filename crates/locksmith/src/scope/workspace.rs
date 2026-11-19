@@ -12,6 +12,19 @@ mod bindings;
 mod rules;
 pub(super) use rules::RootChoice;
 use rules::RootChoices;
+pub(super) use rules::{check_installed_rules, override_names};
+
+/// Combining inputs may require incompatible identities even when each input is valid.
+pub(super) enum ProjectionError {
+    MixedPeers,
+    Input(LockfileError),
+}
+
+impl From<LockfileError> for ProjectionError {
+    fn from(value: LockfileError) -> Self {
+        Self::Input(value)
+    }
+}
 
 pub(super) struct Projection {
     pub(super) roots: RootChoices,
@@ -26,7 +39,7 @@ struct Instance {
     peers: Edits,
 }
 
-fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String, &Value)> {
+pub(super) fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String, &Value)> {
     EDGES.into_iter().flat_map(|g| {
         graph::section(body, g)
             .into_iter()
@@ -80,7 +93,7 @@ pub(super) fn apply(
     after: &WorkspaceConfig,
     manifests: &[super::ManifestChange],
     registry: Option<&crate::RegistryMetadata>,
-) -> Result<Option<(Lockfile, Projection)>, LockfileError> {
+) -> Result<Option<(Lockfile, Projection)>, ProjectionError> {
     fn rules(c: &WorkspaceConfig) -> Option<&serde_json::Map<String, Value>> {
         c.resolution
             .package_extensions
@@ -128,7 +141,8 @@ pub(super) fn apply(
         return Err(missing(
             &["configuration"],
             "other workspace resolution settings changed",
-        ));
+        )
+        .into());
     }
     checked_checksum(base, before)?;
     checked_checksum(donor, after)?;
@@ -262,7 +276,9 @@ pub(super) fn apply(
             for group in manifest::GROUPS {
                 for (name, dep) in graph::section(root, group).into_iter().flatten() {
                     let Some(pin) = dep["version"].as_str() else {
-                        return Err(missing(&["importers", id, name], "missing baseline pin"));
+                        return Err(
+                            missing(&["importers", id, name], "missing baseline pin").into()
+                        );
                     };
                     let old = graph::snapshot_key(name, pin, graph::section(base, "snapshots"));
                     if roots
@@ -293,7 +309,8 @@ pub(super) fn apply(
                         return Err(missing(
                             &["importers", id, group, name],
                             "installed lock is missing the affected dependency",
-                        ));
+                        )
+                        .into());
                     }
                     if current.get("specifier") != dep.get("specifier")
                         && manifests
@@ -390,7 +407,7 @@ impl Projector<'_> {
         ))
     }
 
-    fn visit(&mut self, old: &str, next: &str) -> Result<Instance, LockfileError> {
+    fn visit(&mut self, old: &str, next: &str) -> Result<Instance, ProjectionError> {
         let pair = (old.to_owned(), next.to_owned());
         if let Some(result) = self.memo.get(&pair) {
             return Ok(result.clone());
@@ -435,7 +452,8 @@ impl Projector<'_> {
             return Err(missing(
                 &["packages", pkg],
                 "workspace edit requires the same verified package artifact",
-            ));
+            )
+            .into());
         }
         let previous = &base["snapshots"][old];
         let installed = &donor["snapshots"][next];
@@ -470,10 +488,7 @@ impl Projector<'_> {
         let result = self.parent(old, next, &mut body, edit.peers, edit.declared)?;
         if let Some(existing) = self.records.get(&result.key) {
             if existing != &body {
-                return Err(missing(
-                    &["snapshots", &result.key],
-                    "two paths require different contents for the same instance",
-                ));
+                return Err(ProjectionError::MixedPeers);
             }
         } else {
             self.records.insert(result.key.clone(), body);
@@ -483,10 +498,7 @@ impl Projector<'_> {
             .remove(&pair)
             .is_some_and(|assumed| assumed.key != result.key || assumed.peers != result.peers)
         {
-            return Err(missing(
-                &["snapshots", old],
-                "cycle requires inconsistent peer identities",
-            ));
+            return Err(ProjectionError::MixedPeers);
         }
         self.active.remove(&pair);
         self.memo.insert(pair, result.clone());
@@ -744,7 +756,7 @@ impl Projector<'_> {
         Ok(())
     }
 
-    fn materialize(mut self, output: &mut Value) -> Result<BTreeSet<String>, LockfileError> {
+    fn materialize(mut self, output: &mut Value) -> Result<BTreeSet<String>, ProjectionError> {
         let donor = self.docs[1];
         while let Some(key) = self.new_children.pop_first() {
             if self.records.contains_key(&key) {
@@ -768,7 +780,8 @@ impl Projector<'_> {
                     return Err(missing(
                         &["packages", release],
                         "installed package artifact differs from baseline",
-                    ));
+                    )
+                    .into());
                 }
             } else {
                 output["packages"][release] = package.clone();

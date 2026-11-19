@@ -424,7 +424,7 @@ pub(crate) fn render(
                 order.keys().map(|k| (k, &map[k])).collect()
             } else {
                 let mut entries: Vec<_> = map.iter().collect();
-                entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                entries.sort_unstable_by_key(|(key, _)| *key);
                 entries
             };
             for (entry, value) in entries {

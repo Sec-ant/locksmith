@@ -195,7 +195,7 @@ pub(super) fn catalogs(
     Ok(choices)
 }
 
-pub(super) fn override_names(docs: [&Value; 2]) -> BTreeSet<&str> {
+pub(in crate::scope) fn override_names(docs: [&Value; 2]) -> BTreeSet<&str> {
     let groups = docs.map(|d| {
         let mut by_name = BTreeMap::<_, Vec<_>>::new();
         for (selector, value) in graph::section(d, "overrides").into_iter().flatten() {
@@ -312,4 +312,104 @@ pub(super) fn importer_choices(
         }
     }
     Ok(choices)
+}
+
+/// Check the installed records used as a unit. A package extension fills
+/// missing published fields. An unconditional override can replace that value.
+pub(in crate::scope) fn check_installed_rules(
+    [base, donor]: [&Value; 2],
+    [before, after]: [&WorkspaceConfig; 2],
+    policy: &crate::config::ResolutionCompatibility<'_>,
+    changed: &BTreeSet<&str>,
+) -> Result<(), LockfileError> {
+    let previous = manifest::Overrides::new(base, before.override_tie_break);
+    let current = manifest::Overrides::new(donor, after.override_tie_break);
+    let mut samples = std::collections::HashMap::new();
+    for (key, body) in graph::section(base, "snapshots").into_iter().flatten() {
+        samples.entry(graph::package_key(key)).or_insert(body);
+    }
+    for (key, body) in graph::section(donor, "snapshots").into_iter().flatten() {
+        let pkg = graph::package_key(key);
+        let Some((parent, version)) = pkg.rsplit_once('@') else {
+            continue;
+        };
+        let old = base["snapshots"]
+            .get(key)
+            .or_else(|| samples.get(pkg).copied());
+        let new_pkg = &donor["packages"][pkg];
+        let expected = if !policy.unchanged(pkg) {
+            policy.effective_extensions(pkg).ok_or_else(|| {
+                missing(&["packageExtensions", pkg], "invalid extension declaration")
+            })?
+        } else {
+            Default::default()
+        };
+        for (index, field) in ["peerDependencies", "peerDependenciesMeta"]
+            .into_iter()
+            .enumerate()
+        {
+            for (&name, &val) in &expected[1][index + 2] {
+                if expected[0][index + 2].get(name) != Some(&val)
+                    && base["packages"][pkg][field].get(name).is_none()
+                    && new_pkg[field].get(name) != Some(val)
+                    && current.relevant(name, parent, version).is_empty()
+                {
+                    return Err(missing(
+                        &["packages", pkg, field, name],
+                        "installed package is missing the declared peer extension",
+                    ));
+                }
+            }
+        }
+        let changed_edges = super::edges(body)
+            .map(|(_, n, _)| n.as_str())
+            .chain(
+                old.into_iter()
+                    .flat_map(super::edges)
+                    .map(|(_, n, _)| n.as_str()),
+            )
+            .filter(|n| changed.contains(*n))
+            .chain(expected[1][0].keys().chain(expected[1][1].keys()).copied())
+            .collect::<BTreeSet<_>>();
+        for name in changed_edges {
+            if new_pkg["peerDependencies"].get(name).is_some() {
+                continue;
+            }
+            let required = expected[1][0].get(name);
+            let ext = expected[1][1]
+                .get(name)
+                .or(required)
+                .and_then(|v| v.as_str());
+            let rules = current.relevant(name, parent, version);
+            let overridden = changed.contains(name)
+                && previous.relevant(name, parent, version) != rules
+                && !rules.is_empty()
+                && rules
+                    .iter()
+                    .all(|(s, _)| manifest::override_selector(s).2.is_none());
+            let Some(spec) = ext.or(overridden.then_some("*")) else {
+                continue;
+            };
+            let parent = serde_json::json!({"name":parent,"version":version});
+            let spec = current.apply(&parent, ".", name, spec)?;
+            let pin = super::dependency(body, name);
+            let previous_edge = old.and_then(|r| super::dependency(r, name));
+            let valid = match (spec.as_deref(), pin) {
+                (None, p) => p.is_none(),
+                (Some(_), None) => required.is_none() || expected[1][1].contains_key(name),
+                (Some(s), Some((_, p))) if overridden || previous_edge.is_none() => {
+                    s.parse::<node_semver::Range>().is_err() && reconcile::alias(s).is_none()
+                        || reconcile::accepts(name, s, p, donor)
+                }
+                _ => true,
+            };
+            if !valid {
+                return Err(missing(
+                    &["snapshots", key, name],
+                    "installed dependency does not match the final workspace rule",
+                ));
+            }
+        }
+    }
+    Ok(())
 }

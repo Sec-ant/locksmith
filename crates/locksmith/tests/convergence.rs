@@ -980,3 +980,85 @@ fn convergence_keeps_a_workspace_project_order_shared_by_both_locks() {
         );
     }
 }
+
+#[test]
+fn a_shared_peer_context_can_keep_the_installed_assignment_and_restore_independent_pins() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+
+    let rules = json!({"adapter@1":{"dependencies":{"bridge":"1.0.0"}}});
+    let before = WorkspaceConfig::default();
+    let after = WorkspaceConfig::from_pnpm(&json!({"packageExtensions":rules})).unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let make = |installed: bool, leaf: &str, palette: &str| {
+        let mut roots = json!({});
+        let mut states = json!({});
+        for (app, host) in [
+            ("a", if installed { "1.1.0" } else { "1.0.0" }),
+            ("b", "2.0.0"),
+        ] {
+            let contextual = format!("1.0.0(host@{host})");
+            let adapter = if installed {
+                contextual.as_str()
+            } else {
+                "1.0.0"
+            };
+            roots[app] = json!({"dependencies":{
+                "parent":{"specifier":"1.0.0","version":contextual},
+                "host":{"specifier":"*","version":host},
+                "stable":{"specifier":"^1","version":leaf},
+                "utility":{"specifier":"1.0.0","version":"1.0.0"}
+            }});
+            states[format!("parent@{contextual}")] = json!({"dependencies":{"adapter":adapter,"plugin":contextual},"transitivePeerDependencies":["host"]});
+            states[format!("plugin@{contextual}")] = json!({"dependencies":{"host":host}});
+            states[format!("host@{host}")] = json!({});
+            states[format!("adapter@{adapter}")] = if installed {
+                states[format!("bridge@{contextual}")] = json!({"dependencies":{"host":host}});
+                json!({"dependencies":{"bridge":contextual},"transitivePeerDependencies":["host"]})
+            } else {
+                json!({})
+            };
+        }
+        states["utility@1.0.0"] = json!({"dependencies":{"child":leaf}});
+        for n in ["child", "stable"] {
+            states[format!("{n}@{leaf}")] = json!({});
+        }
+        let reporter = format!("1.0.0(palette@{palette})");
+        roots["tools"] =
+            json!({"dependencies":{"reporter":{"specifier":"1.0.0","version":reporter}}});
+        states[format!("reporter@{reporter}")] =
+            json!({"dependencies":{"palette":palette,"utility":"1.0.0"}});
+        states[format!("palette@{palette}")] = json!({});
+        states[format!("stable@{leaf}")] = json!({"dependencies":{"nested":leaf}});
+        states[format!("nested@{leaf}")] = json!({});
+        let mut doc = lock(roots, states).project().unwrap().clone();
+        doc["packages"]["reporter@1.0.0"]["peerDependencies"] = json!({"palette":"^1"});
+        doc["packages"]["plugin@1.0.0"]["peerDependencies"] = json!({"host":"*"});
+        if installed {
+            doc["packageExtensionsChecksum"] =
+                format!("{:x}", Md5::digest(rules.to_string())).into();
+            doc["packages"]["bridge@1.0.0"]["peerDependencies"] = json!({"host":"*"});
+        }
+        parse(doc)
+    };
+    let base = make(false, "1.0.0", "1.0.0");
+    let installed = make(true, "1.1.0", "1.1.0");
+    let result = converge(&base, &installed, &[], options).unwrap();
+    assert_eq!(result.project(), make(true, "1.0.0", "1.0.0").project());
+    assert_eq!(
+        converge(&base, &result, &[], options)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+
+    let mut invalid = installed.project().unwrap().clone();
+    invalid["snapshots"]["adapter@1.0.0(host@2.0.0)"] =
+        json!({"transitivePeerDependencies":["host"]});
+    assert!(converge(&base, &parse(invalid), &[], options).is_err());
+}

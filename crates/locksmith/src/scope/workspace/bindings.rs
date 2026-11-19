@@ -1,7 +1,9 @@
 //! Propagate only the external peer bindings changed by an edited dependency.
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{EDGES, Instance, Projector, SnapshotEdit, dependency, edges, transitive};
+use super::{
+    EDGES, Instance, ProjectionError, Projector, SnapshotEdit, dependency, edges, transitive,
+};
 use crate::{LockfileError, Value, graph, peer, reconcile::missing};
 
 type Bindings = BTreeMap<String, String>;
@@ -61,7 +63,7 @@ impl Projector<'_> {
         old: &str,
         next: &str,
         edit: &mut SnapshotEdit,
-    ) -> Result<(), LockfileError> {
+    ) -> Result<(), ProjectionError> {
         let [base, donor] = self.docs;
         let previous = &base["snapshots"][old];
         let installed = &donor["snapshots"][next];
@@ -137,10 +139,7 @@ impl Projector<'_> {
                         continue;
                     }
                 }
-                return Err(missing(
-                    &["snapshots", old, sibling, provider],
-                    "edited local provider requires a different sibling peer binding",
-                ));
+                return Err(ProjectionError::MixedPeers);
             }
         }
         if !replacements.is_empty() {
@@ -181,20 +180,11 @@ impl Projector<'_> {
         Ok(())
     }
 
-    fn combine(
-        &self,
-        parent: &str,
-        name: &str,
-        total: &mut Binding,
-        next: &Binding,
-    ) -> Result<(), LockfileError> {
+    fn combine(&self, total: &mut Binding, next: &Binding) -> Result<(), ProjectionError> {
         match (&*total, next) {
             (Binding::Absent, _) | (Binding::Unbound, Binding::Bound(_)) => *total = next.clone(),
             (Binding::Bound(a), Binding::Bound(b)) if !self.same_binding(a, b) => {
-                return Err(missing(
-                    &["snapshots", parent, name],
-                    "dependencies require competing peer bindings",
-                ));
+                return Err(ProjectionError::MixedPeers);
             }
             _ => {}
         }
@@ -208,7 +198,7 @@ impl Projector<'_> {
         body: &mut Value,
         edits: Contributions,
         mut changes: Edits,
-    ) -> Result<Instance, LockfileError> {
+    ) -> Result<Instance, ProjectionError> {
         let base = self.docs[0];
         let own = &self.docs[1]["packages"][graph::package_key(next)]["peerDependencies"];
         let mut inherited: BTreeSet<_> = transitive(body).map(str::to_owned).collect();
@@ -223,7 +213,7 @@ impl Projector<'_> {
         for (name, children) in edits {
             let mut after = Binding::Absent;
             for contribution in children.values() {
-                self.combine(old, &name, &mut after, contribution)?;
+                self.combine(&mut after, contribution)?;
             }
             let local = EDGES
                 .iter()
@@ -232,10 +222,7 @@ impl Projector<'_> {
                 if let Binding::Bound(bound) = &after
                     && !self.same_binding(provider, bound)
                 {
-                    return Err(missing(
-                        &["snapshots", old, &name],
-                        "extension dependency uses a different local peer provider",
-                    ));
+                    return Err(ProjectionError::MixedPeers);
                 }
                 continue;
             }
@@ -270,7 +257,7 @@ impl Projector<'_> {
                         let bound = pins
                             .get(name.as_str())
                             .map_or(Binding::Unbound, |v| Binding::Bound((*v).into()));
-                        self.combine(old, &name, &mut retained, &bound)?;
+                        self.combine(&mut retained, &bound)?;
                     } else {
                         opaque.push(key);
                     }
@@ -282,13 +269,13 @@ impl Projector<'_> {
                 {
                     continue;
                 }
-                self.combine(old, &name, &mut after, &retained)?;
+                self.combine(&mut after, &retained)?;
                 for key in opaque {
                     let bound = self
                         .bindings(0, &key)?
                         .remove(&name)
                         .map_or(Binding::Unbound, Binding::Bound);
-                    self.combine(old, &name, &mut after, &bound)?;
+                    self.combine(&mut after, &bound)?;
                 }
             }
             let before = if was {

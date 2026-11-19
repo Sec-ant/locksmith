@@ -129,7 +129,7 @@ pub(crate) fn complete(
 }
 
 // A registry deprecation notice may change after the immutable artifact was published.
-fn same_package(a: &Value, b: &Value) -> bool {
+pub(crate) fn same_package(a: &Value, b: &Value) -> bool {
     a == b
         || a["resolution"]["integrity"].is_string()
             && a.get("deprecated") != b.get("deprecated")
@@ -342,7 +342,7 @@ fn same_child_context(base: &Value, old: &str, installed: &Value, new: &str, nam
         && installed["packages"][current]["resolution"]["integrity"].is_string()
 }
 
-fn ordinary(doc: &Value, key: &str) -> bool {
+pub(crate) fn ordinary(doc: &Value, key: &str) -> bool {
     !key.contains('(')
         && doc["snapshots"].get(key).is_some()
         && doc["packages"][key]["resolution"]["integrity"].is_string()

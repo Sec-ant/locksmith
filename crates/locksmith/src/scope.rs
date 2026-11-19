@@ -4,6 +4,7 @@ use serde_json::{Map, json};
 
 use crate::{Lockfile, LockfileError, Value, assembly, graph, manifest};
 
+mod installed;
 mod peers;
 mod workspace;
 
@@ -70,14 +71,20 @@ pub fn converge(
                 "the final workspace configuration is required",
             )
         })?;
-        workspace::apply(
+        match workspace::apply(
             baseline,
             candidate,
             before,
             after,
             changes,
             options.registry,
-        )?
+        ) {
+            Ok(plan) => plan,
+            Err(workspace::ProjectionError::Input(error)) => return Err(error),
+            Err(workspace::ProjectionError::MixedPeers) => {
+                return installed::converge(baseline, candidate, changes, before, after);
+            }
+        }
     } else {
         None
     };
@@ -85,14 +92,31 @@ pub fn converge(
         Some((lock, rules)) => (lock, Some(rules)),
         None => (baseline.clone(), None),
     };
-    let mut result = converge_manifests(
+    let mut result = match converge_manifests(
         baseline,
         projected,
         candidate,
         changes,
         options,
         configured.as_ref(),
-    )?;
+    ) {
+        Err(LockfileError::Conflicts(conflicts))
+            if configured.is_some()
+                && conflicts.iter().all(|c| {
+                    c.kind == crate::ConflictKind::SharedDependency
+                        && c.path.first().is_some_and(|p| p == "snapshots")
+                }) =>
+        {
+            return installed::converge(
+                baseline,
+                candidate,
+                changes,
+                options.baseline_configuration.unwrap(),
+                options.configuration.unwrap(),
+            );
+        }
+        result => result?,
+    };
     if let Some(projection) = configured {
         projection.bind_roots(
             &mut result,
@@ -114,6 +138,61 @@ pub fn converge(
         )?;
     }
     Ok(result)
+}
+
+fn check_baseline_manifest(
+    original: &Value,
+    change: &ManifestChange<'_>,
+    has_configuration: bool,
+    override_tie_break: crate::OverrideTieBreak,
+) -> Result<(), LockfileError> {
+    if change.before.is_none() && change.after.is_none() {
+        return Err(LockfileError::InvalidManifest(change.importer.into()));
+    }
+    for value in [change.before, change.after].into_iter().flatten() {
+        if !value.is_object() {
+            return Err(LockfileError::InvalidManifest(change.importer.into()));
+        }
+    }
+    for field in ["pnpm", "packageManager", "devEngines"] {
+        if get(change.before, field) != get(change.after, field) {
+            if field == "pnpm"
+                && change.importer == "."
+                && has_configuration
+                && [change.before, change.after]
+                    .iter()
+                    .all(|m| get(*m, field).is_none_or(Value::is_object))
+                && [change.before, change.after]
+                    .into_iter()
+                    .flat_map(|m| {
+                        get(m, field)
+                            .and_then(Value::as_object)
+                            .into_iter()
+                            .flatten()
+                    })
+                    .all(|(key, _)| {
+                        matches!(
+                            key.as_str(),
+                            "packageExtensions" | "overrides" | "catalog" | "catalogs"
+                        ) || get(change.before, field).and_then(|v| v.get(key))
+                            == get(change.after, field).and_then(|v| v.get(key))
+                    })
+            {
+                continue;
+            }
+            return Err(LockfileError::GlobalConfigurationChanged {
+                importer: change.importer.into(),
+                field: field.into(),
+            });
+        }
+    }
+    manifest::check(
+        original,
+        change.importer,
+        change.before,
+        "baseline",
+        override_tie_break,
+    )
 }
 
 fn converge_manifests(
@@ -143,51 +222,13 @@ fn converge_manifests(
     let mut seen = BTreeSet::new();
     let mut manifests = BTreeMap::new();
     for change in changes {
-        if !seen.insert(change.importer) || (change.before.is_none() && change.after.is_none()) {
+        if !seen.insert(change.importer) {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        for value in [change.before, change.after].into_iter().flatten() {
-            if !value.is_object() {
-                return Err(LockfileError::InvalidManifest(change.importer.into()));
-            }
-        }
-        for field in ["pnpm", "packageManager", "devEngines"] {
-            if get(change.before, field) != get(change.after, field) {
-                if field == "pnpm"
-                    && change.importer == "."
-                    && options.baseline_configuration.is_some()
-                    && [change.before, change.after]
-                        .iter()
-                        .all(|m| get(*m, field).is_none_or(Value::is_object))
-                    && [change.before, change.after]
-                        .into_iter()
-                        .flat_map(|m| {
-                            get(m, field)
-                                .and_then(Value::as_object)
-                                .into_iter()
-                                .flatten()
-                        })
-                        .all(|(key, _)| {
-                            matches!(
-                                key.as_str(),
-                                "packageExtensions" | "overrides" | "catalog" | "catalogs"
-                            ) || get(change.before, field).and_then(|v| v.get(key))
-                                == get(change.after, field).and_then(|v| v.get(key))
-                        })
-                {
-                    continue;
-                }
-                return Err(LockfileError::GlobalConfigurationChanged {
-                    importer: change.importer.into(),
-                    field: field.into(),
-                });
-            }
-        }
-        manifest::check(
+        check_baseline_manifest(
             original.project().expect("baseline project"),
-            change.importer,
-            change.before,
-            "baseline",
+            change,
+            options.baseline_configuration.is_some(),
             override_tie_break,
         )?;
         manifests.insert(change.importer, change);
