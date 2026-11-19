@@ -1,0 +1,363 @@
+//! Edit only changed mappings in a parsed lock, retaining the original text of siblings.
+use std::{collections::BTreeMap, fmt, ops::Range};
+
+use serde::{
+    Deserialize, Deserializer,
+    de::{IgnoredAny, MapAccess, Visitor},
+};
+use serde_json::Map;
+use serde_saphyr::Spanned;
+
+use super::{document_ranges, options, yaml};
+use crate::{DocumentKind, Lockfile, LockfileError, Value};
+
+struct Locations(Vec<Spanned<String>>);
+
+impl<'de> Deserialize<'de> for Locations {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys;
+        impl<'de> Visitor<'de> for Keys {
+            type Value = Locations;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a block mapping")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Locations, M::Error> {
+                let mut keys = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some(key) = map.next_key::<Spanned<String>>()? {
+                    keys.push(key);
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(Locations(keys))
+            }
+        }
+        deserializer.deserialize_map(Keys)
+    }
+}
+
+fn blocks(text: &str, level: usize) -> Option<Vec<(String, Range<usize>)>> {
+    let mut opts = options(text.len());
+    opts.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::PassThrough;
+    let Locations(keys) = serde_saphyr::from_str_with_options(text, opts).ok()?;
+    let offsets: Vec<_> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect();
+    let mut result = Vec::with_capacity(keys.len());
+    let mut end = text.len();
+    for key in keys.into_iter().rev() {
+        let line = key.referenced.line() as usize;
+        let start = *offsets.get(line.checked_sub(1)?)?;
+        let raw = text.get(start..end)?;
+        if raw.is_empty()
+            || raw.bytes().take_while(|b| *b == b' ').count() != level * 2
+            || raw.trim_start().starts_with('{')
+        {
+            return None;
+        }
+        result.push((key.value, start..end));
+        end = start;
+    }
+    result.reverse();
+    Some(result)
+}
+
+fn header_end(text: &str) -> Option<usize> {
+    let end = text.find('\n')? + 1;
+    let header = text[..end]
+        .split_once(" #")
+        .map_or(&text[..end], |(key, _)| key);
+    header.trim_end().ends_with(':').then_some(end)
+}
+
+// Only independent block entries may be removed. The strict parser checks both
+// copies separately, including nested keys, then checks the whole edited file.
+pub(crate) fn parse_for_repair(text: &str) -> Result<Lockfile, LockfileError> {
+    let error = match Lockfile::parse(text) {
+        Err(error @ LockfileError::Parse(_)) => error,
+        result => return result,
+    };
+    let bom = text.len() - text.trim_start_matches('\u{feff}').len();
+    let mut removals = Vec::new();
+    for doc in document_ranges(&text[bom..]) {
+        let start = bom + doc.start;
+        let raw = &text[start..bom + doc.end];
+        let Some(fields) = blocks(raw, 0) else {
+            continue;
+        };
+        for (section, field) in fields {
+            if !matches!(section.as_str(), "packages" | "snapshots") {
+                continue;
+            }
+            let field_text = &raw[field.clone()];
+            let Some(header) = header_end(field_text) else {
+                continue;
+            };
+            let body = &field_text[header..];
+            let Some(entries) = blocks(body, 1) else {
+                continue;
+            };
+            let mut seen = BTreeMap::<String, Range<usize>>::new();
+            for (key, range) in entries {
+                if let Some(first) = seen.get(&key) {
+                    let parse = |range: Range<usize>| {
+                        let raw = &body[range];
+                        serde_saphyr::from_str_with_options::<Value>(raw, options(raw.len()))
+                    };
+                    if parse(first.clone())? != parse(range.clone())? {
+                        return Err(LockfileError::ResolutionRequired {
+                            path: vec![section.clone(), key],
+                            message: "duplicate records have different contents".into(),
+                            request: None,
+                        });
+                    }
+                    let offset = start + field.start + header;
+                    removals.push(offset + range.start..offset + range.end);
+                } else {
+                    seen.insert(key, range);
+                }
+            }
+        }
+    }
+    if removals.is_empty() {
+        return Err(error);
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in removals {
+        output.push_str(&text[cursor..range.start]);
+        cursor = range.end;
+    }
+    output.push_str(&text[cursor..]);
+    Lockfile::try_from(output)
+}
+
+pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, LockfileError> {
+    let text = &lock.sources[0].text;
+    let bom = text.len() - text.trim_start_matches('\u{feff}').len();
+    // A project is last when a separate package-manager environment is present.
+    let range = document_ranges(&text[bom..]).pop().expect("parsed project");
+    let start = bom + range.start;
+    let end = bom + range.end;
+    let raw = &text[start..end];
+    let mut output = String::with_capacity(text.len());
+    output.push_str(&text[..start]);
+    let before = lock.project().expect("parsed project");
+    let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    if !edit_map(&mut output, raw, before, after, &mut Vec::new(), eol) {
+        return Err(LockfileError::InvalidDocument(
+            "cannot isolate the changed project mapping in the original YAML".into(),
+        ));
+    }
+    output.push_str(&text[end..]);
+    let result = Lockfile::try_from(output)?;
+    if result.project() != Some(after)
+        || result.document(DocumentKind::Environment) != lock.environment()
+        || !crate::manifest::same_override_order(after, result.project().expect("verified project"))
+    {
+        return Err(LockfileError::OutputMismatch);
+    }
+    Ok(result)
+}
+
+fn edit_map<'a>(
+    out: &mut String,
+    raw: &str,
+    before: &Value,
+    after: &'a Value,
+    path: &mut Vec<&'a str>,
+    eol: &str,
+) -> bool {
+    let (Some(old), Some(new)) = (before.as_object(), after.as_object()) else {
+        return false;
+    };
+    if raw.trim_start().starts_with('{') {
+        return edit_flow(out, raw, old, new).is_some();
+    }
+    let Some(entries) = blocks(raw, path.len()) else {
+        return false;
+    };
+    if entries.is_empty()
+        || entries.len() != old.len()
+        || entries.iter().any(|(key, _)| !old.contains_key(key))
+    {
+        return false;
+    }
+    out.push_str(&raw[..entries[0].1.start]);
+    let mut additions: Vec<_> = new.keys().filter(|k| !old.contains_key(*k)).collect();
+    let order = |a: &str, b: &str| {
+        if path.is_empty() {
+            yaml::root_order(a, b)
+        } else {
+            a.cmp(b)
+        }
+    };
+    additions.sort_by(|a, b| order(a, b));
+    let mut additions = additions.into_iter().peekable();
+    let top = path.is_empty();
+    let spaced = top || (path.len() == 1 && super::SECTIONS.contains(&path[0]));
+    for (key, range) in entries {
+        while let Some(k) = additions.next_if(|k| {
+            if top {
+                yaml::root_order(k, &key).is_lt()
+            } else {
+                k.as_str() < key.as_str()
+            }
+        }) {
+            insert(out, path, k, &new[k], eol, spaced);
+        }
+        let Some((name, value)) = new.get_key_value(&key) else {
+            continue;
+        };
+        let source = &raw[range];
+        if old[&key] == *value {
+            out.push_str(source);
+            continue;
+        }
+        if let Some(header) = header_end(source)
+            && !value.as_object().is_none_or(Map::is_empty)
+        {
+            let offset = out.len();
+            out.push_str(&source[..header]);
+            path.push(name);
+            let edited = edit_map(out, &source[header..], &old[&key], value, path, eol);
+            path.pop();
+            if edited {
+                continue;
+            }
+            out.truncate(offset);
+        }
+        if let Some((start, _)) = source.match_indices('{').next()
+            && let (Some(old), Some(new)) = (old[&key].as_object(), value.as_object())
+        {
+            let saved = out.len();
+            out.push_str(&source[..start]);
+            if edit_flow(out, &source[start..], old, new).is_some() {
+                continue;
+            }
+            out.truncate(saved);
+        }
+        if value.is_string()
+            && old[&key].is_string()
+            && let Ok(map) = serde_saphyr::from_str::<BTreeMap<String, Spanned<String>>>(source)
+            && let Some(span) = map.get(&key).map(|v| v.referenced.span())
+            && let (Some(start), Some(len)) = (span.byte_offset(), span.byte_len())
+            && let Some(token) = source.get(start as usize..(start + len) as usize)
+            && serde_saphyr::from_str::<String>(token).is_ok_and(|v| old[&key] == v)
+        {
+            out.push_str(&source[..start as usize]);
+            out.push_str(&yaml::scalar(value.as_str().expect("string pin")));
+            out.push_str(&source[(start + len) as usize..]);
+            continue;
+        }
+        let end = source.trim_end_matches(['\r', '\n']).len();
+        write(out, path, name, value, eol);
+        out.push_str(&source[end..]);
+    }
+    for k in additions {
+        if !out.ends_with(eol) {
+            out.push_str(eol);
+        }
+        if spaced && !out.ends_with(&format!("{eol}{eol}")) {
+            out.push_str(eol);
+        }
+        insert(out, path, k, &new[k], eol, false);
+    }
+    true
+}
+
+// Flow mappings (including JSON lockfiles) retain each unchanged pair. The
+// parser locates quoted keys, so commas and colons in a key or value are data.
+fn edit_flow(
+    out: &mut String,
+    raw: &str,
+    old: &Map<String, Value>,
+    new: &Map<String, Value>,
+) -> Option<()> {
+    let Locations(keys) = serde_saphyr::from_str_with_options(raw, options(raw.len())).ok()?;
+    let close = raw.rfind('}')?;
+    let mut entries = Vec::new();
+    for key in keys {
+        let span = key.referenced.span();
+        let start = span.byte_offset()? as usize;
+        let end = start + span.byte_len()? as usize;
+        let rest = raw.get(end..)?.trim_start().strip_prefix(':')?.trim_start();
+        entries.push((key.value, start, raw.len() - rest.len()));
+    }
+    if entries.len() != old.len() {
+        return None;
+    }
+    let mut result = String::new();
+    let first = entries.first().map_or(close, |e| e.1);
+    result.push_str(raw.get(..first)?);
+    let mut written = false;
+    let mut separator = ", ";
+    let mut trailing = "";
+    for (i, (name, start, value_start)) in entries.iter().enumerate() {
+        let end = entries.get(i + 1).map_or(close, |e| e.1);
+        let body = raw.get(*value_start..end)?;
+        let token = body
+            .trim_end()
+            .strip_suffix(',')
+            .unwrap_or(body.trim_end())
+            .trim_end();
+        if let Some(next) = new.get(name) {
+            if written {
+                result.push_str(separator);
+            }
+            result.push_str(raw.get(*start..*value_start)?);
+            if &old[name] == next {
+                result.push_str(token);
+            } else if let (Some(old), Some(new)) = (old[name].as_object(), next.as_object()) {
+                edit_flow(&mut result, token, old, new)?;
+            } else {
+                result.push_str(&serde_json::to_string(next).ok()?);
+            }
+            written = true;
+        }
+        let suffix = &body[token.len()..];
+        if i + 1 == entries.len() {
+            trailing = suffix;
+        } else {
+            separator = suffix;
+        }
+    }
+    for (key, value) in new.iter().filter(|(k, _)| !old.contains_key(*k)) {
+        if written {
+            result.push_str(", ");
+        }
+        result.push_str(&serde_json::to_string(key).ok()?);
+        result.push_str(": ");
+        result.push_str(&serde_json::to_string(value).ok()?);
+        written = true;
+    }
+    result.push_str(if written {
+        trailing
+    } else {
+        trailing.trim_start_matches(',')
+    });
+    result.push_str(raw.get(close..)?);
+    out.push_str(&result);
+    Some(())
+}
+
+fn insert(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str, spaced: bool) {
+    write(out, path, name, value, eol);
+    out.push_str(eol);
+    if spaced {
+        out.push_str(eol);
+    }
+}
+
+fn write(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str) {
+    let mut entry = String::new();
+    if path.len() <= 1 {
+        yaml::write_entry(&mut entry, path.first().copied(), name, value);
+    } else {
+        entry.push_str(&"  ".repeat(path.len()));
+        yaml::render_entry_into(&mut entry, name, value, path.len());
+    }
+    if eol == "\n" {
+        out.push_str(&entry);
+    } else {
+        out.push_str(&entry.replace('\n', eol));
+    }
+}

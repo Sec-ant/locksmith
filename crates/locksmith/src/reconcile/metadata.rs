@@ -1,0 +1,373 @@
+//! Construct the project-wide settings, catalogs, checksums and patch records.
+use super::{MergeContext, alias, missing};
+use crate::{LockfileError, Value, graph, manifest, peer};
+use serde_json::json;
+
+pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Option<&str>) -> bool {
+    let range = alias(specifier).map_or(specifier, |(_, range)| range);
+    match range.parse::<node_semver::Range>() {
+        Ok(wanted) => version
+            .parse::<node_semver::Version>()
+            .is_ok_and(|pin| range == "*" || pin.satisfies(&wanted)),
+        Err(_) => recorded == Some(specifier),
+    }
+}
+
+/// pnpm can retain distinct catalog and importer pins within the declared range.
+pub(crate) fn catalog_consumer_fits(
+    name: &str,
+    spec: &str,
+    reference: &str,
+    entry: Option<&Value>,
+) -> bool {
+    if let Some(entry) = entry {
+        let Some(version) = entry["version"].as_str() else {
+            return false;
+        };
+        if entry["specifier"] != spec || !catalog_version_fits(spec, version, Some(spec)) {
+            return false;
+        }
+        if super::catalog_pin_matches(name, Some(spec), version, reference) {
+            return true;
+        }
+    }
+    super::range_accepts(name, spec, reference)
+}
+
+pub(crate) fn resolve(
+    docs: [&Value; 3],
+    order: [usize; 3],
+    context: &MergeContext<'_>,
+) -> Result<Value, LockfileError> {
+    let structural = [
+        "importers",
+        "packages",
+        "snapshots",
+        "catalogs",
+        "overrides",
+        "patchedDependencies",
+        "time",
+    ];
+    let mut output = Value::Object(
+        docs[order[0]]
+            .as_object()
+            .expect("parsed document")
+            .iter()
+            .filter(|(field, _)| !structural.contains(&field.as_str()))
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+    );
+    let config = context.configuration;
+    if output
+        .get("settings")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(missing(&["settings"], "expected mapping"));
+    }
+    if output.get("settings").is_none() {
+        output["settings"] = json!({});
+    }
+    output["settings"]["autoInstallPeers"] = json!(config.resolution.lock.auto_install_peers);
+    if config.resolution.lock.project_scoped_optional_peers
+        && config.resolution.dedupe_peer_dependents
+    {
+        output["settings"]["projectScopedOptionalPeers"] = json!(true);
+    } else {
+        output["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("projectScopedOptionalPeers");
+    }
+    if config.resolution.lock.dedupe_peers {
+        output["settings"]["dedupePeers"] = json!(true);
+    } else {
+        output["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dedupePeers");
+    }
+    output["settings"]["excludeLinksFromLockfile"] =
+        json!(config.resolution.lock.exclude_links_from_lockfile);
+    for (field, lock_field, value, source_values) in [
+        (
+            "packageExtensions",
+            "packageExtensionsChecksum",
+            &config.resolution.package_extensions,
+            context
+                .configurations
+                .map(|c| &c.resolution.package_extensions),
+        ),
+        (
+            "ignoredOptionalDependencies",
+            "ignoredOptionalDependencies",
+            &config.resolution.ignored_optional_dependencies,
+            context
+                .configurations
+                .map(|c| &c.resolution.ignored_optional_dependencies),
+        ),
+        (
+            "pnpmfileChecksum",
+            "pnpmfileChecksum",
+            &config.resolution.pnpmfile_checksum,
+            context
+                .configurations
+                .map(|c| &c.resolution.pnpmfile_checksum),
+        ),
+    ] {
+        let source = order.iter().find(|&&side| {
+            if source_values[side] != value {
+                return false;
+            }
+            if field == "packageExtensions"
+                && let Some(encoding) = config.extension_checksum
+                && let Some(hash) = docs[side].get(lock_field).and_then(Value::as_str)
+            {
+                return (encoding == crate::ExtensionChecksum::Sha256)
+                    == hash.starts_with("sha256-");
+            }
+            true
+        });
+        let recorded = if let Some(source) = source {
+            docs[*source].get(lock_field).cloned()
+        } else if field == "packageExtensions" {
+            match value
+                .as_ref()
+                .filter(|v| !v.is_null() && v.as_object().is_none_or(|m| !m.is_empty()))
+            {
+                None => None,
+                Some(value) => Some(Value::String(
+                    order
+                        .iter()
+                        .find_map(|side| {
+                            crate::checksum::extensions(
+                                value,
+                                source_values[*side].as_ref()?,
+                                docs[*side].get(lock_field)?.as_str()?,
+                                config.extension_checksum,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            missing(
+                                &[field],
+                                "no source checksum verifies the configuration encoding",
+                            )
+                        })?,
+                )),
+            }
+        } else {
+            return Err(missing(
+                &[field],
+                "no input contains metadata for the final configuration",
+            ));
+        };
+        if let Some(value) = recorded {
+            output[lock_field] = value;
+        } else {
+            output.as_object_mut().unwrap().remove(lock_field);
+        }
+    }
+    let catalogs = &config.catalogs;
+    let mut versions = std::array::from_fn::<_, 3, _>(|_| None);
+    for (catalog, entries) in catalogs {
+        for (name, specifier) in entries {
+            let specifier = specifier.as_str();
+            let entry = order
+                .iter()
+                .find_map(|side| {
+                    let entry = docs[*side].get("catalogs")?.get(catalog)?.get(name)?;
+                    let version = entry.get("version")?.as_str()?;
+                    if entry
+                        .get("specifier")
+                        .and_then(Value::as_str)
+                        .and_then(alias)
+                        .map(|(n, _)| n)
+                        != alias(specifier).map(|(n, _)| n)
+                    {
+                        return None;
+                    }
+                    catalog_version_fits(specifier, version, entry["specifier"].as_str())
+                        .then(|| json!({"specifier":specifier,"version":version}))
+                })
+                .or_else(|| {
+                    let (actual, range) = alias(specifier).unwrap_or((name, specifier));
+                    let range = range.parse::<node_semver::Range>().ok()?;
+                    order.iter().find_map(|&side| {
+                        let index = versions[side].get_or_insert_with(|| {
+                            let mut index = std::collections::HashMap::<_, Vec<_>>::new();
+                            for key in graph::section(docs[side], "packages")
+                                .into_iter()
+                                .flat_map(|m| m.keys())
+                            {
+                                if let Some((name, version)) = key.rsplit_once('@') {
+                                    index.entry(name).or_default().push(version);
+                                }
+                            }
+                            index
+                        });
+                        let version = index
+                            .get(actual)?
+                            .iter()
+                            .filter_map(|&v| {
+                                let parsed = v.parse::<node_semver::Version>().ok()?;
+                                parsed.satisfies(&range).then_some((parsed, v))
+                            })
+                            .max_by(|(a, _), (b, _)| a.cmp(b))
+                            .map(|(_, v)| v)?;
+                        Some(json!({"specifier":specifier,"version":version}))
+                    })
+                })
+                .or_else(|| {
+                    super::published::catalog_version(context.registry, name, specifier)
+                        .map(|version| json!({"specifier":specifier,"version":version}))
+                });
+            if let Some(entry) = entry {
+                if output.get("catalogs").is_none() {
+                    output["catalogs"] = json!({});
+                }
+                if output["catalogs"].get(catalog).is_none() {
+                    output["catalogs"][catalog] = json!({});
+                }
+                output["catalogs"][catalog][name] = entry;
+            }
+        }
+    }
+    if let Some(rules) = effective_overrides(config, context.manifests.get("."))? {
+        output["overrides"] = rules;
+    }
+    if let Some(patches) = &config.patches {
+        output["patchedDependencies"] = json!({});
+        for (name, path) in patches {
+            let path = path.as_str();
+            let contents = context.patches.get(path).ok_or_else(|| {
+                missing(
+                    &["patchedDependencies", name],
+                    format!("missing patch contents: {path}"),
+                )
+            })?;
+            let hash = peer::patch_hash(contents, config.patch_encoding);
+            output["patchedDependencies"][name] = match config.patch_encoding {
+                crate::PatchEncoding::Sha256 => Value::String(hash),
+                crate::PatchEncoding::Sha256WithPath | crate::PatchEncoding::Md5Base32WithPath => {
+                    json!({"hash": hash, "path": path})
+                }
+            };
+        }
+    }
+    Ok(output)
+}
+
+/// pnpm records publication times for direct dependency locators only.
+pub(super) fn publish_times(output: &mut Value, docs: [&Value; 3], order: [usize; 3]) {
+    if !docs.iter().any(|doc| graph::section(doc, "time").is_some()) {
+        return;
+    }
+    let mut times = serde_json::Map::new();
+    let snapshots = graph::section(output, "snapshots");
+    for importer in graph::section(output, "importers")
+        .into_iter()
+        .flatten()
+        .map(|(_, v)| v)
+    {
+        for group in crate::manifest::GROUPS {
+            for (name, dep) in graph::section(importer, group).into_iter().flatten() {
+                if let Some(version) = dep["version"].as_str().filter(|v| !v.starts_with("link:")) {
+                    let key = graph::snapshot_key(name, version, snapshots);
+                    let key = graph::package_key(&key);
+                    if !times.contains_key(key)
+                        && let Some(time) =
+                            order.iter().find_map(|i| docs[*i].get("time")?.get(key))
+                    {
+                        times.insert(key.into(), time.clone());
+                    }
+                }
+            }
+        }
+    }
+    if !times.is_empty() {
+        output["time"] = Value::Object(times);
+    }
+}
+
+/// pnpm records a catalog snapshot only for a direct dependency resolved
+/// through that catalog. An override may replace the catalog specifier.
+pub(super) fn retain_used_catalogs(output: &mut Value) {
+    let Some(mut catalogs) = output.as_object_mut().expect("project").remove("catalogs") else {
+        return;
+    };
+    let mut used = std::collections::HashSet::new();
+    for (_, importer) in graph::section(output, "importers").into_iter().flatten() {
+        for group in manifest::GROUPS {
+            for (name, dep) in graph::section(importer, group).into_iter().flatten() {
+                if let Some(catalog) = dep["specifier"]
+                    .as_str()
+                    .and_then(|s| s.strip_prefix("catalog:"))
+                {
+                    used.insert((
+                        if catalog.is_empty() {
+                            "default"
+                        } else {
+                            catalog
+                        },
+                        name.as_str(),
+                    ));
+                }
+            }
+        }
+    }
+    let groups = catalogs.as_object_mut().expect("resolved catalogs");
+    groups.retain(|catalog, entries| {
+        let entries = entries.as_object_mut().expect("resolved catalog entries");
+        entries.retain(|name, _| used.contains(&(catalog.as_str(), name.as_str())));
+        !entries.is_empty()
+    });
+    if !groups.is_empty() {
+        output["catalogs"] = catalogs;
+    }
+}
+
+/// Resolve catalog and root-manifest references while preserving selector order.
+pub(crate) fn effective_overrides(
+    config: &crate::WorkspaceConfig,
+    root: Option<&Value>,
+) -> Result<Option<Value>, LockfileError> {
+    let Some(overrides) = &config.overrides else {
+        return Ok(None);
+    };
+    let mut rules = serde_json::Map::new();
+    for (selector, replacement) in overrides {
+        let mut value = replacement.as_str();
+        if let Some(name) = value.strip_prefix('$') {
+            value = root
+                .and_then(|m| {
+                    ["optionalDependencies", "dependencies", "devDependencies"]
+                        .into_iter()
+                        .find_map(|g| m.get(g)?.get(name)?.as_str())
+                })
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced root dependency",
+                    )
+                })?;
+        }
+        if let Some(catalog) = value.strip_prefix("catalog:") {
+            let (_, name, _) = manifest::override_selector(selector);
+            value = config
+                .catalogs
+                .get(if catalog.is_empty() {
+                    "default"
+                } else {
+                    catalog
+                })
+                .and_then(|c| c.get(name))
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced catalog declaration",
+                    )
+                })?;
+        }
+        rules.insert(selector.clone(), Value::from(value));
+    }
+    Ok(Some(Value::Object(rules)))
+}

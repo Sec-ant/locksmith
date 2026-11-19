@@ -1,0 +1,12 @@
+---
+config:
+  flowchart:
+    nodeSpacing: 20
+    rankSpacing: 36
+---
+flowchart TB
+  files["pnpm-lock.yaml<br/>package.json<br/>pnpm-workspace.yaml"] --> cli["locksmith CLI"]
+  git["Git"] -.-> cli
+  registry["registry"] -.-> cli
+  cli --> core["locksmith · Rust API<br/>merge · converge · repair"]
+  app["app.rs"] --> core

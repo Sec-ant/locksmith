@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and check the native CLI
+        shell: bash
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 build --release --locked --bin locksmith --target "$TARGET"
+          cd "target/$TARGET/release"
+          test "$(./locksmith --version)" = "locksmith ${GITHUB_REF_NAME#v}"
+          tar -czf "$GITHUB_WORKSPACE/locksmith-$TARGET.tar.gz" locksmith
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: locksmith-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-homebrew
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release and update its Homebrew formula
+        shell: bash
+        run: |
+          cd dist
+          sha256sum locksmith-*.tar.gz > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          cd ..
+          mkdir -p Formula
+          visibility=$(gh repo view --json visibility --jq '.visibility | ascii_downcase')
+          sh scripts/homebrew-formula.sh "${GITHUB_REF_NAME#v}" dist/SHA256SUMS "$visibility" > Formula/locksmith.rb
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          else
+            gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --output - | cmp - dist/SHA256SUMS
+          fi
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [[ "$latest" == "$GITHUB_REF_NAME" ]]; then
+            git add Formula/locksmith.rb
+            if ! git diff --cached --quiet; then
+              git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "build: update Homebrew formula to $GITHUB_REF_NAME"
+              git pull --rebase
+              git push
+            fi
+          fi

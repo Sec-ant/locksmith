@@ -1,0 +1,30 @@
+[package]
+name = "locksmith-cli"
+description = "Command-line interface for merging and converging pnpm lockfiles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "locksmith"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+bpaf = { version = "0.9.29", features = ["derive"] }
+locksmith = { path = "../locksmith" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["raw_value"] }
+serde-saphyr.workspace = true
+node-semver.workspace = true
+glob.workspace = true
+tempfile.workspace = true
+ureq = "3"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+base64.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+mimalloc = { version = "0.1.52", features = ["v2", "no_thp"] }
