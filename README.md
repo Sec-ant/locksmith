@@ -11,7 +11,7 @@ brew tap sec-ant/locksmith https://github.com/Sec-ant/locksmith.git
 brew install sec-ant/locksmith/locksmith
 ```
 
-For a private checkout, sign in with `gh auth login` and run `gh auth setup-git` before tapping. To build from source, use Rust 1.89 or later.
+To build from source, use Rust 1.89 or later.
 
 ```sh
 cargo install --locked --path crates/locksmith-cli
