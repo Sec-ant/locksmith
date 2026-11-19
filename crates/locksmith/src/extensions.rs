@@ -1,26 +1,54 @@
 //! Repair ordinary dependencies declared by a package extension when the final
 //! workspace overrides their version independently of the published range.
-use std::{borrow::Cow, collections::HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::{LockfileError, Value, WorkspaceConfig, config, graph, manifest, peer, reconcile};
 
-pub(super) fn repair(
-    doc: &mut Cow<'_, Value>,
+#[derive(Default)]
+pub(crate) struct Plan {
+    edges: Vec<(String, &'static str, String, String)>,
+    records: Vec<(&'static str, String, Value)>,
+}
+
+impl Plan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// Returns whether the plan added records whose own constraints need checking.
+    pub(crate) fn apply(self, doc: &mut Value) -> bool {
+        let added = !self.records.is_empty();
+        for (section, key, value) in self.records {
+            doc[section][key] = value;
+        }
+        for (key, group, name, pin) in self.edges {
+            doc["snapshots"][key][group][name] = pin.into();
+        }
+        added
+    }
+}
+
+/// Find exact, consumer-specific corrections. An installed lock can also
+/// witness records discarded when convergence selected a baseline subtree.
+pub(crate) fn plan(
+    doc: &Value,
     cfg: &WorkspaceConfig,
-) -> Result<bool, LockfileError> {
+    installed: Option<&Value>,
+) -> Result<Plan, LockfileError> {
+    let mut plan = Plan::default();
     let Some(extensions) = cfg
         .resolution
         .package_extensions
         .as_ref()
         .and_then(Value::as_object)
     else {
-        return Ok(false);
+        return Ok(plan);
     };
     if extensions.is_empty()
         || cfg.resolution.pnpmfile_checksum.is_some()
         || graph::section(doc, "overrides").is_none_or(|v| v.is_empty())
     {
-        return Ok(false);
+        return Ok(plan);
     }
 
     let mut rules: HashMap<_, Vec<_>> = HashMap::new();
@@ -79,10 +107,10 @@ pub(super) fn repair(
         }
     }
     if constraints.is_empty() {
-        return Ok(false);
+        return Ok(plan);
     }
-    let peers = peer::Merger::new([Some(doc), None, None]);
-    let mut edits = Vec::new();
+    let peers = peer::Merger::new([Some(doc), installed, None]);
+    let mut needed = BTreeSet::new();
     for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
         let Some(targets) = constraints.get(graph::package_key(key)) else {
             continue;
@@ -98,6 +126,12 @@ pub(super) fn repair(
             }
             let pin = peers
                 .exact_override([key], cfg, name, spec)
+                .or_else(|| {
+                    let donor = installed?;
+                    let (_, selected) = graph::dependency(donor["snapshots"].get(key)?, name)?;
+                    let pin = peers.exact_override([key, key], cfg, name, spec)?;
+                    (pin == selected).then_some(pin)
+                })
                 .ok_or_else(|| {
                     reconcile::missing(
                         &["snapshots", key, name],
@@ -106,6 +140,21 @@ pub(super) fn repair(
                         ),
                     )
                 })?;
+            if let Some(donor) = installed
+                && doc["snapshots"]
+                    .get(graph::snapshot_key(
+                        name,
+                        &pin,
+                        graph::section(doc, "snapshots"),
+                    ))
+                    .is_none()
+            {
+                needed.insert(graph::snapshot_key(
+                    name,
+                    &pin,
+                    graph::section(donor, "snapshots"),
+                ));
+            }
             changes.push((edge.map_or("dependencies", |(g, _)| g), *name, pin));
         }
         for (_, name, pin) in &changes {
@@ -125,38 +174,78 @@ pub(super) fn repair(
                         continue;
                     }
                     if let Some(reference) = value.as_str() {
-                        verify_provider(doc, key, sibling, reference, name, pin)?;
+                        verify_provider(
+                            [doc, installed.unwrap_or(doc)],
+                            key,
+                            sibling,
+                            reference,
+                            name,
+                            pin,
+                        )?;
                     }
                 }
             }
             for (_, sibling, reference) in &changes {
                 if sibling != name {
-                    verify_provider(doc, key, sibling, reference, name, pin)?;
+                    verify_provider(
+                        [doc, installed.unwrap_or(doc)],
+                        key,
+                        sibling,
+                        reference,
+                        name,
+                        pin,
+                    )?;
                 }
             }
         }
-        edits.extend(
+        plan.edges.extend(
             changes
                 .into_iter()
                 .map(|(group, name, pin)| (key.clone(), group, name.to_owned(), pin)),
         );
     }
-    let changed = !edits.is_empty();
-    for (key, group, name, pin) in edits {
-        doc.to_mut()["snapshots"][key][group][name] = pin.into();
+    if !needed.is_empty() {
+        let donor = installed.expect("missing targets came from the installed lock");
+        let closure = graph::closure_from_edges(donor, &serde_json::json!({}), &needed)?;
+        for (section, keys) in [
+            ("packages", closure.packages),
+            ("snapshots", closure.snapshots),
+        ] {
+            for key in keys {
+                let record = &donor[section][&key];
+                match doc[section].get(&key) {
+                    Some(existing) if existing != record => {
+                        return Err(reconcile::missing(
+                            &[section, &key],
+                            "the installed override requires a different record for a shared identity",
+                        ));
+                    }
+                    Some(_) => (),
+                    None => plan.records.push((section, key, record.clone())),
+                }
+            }
+        }
     }
-    Ok(changed)
+    Ok(plan)
 }
 
 fn verify_provider(
-    doc: &Value,
+    [primary, donor]: [&Value; 2],
     parent: &str,
     sibling: &str,
     reference: &str,
     name: &str,
     pin: &str,
 ) -> Result<(), LockfileError> {
-    let key = graph::snapshot_key(sibling, reference, graph::section(doc, "snapshots"));
+    let primary_key = graph::snapshot_key(sibling, reference, graph::section(primary, "snapshots"));
+    let (doc, key) = if primary["snapshots"].get(&primary_key).is_some() {
+        (primary, primary_key)
+    } else {
+        (
+            donor,
+            graph::snapshot_key(sibling, reference, graph::section(donor, "snapshots")),
+        )
+    };
     let body = &doc["snapshots"][&key];
     let declares_peer = doc["packages"][graph::package_key(&key)]["peerDependencies"]
         .get(name)

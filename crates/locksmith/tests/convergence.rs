@@ -1198,3 +1198,61 @@ fn an_exact_override_restores_the_required_extension_in_each_consumers_peer_scop
         matches!(converge(&base,&installed,&[],options), Err(LockfileError::ResolutionRequired { path, .. }) if path.last().is_some_and(|n| n=="addon"))
     );
 }
+
+#[test]
+fn an_unchanged_override_keeps_the_installed_correction_and_its_required_subtree() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+
+    let extension = json!({"host@1.0.0":{"dependencies":{"addon":"1.0.0"}}});
+    let overrides = json!({"host>addon":"2.0.0"});
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"overrides":overrides,"packageExtensions":extension}))
+            .unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&config),
+        configuration: Some(&config),
+        registry: None,
+    };
+    let make = |installed: bool| {
+        let drift = if installed { "1.1.0" } else { "1.0.0" };
+        let (addon, body) = if installed {
+            ("2.0.0", json!({"dependencies":{"leaf":"3.0.0"}}))
+        } else {
+            ("1.0.0", json!({}))
+        };
+        let mut snaps = json!({"host@1.0.0":{"dependencies":{"addon":addon,"drift":drift}},
+            format!("addon@{addon}"):body,format!("drift@{drift}"):{}});
+        if installed {
+            snaps["leaf@3.0.0"] = json!({});
+        }
+        let source = lock(
+            json!({".":{"dependencies":{"host":{"specifier":"1.0.0","version":"1.0.0"}}}}),
+            snaps,
+        );
+        let mut doc = source.project().unwrap().clone();
+        doc["overrides"] = overrides.clone();
+        doc["packageExtensionsChecksum"] =
+            format!("{:x}", Md5::digest(extension.to_string())).into();
+        parse(doc)
+    };
+    let base = make(false);
+    let installed = make(true);
+    let result = converge(&base, &installed, &[], options).unwrap();
+    assert_eq!(
+        result.project().unwrap()["snapshots"],
+        json!({
+            "host@1.0.0":{"dependencies":{"addon":"2.0.0","drift":"1.0.0"}},
+            "addon@2.0.0":{"dependencies":{"leaf":"3.0.0"}},
+            "drift@1.0.0":{}, "leaf@3.0.0":{}
+        })
+    );
+    result.validate().unwrap();
+    assert_eq!(
+        converge(&base, &result, &[], options)
+            .unwrap()
+            .to_yaml()
+            .unwrap(),
+        result.to_yaml().unwrap()
+    );
+}

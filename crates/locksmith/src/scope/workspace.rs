@@ -11,8 +11,8 @@ use reconcile::missing;
 const EDGES: [&str; 2] = ["dependencies", "optionalDependencies"];
 mod bindings;
 mod rules;
-pub(super) use rules::RootChoice;
 use rules::RootChoices;
+pub(super) use rules::{RootChoice, checked_overrides};
 pub(super) use rules::{check_installed_rules, override_names};
 
 /// Combining inputs may require incompatible identities even when each input is valid.
@@ -49,7 +49,7 @@ pub(super) fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String
     })
 }
 
-fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(), LockfileError> {
+pub(super) fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(), LockfileError> {
     let extensions = cfg
         .resolution
         .package_extensions

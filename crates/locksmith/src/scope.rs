@@ -64,6 +64,46 @@ pub fn converge(
     changes: &[ManifestChange<'_>],
     options: ConvergeOptions<'_>,
 ) -> Result<Lockfile, LockfileError> {
+    let mut result = select(baseline, candidate, changes, options)?;
+    if let Some(config) = options.configuration {
+        let mut plan = crate::extensions::plan(
+            result.project().expect("converged project"),
+            config,
+            candidate.project(),
+        )?;
+        if !plan.is_empty() {
+            let project = std::sync::Arc::make_mut(
+                result
+                    .documents
+                    .get_mut(&crate::DocumentKind::Project)
+                    .expect("converged project"),
+            );
+            workspace::checked_checksum(project, config)?;
+            let root = changes
+                .iter()
+                .find(|change| change.importer == ".")
+                .and_then(|change| change.after);
+            workspace::checked_overrides(project, config, root)?;
+            while plan.apply(project) {
+                plan = crate::extensions::plan(project, config, candidate.project())?;
+            }
+            graph::prune_scoped(
+                project,
+                crate::DocumentKind::Project,
+                baseline.project().expect("baseline project"),
+                Some(config),
+            )?;
+        }
+    }
+    Ok(result)
+}
+
+fn select(
+    baseline: &Lockfile,
+    candidate: &Lockfile,
+    changes: &[ManifestChange<'_>],
+    options: ConvergeOptions<'_>,
+) -> Result<Lockfile, LockfileError> {
     let configured = if let Some(before) = options.baseline_configuration {
         let after = options.configuration.ok_or_else(|| {
             crate::reconcile::missing(

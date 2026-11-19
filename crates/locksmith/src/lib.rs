@@ -26,6 +26,7 @@ mod checksum;
 mod config;
 mod diagnostics;
 mod error;
+mod extensions;
 mod graph;
 mod lockfile;
 mod manifest;

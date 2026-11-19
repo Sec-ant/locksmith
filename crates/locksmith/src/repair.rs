@@ -1,6 +1,5 @@
 //! Repair an existing lock without preferring an earlier branch's legal pins.
 mod evidence;
-mod extensions;
 mod importers;
 mod peers;
 
@@ -86,7 +85,9 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
         }
         if !checked_extensions {
             checked_extensions = true;
-            if extensions::repair(&mut result, context.configuration)? {
+            let plan = crate::extensions::plan(&result, context.configuration, None)?;
+            if !plan.is_empty() {
+                plan.apply(result.to_mut());
                 continue;
             }
         }

@@ -20,7 +20,7 @@ fn catalog_name(spec: &str) -> Option<&str> {
         .map(|s| if s.is_empty() { "default" } else { s })
 }
 
-pub(super) fn checked_overrides(
+pub(in crate::scope) fn checked_overrides(
     doc: &Value,
     config: &WorkspaceConfig,
     root: Option<&Value>,
