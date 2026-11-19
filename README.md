@@ -72,23 +72,23 @@ If `git status` shows the lockfile as unmerged, resolve any project files Locksm
 
 ## Performance
 
-These offline benchmarks replayed one monorepo’s history on x86-64 Linux. It had 359–398 workspace projects and lockfiles of about 8–11 MiB. The release CLI ran with a warm filesystem cache. Timings include successful runs and refusals. Peak memory is resident set size (RSS) for the CLI and its child processes.
+These offline benchmarks replayed one monorepo’s history on x86-64 Linux. It had 359–398 workspace projects and lockfiles of about 8–11 MiB. The table reports Locksmith 0.1.1 with a warm filesystem cache. Each input ran once per release, alternating which version ran first on the same CPUs. Times include successful runs and refusals. P95 is the 95th percentile.
 
-| Operation | Cases | Median time | P95 time | Median peak RSS | P95 peak RSS |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `merge --context` | 461 | 1.41 s | 4.47 s | 261 MiB | 303 MiB |
-| `converge` | 68 | 1.74 s | 2.15 s | 231 MiB | 246 MiB |
-| `converge` with workspace rule edits | 186 | 1.57 s | 1.85 s | 213 MiB | 225 MiB |
-| `repair` | 796 | 0.86 s | 1.07 s | 280 MiB | 331 MiB |
+| Operation | Cases | Mean time | Median time | P95 time | Mean peak RSS | Median peak RSS | P95 peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `merge --context` | 461 | 1.88 s | 1.37 s | 4.28 s | 262 MiB | 260 MiB | 305 MiB |
+| `converge` after an install | 68 | 1.30 s | 1.27 s | 1.64 s | 302 MiB | 304 MiB | 328 MiB |
+| `converge` with workspace rule edits | 186 | 1.54 s | 1.63 s | 1.91 s | 300 MiB | 303 MiB | 348 MiB |
+| `repair` | 796 | 0.91 s | 0.83 s | 1.94 s | 269 MiB | 281 MiB | 331 MiB |
 
-`merge` received a prepared workspace context. The `converge` and `repair` timings include reading from Git. The 186-case sample covers 90 days of edits to catalogs, overrides, and package extensions.
+`merge` received a prepared workspace context. The other commands read the project from Git. Peak RSS includes the CLI and its live child processes, sampled together every 10 ms and checked against the operating system’s single-process peak. During `converge`, parsing the baseline lock overlaps Git reads and parsing the installed lock. The 186-case sample covers 90 days of edits to catalogs, overrides, and package extensions.
 
 We also compared `locksmith merge --context` with pnpm 10.33.2’s `install --lockfile-only` on two generated workspaces with lockfile conflicts. Each command ran 11 times offline with a warm cache, alternating which ran first. Both reproduced a clean pnpm resolution byte-for-byte.
 
 | Workspace projects | Lockfile size | Locksmith median time / peak RSS | pnpm median time / peak RSS |
 | ---: | ---: | ---: | ---: |
-| 64 | 40 KiB | 0.016 s / 8 MiB | 0.58 s / 153 MiB |
-| 384 | 248 KiB | 0.086 s / 16 MiB | 1.23 s / 196 MiB |
+| 64 | 40 KiB | 0.015 s / 8 MiB | 0.58 s / 153 MiB |
+| 384 | 248 KiB | 0.083 s / 16 MiB | 1.21 s / 196 MiB |
 
 ## Rust API
 
