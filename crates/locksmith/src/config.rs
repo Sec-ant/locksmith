@@ -237,6 +237,13 @@ pub(crate) fn string_rules(
         .transpose()
 }
 
+pub(crate) const EXTENSION_GROUPS: [&str; 4] = [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "peerDependenciesMeta",
+];
+type EffectiveExtensions<'a> = [[BTreeMap<&'a str, &'a Value>; 4]; 2];
 type ExtensionRules<'a> = Vec<(&'a str, &'a Value)>;
 
 pub(crate) struct ExtensionAddition<'a> {
@@ -324,26 +331,20 @@ impl<'a> ResolutionCompatibility<'a> {
             .map_or(&[], Vec::as_slice)
     }
 
-    fn additional_dependencies(&self, key: &str) -> Option<Vec<ExtensionAddition<'a>>> {
+    pub(crate) fn effective_extensions(&self, key: &str) -> Option<EffectiveExtensions<'a>> {
         if !self.global {
             return None;
         }
         let (name, version) = crate::graph::package_key(key).rsplit_once('@')?;
         let rules = self.extensions.get(name)?;
-        let fields = [
-            "dependencies",
-            "optionalDependencies",
-            "peerDependencies",
-            "peerDependenciesMeta",
-        ];
-        let mut effective: [[BTreeMap<&str, &Value>; 4]; 2] =
+        let mut effective: EffectiveExtensions<'a> =
             std::array::from_fn(|_| std::array::from_fn(|_| BTreeMap::new()));
         for (side, rules) in rules.iter().enumerate() {
             for (_, extension) in rules
                 .iter()
                 .filter(|(selector, _)| crate::manifest::parent_matches(selector, name, version))
             {
-                for (field, group) in fields.iter().enumerate() {
+                for (field, group) in EXTENSION_GROUPS.iter().enumerate() {
                     if let Some(values) = extension.get(*group) {
                         for (name, value) in values.as_object()? {
                             effective[side][field].entry(name).or_insert(value);
@@ -352,11 +353,16 @@ impl<'a> ResolutionCompatibility<'a> {
                 }
             }
         }
+        Some(effective)
+    }
+
+    fn additional_dependencies(&self, key: &str) -> Option<Vec<ExtensionAddition<'a>>> {
+        let effective = self.effective_extensions(key)?;
         if effective[0][2..] != effective[1][2..] {
             return None;
         }
         let mut additions = Vec::new();
-        for (field, group) in fields[..2].iter().enumerate() {
+        for (field, group) in EXTENSION_GROUPS[..2].iter().enumerate() {
             let before = &effective[0][field];
             let after = &effective[1][field];
             if before

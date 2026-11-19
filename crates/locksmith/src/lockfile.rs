@@ -14,6 +14,7 @@ pub enum DocumentKind {
 pub struct Lockfile {
     pub(crate) documents: BTreeMap<DocumentKind, Arc<Value>>,
     pub(crate) sources: Vec<Arc<Source>>,
+    pub(crate) preserve_baseline: bool,
 }
 
 /// Parse an owned YAML document, reusing its text buffer for source blocks.
@@ -25,6 +26,7 @@ impl TryFrom<String> for Lockfile {
         Ok(Self {
             documents: source.documents.clone(),
             sources: vec![source],
+            preserve_baseline: false,
         })
     }
 }
@@ -69,9 +71,16 @@ impl Lockfile {
     /// Check all importer and snapshot edges, package records and catalog pins.
     /// Local `link:` references may refer to directories outside the workspace.
     pub fn validate(&self) -> Result<(), LockfileError> {
+        self.validate_with_config(None)
+    }
+
+    pub(crate) fn validate_with_config(
+        &self,
+        config: Option<&crate::WorkspaceConfig>,
+    ) -> Result<(), LockfileError> {
         let mut issues = Vec::new();
         for (&kind, document) in &self.documents {
-            issues.extend(graph::validate(document, kind));
+            issues.extend(graph::validate_with_config(document, kind, config));
         }
         if issues.is_empty() {
             Ok(())
@@ -87,15 +96,20 @@ impl Lockfile {
     /// with the YAML serializer. Output is verified with a streaming comparison
     /// against the existing data, without building another document tree.
     pub fn to_yaml(&self) -> Result<String, LockfileError> {
-        for source in &self.sources {
+        for (i, source) in self.sources.iter().enumerate() {
             if source.documents == self.documents
                 && self.documents.iter().all(|(kind, document)| {
                     crate::manifest::same_overrides(document, &source.documents[kind])
                         && (Arc::ptr_eq(document, &source.documents[kind])
-                            || crate::source::SECTIONS
-                                .into_iter()
-                                .chain(["catalogs"])
-                                .all(|section| source.reusable_field(*kind, section)))
+                            || crate::source::SECTIONS.into_iter().chain(["catalogs"]).all(
+                                |section| {
+                                    source.reusable_field(
+                                        *kind,
+                                        section,
+                                        self.preserve_baseline && i == 0,
+                                    )
+                                },
+                            ))
                 })
             {
                 return Ok(source.text.to_string());
@@ -107,10 +121,24 @@ impl Lockfile {
                 output.push_str("---\n");
             }
             let start = output.len();
-            crate::source::render(kind, document, &self.sources, &mut output);
+            crate::source::render(
+                kind,
+                document,
+                &self.sources,
+                self.preserve_baseline,
+                &mut output,
+            );
             crate::verify::verify(&output[start..], document)?;
         }
         Ok(output)
+    }
+
+    pub(crate) fn converged_project(&self, project: Value, candidate: &Self) -> Self {
+        let mut documents = self.documents.clone();
+        documents.insert(DocumentKind::Project, Arc::new(project));
+        let mut result = Self::with_documents(documents, &[self, candidate]);
+        result.preserve_baseline = true;
+        result
     }
 
     pub(crate) fn with_documents(
@@ -125,6 +153,10 @@ impl Lockfile {
                 }
             }
         }
-        Self { documents, sources }
+        Self {
+            documents,
+            sources,
+            preserve_baseline: false,
+        }
     }
 }

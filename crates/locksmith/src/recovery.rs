@@ -75,6 +75,7 @@ pub(crate) fn resolve(
                 }
                 // Invalid source text must never be reused by the serializer.
                 locks.push(Lockfile {
+                    preserve_baseline: false,
                     documents,
                     sources: Vec::new(),
                 });
@@ -121,7 +122,7 @@ pub(crate) fn resolve(
         if reference.is_empty() {
             for (&kind, document) in &result.documents {
                 let mut text = String::new();
-                crate::source::render(kind, document, &result.sources, &mut text);
+                crate::source::render(kind, document, &result.sources, false, &mut text);
                 crate::verify::verify(&text, document)?;
                 reference.insert(kind, text);
             }

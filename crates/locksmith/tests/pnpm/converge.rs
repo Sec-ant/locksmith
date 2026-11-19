@@ -43,6 +43,7 @@ fn manifest_driven_convergence_installs_and_removes_unrelated_workspace_drift() 
             after: Some(&after),
         }],
         locksmith::ConvergeOptions {
+            baseline_configuration: None,
             configuration: Some(&locksmith::WorkspaceConfig {
                 override_tie_break: override_tie_break(),
                 ..Default::default()
@@ -153,6 +154,7 @@ fn generated_workspace_converges_peer_and_injected_packages_without_sibling_upgr
             },
         ],
         locksmith::ConvergeOptions {
+            baseline_configuration: None,
             configuration: Some(&locksmith::WorkspaceConfig {
                 override_tie_break: override_tie_break(),
                 ..Default::default()
@@ -193,4 +195,99 @@ fn generated_workspace_converges_peer_and_injected_packages_without_sibling_upgr
     );
     let versions: Value = serde_json::from_slice(&resolved.stdout).unwrap();
     assert_eq!(versions, json!(["7.0.0", "2.0.5"]));
+}
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn extension_edits_keep_baseline_pins_and_match_native_peer_instances() {
+    use locksmith::{ConvergeOptions, ManifestChange, converge};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    let prepare = |dir: &Path, extended: bool, stable: &str| {
+        let selector = if extended {
+            "is-odd@0.1.2"
+        } else {
+            "is-odd@0.1.1"
+        };
+        let config = json!({"packages":["apps/*"],"packageExtensions":{
+            selector:{"dependencies":{"react-dom":"18.2.0"}}
+        }});
+        fs::create_dir_all(dir).unwrap();
+        let root = json!({"name":"root","private":true,"pnpm":config});
+        fs::write(dir.join("package.json"), root.to_string()).unwrap();
+        fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            serde_saphyr::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let mut manifests = vec![(".".to_owned(), root)];
+        for (id, react) in [("one", "18.2.0"), ("two", "18.3.1")] {
+            let path = format!("apps/{id}");
+            let mut manifest = json!({"name":id,"private":true,"dependencies":{"is-even":"1.0.0","react":react,"stable":format!("npm:is-odd@{stable}")}});
+            if extended && id == "one" {
+                manifest["devDependencies"] = json!({"extra":"npm:react@18.3.1"});
+            }
+            fs::create_dir_all(dir.join(&path)).unwrap();
+            fs::write(dir.join(&path).join("package.json"), manifest.to_string()).unwrap();
+            manifests.push((path, manifest));
+        }
+        (config, manifests)
+    };
+    let build = |name: &str, extended: bool, seed: &str| {
+        let dir = tmp.path().join(name);
+        prepare(&dir, extended, seed);
+        install(&dir, &store, false);
+        let (config, manifests) = prepare(&dir, extended, "^3.0.0");
+        install(&dir, &store, false);
+        let lock =
+            Lockfile::try_from(fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap()).unwrap();
+        (super::cfg(&config), manifests, lock, dir)
+    };
+    let baseline = build("baseline", false, "3.0.0");
+    let installed = build("installed", true, "3.0.1");
+    let reference = build("reference", true, "3.0.0");
+    let baseline_pin = |l: &Lockfile| {
+        l.project().unwrap()["importers"]["apps/one"]["dependencies"]["stable"]["version"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_ne!(
+        baseline_pin(&baseline.2),
+        baseline_pin(&installed.2),
+        "fixture must exercise unrelated drift"
+    );
+    for (before, after, expected) in [
+        (&baseline, &installed, &reference),
+        (&reference, &baseline, &baseline),
+    ] {
+        let changes: Vec<_> = before
+            .1
+            .iter()
+            .zip(&after.1)
+            .map(|((id, old), (_, new))| ManifestChange {
+                importer: id,
+                before: Some(old),
+                after: Some(new),
+            })
+            .collect();
+        let options = ConvergeOptions {
+            baseline_configuration: Some(&before.0),
+            configuration: Some(&after.0),
+            registry: None,
+        };
+        let result = converge(&before.2, &after.2, &changes, options).unwrap();
+        assert_eq!(result.project(), expected.2.project());
+        let yaml = result.to_yaml().unwrap();
+        assert_eq!(
+            converge(&before.2, &result, &changes, options)
+                .unwrap()
+                .to_yaml()
+                .unwrap(),
+            yaml
+        );
+        fs::write(after.3.join("pnpm-lock.yaml"), yaml).unwrap();
+        install(&after.3, &store, true);
+    }
 }

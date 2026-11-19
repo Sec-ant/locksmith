@@ -29,6 +29,7 @@ struct Layout {
     fields: BTreeMap<String, Range<usize>>,
     entries: BTreeMap<String, Vec<(EntryKey, Range<usize>)>>,
     rewritten_sections: Vec<String>,
+    original_spelling: BTreeMap<String, BTreeMap<String, Range<usize>>>,
 }
 
 #[derive(Debug)]
@@ -273,6 +274,11 @@ fn layout(text: Arc<String>, range: Range<usize>, parsed: &ParsedMap) -> Layout 
                             || (key == "packages"
                                 && raw.contains("\n    resolution:\n      integrity:")))
                     {
+                        result
+                            .original_spelling
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(entry.clone(), block);
                         continue;
                     }
                     let name = EntryKey::from_source(entry, &text, block.start + 2..offsets[line]);
@@ -304,14 +310,20 @@ fn ordered_importer(record: &Value) -> bool {
 }
 
 impl Source {
-    pub(crate) fn reusable_field(&self, kind: DocumentKind, key: &str) -> bool {
+    pub(crate) fn reusable_field(
+        &self,
+        kind: DocumentKind,
+        key: &str,
+        preserve_spelling: bool,
+    ) -> bool {
         if !SECTIONS.contains(&key) && key != "catalogs" {
             return true;
         }
-        if self.layouts[&kind]
-            .rewritten_sections
-            .iter()
-            .any(|section| section == key)
+        if !preserve_spelling
+            && self.layouts[&kind]
+                .rewritten_sections
+                .iter()
+                .any(|section| section == key)
         {
             return false;
         }
@@ -334,6 +346,7 @@ pub(crate) fn render(
     kind: DocumentKind,
     document: &Value,
     sources: &[Arc<Source>],
+    preserve_baseline: bool,
     output: &mut String,
 ) {
     if kind == DocumentKind::Environment
@@ -359,10 +372,10 @@ pub(crate) fn render(
         .collect();
     fields.sort_unstable_by(|(a, _), (b, _)| yaml::root_order(a, b));
     for (key, value) in fields {
-        let original = sources.iter().find_map(|source| {
+        let original = sources.iter().enumerate().find_map(|(i, source)| {
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
-                || !source.reusable_field(kind, key)
+                || !source.reusable_field(kind, key, preserve_baseline && i == 0)
                 || (key == "overrides" && !crate::manifest::same_overrides(original, document))
             {
                 return None;
@@ -383,12 +396,19 @@ pub(crate) fn render(
                 .iter()
                 .collect();
             for (entry, value) in entries {
-                let original = sources.iter().find_map(|source| {
+                let original = sources.iter().enumerate().find_map(|(i, source)| {
                     let record = source.documents.get(&kind)?.get(key)?.get(entry)?;
                     if record != value || (key == "importers" && !ordered_importer(record)) {
                         return None;
                     }
                     let layout = source.layouts.get(&kind)?;
+                    if preserve_baseline
+                        && i == 0
+                        && let Some(range) =
+                            layout.original_spelling.get(key).and_then(|m| m.get(entry))
+                    {
+                        return Some(&layout.text[range.clone()]);
+                    }
                     let entries = layout.entries.get(key)?;
                     let index = entries
                         .binary_search_by(|(name, _)| name.text(&layout.text).cmp(entry))

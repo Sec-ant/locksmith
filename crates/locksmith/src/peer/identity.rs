@@ -246,6 +246,21 @@ pub(super) fn token_reference(links: &WorkspaceLinks, name: &str, token: &str) -
         .cloned()
         .unwrap_or_else(|| Some(token.into()))
 }
+/// Verify a projected provider map against an identity already written by pnpm.
+/// A new peer can move an instance across pnpm's suffix length threshold.
+pub(crate) fn matches_bindings(
+    key: &str,
+    bindings: &BTreeMap<String, String>,
+    flat: bool,
+    encoding: LinkedPeerEncoding,
+) -> bool {
+    let suffix = key
+        .rsplit_once('(')
+        .and_then(|(_, tail)| tail.strip_suffix(')'));
+    let style = suffix.and_then(HashStyle::recognize);
+    encode(graph::package_key(key), bindings, style, flat, encoding) == key
+}
+
 pub(super) fn encode(
     package: &str,
     peers: &BTreeMap<String, String>,

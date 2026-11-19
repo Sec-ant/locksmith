@@ -206,6 +206,12 @@ fn converge_reads_ref_and_worktree_and_outputs_only_required_changes() {
     let same = r.cmd(CLI, &["converge", "HEAD"]);
     assert!(same.status.success(), "{}", report(&same));
     assert_eq!(same.stdout, baseline);
+    let workspace = r.0.path().join("pnpm-workspace.yaml");
+    let yaml = fs::read_to_string(&workspace).unwrap();
+    fs::write(&workspace, format!("# workspace packages\n{yaml}")).unwrap();
+    let equivalent = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(equivalent.status.success(), "{}", report(&equivalent));
+    assert_eq!(equivalent.stdout, baseline);
     r.side("ours");
     let mut drifted = graph(&fs::read(&path).unwrap());
     drifted["importers"]["apps/web"]["devDependencies"]["right"]["version"] = json!("1.5.0");

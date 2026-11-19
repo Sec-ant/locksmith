@@ -79,15 +79,13 @@ pub(crate) fn from_edges(
     complete(
         &mut output,
         DocumentKind::Project,
-        Some(baseline),
+        Some((baseline, options.configuration)),
         &mut conflicts,
     )?;
     if !conflicts.is_empty() {
         return Err(LockfileError::Conflicts(conflicts));
     }
-    let mut documents = base.documents.clone();
-    documents.insert(DocumentKind::Project, std::sync::Arc::new(output));
-    Ok(Lockfile::with_documents(documents, &[base, donor]))
+    Ok(base.converged_project(output, donor))
 }
 
 /// Shared completion policy for convergence and merges.
@@ -95,14 +93,14 @@ pub(crate) fn from_edges(
 pub(crate) fn complete(
     document: &mut Value,
     kind: DocumentKind,
-    baseline: Option<&Value>,
+    baseline: Option<(&Value, Option<&crate::WorkspaceConfig>)>,
     conflicts: &mut Vec<Conflict>,
 ) -> Result<(), LockfileError> {
     if conflicts.iter().all(|conflict| {
         conflict.path.len() == 2 && ["packages", "snapshots"].contains(&conflict.path[0].as_str())
     }) {
-        if let Some(baseline) = baseline {
-            graph::prune_scoped(document, kind, baseline)?;
+        if let Some((baseline, config)) = baseline {
+            graph::prune_scoped(document, kind, baseline, config)?;
         } else {
             graph::prune(document, kind)?;
         }

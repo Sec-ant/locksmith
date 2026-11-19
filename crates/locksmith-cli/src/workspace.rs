@@ -53,11 +53,20 @@ pub struct Project {
 }
 impl Project {
     pub fn read(blobs: &mut Blobs, tree: &str, prefix: &str) -> Result<Self> {
-        let root = manifest(blobs, tree, &format!("{prefix}package.json"))?;
+        Self::from_files(|path| blobs.read(tree, &format!("{prefix}{path}")))
+    }
+
+    pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
+        let root: Value =
+            serde_json::from_str(&read("package.json")?.ok_or("missing package.json")?)
+                .map_err(|e| format!("package.json: {e}"))?;
+        if !root.is_object() {
+            return Err("package.json: expected an object".into());
+        }
         let mut config = match root.get("pnpm") {
             Some(v) if v.is_object() => v.clone(),
             Some(_) => {
-                return Err(format!("{prefix}package.json: expected pnpm to be an object").into());
+                return Err("package.json: expected pnpm to be an object".into());
             }
             None => json!({}),
         };
@@ -65,17 +74,15 @@ impl Project {
             .as_str()
             .and_then(|v| v.strip_prefix("pnpm@"))
             .and_then(|v| v.parse::<node_semver::Version>().ok());
-        let rc = format!("{prefix}.npmrc");
         if version.as_ref().is_none_or(|v| v.major < 11)
-            && let Some(text) = blobs.read(tree, &rc)?
+            && let Some(text) = read(".npmrc")?
         {
-            legacy_settings(&text, &mut config).map_err(|e| format!("{rc}: {e}"))?;
+            legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
         }
-        let yaml = format!("{prefix}pnpm-workspace.yaml");
-        let workspace = blobs.read(tree, &yaml)?;
+        let workspace = read("pnpm-workspace.yaml")?;
         if let Some(text) = &workspace {
             let settings: Option<serde_json::Map<String, Value>> =
-                serde_saphyr::from_str(text).map_err(|e| format!("{yaml}: {e}"))?;
+                serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
             if let Some(settings) = settings {
                 config.as_object_mut().unwrap().extend(settings);
             }
@@ -84,7 +91,7 @@ impl Project {
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
         for name in hook_paths(&config)? {
-            if let Some(contents) = blobs.read(tree, &format!("{prefix}{name}"))? {
+            if let Some(contents) = read(&name)? {
                 hooks.insert(name, Value::String(contents));
             }
         }

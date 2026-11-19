@@ -35,8 +35,32 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let prefix = prefix.trim_end_matches('\n');
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix)?;
+    let working = Project::from_files(working_file)?;
+    for key in project
+        .config
+        .as_object()
+        .unwrap()
+        .keys()
+        .chain(working.config.as_object().unwrap().keys())
+    {
+        let a = project.config.get(key);
+        let b = working.config.get(key);
+        if key != "packageExtensions"
+            && (a != b
+                || (key == "overrides"
+                    && a.and_then(Value::as_object)
+                        .iter()
+                        .flat_map(|m| m.iter())
+                        .ne(b.and_then(Value::as_object).iter().flat_map(|m| m.iter()))))
+        {
+            return Err(format!("changed workspace setting {key} in pnpm-workspace.yaml or package.json requires resolution").into());
+        }
+    }
+    if project.workspace != working.workspace {
+        return Err("workspace membership changed in pnpm-workspace.yaml".into());
+    }
     let mut files: BTreeSet<_> = file_inputs(&project.config)?.into_iter().collect();
-    files.extend(["pnpm-workspace.yaml".into(), ".npmrc".into()]);
+    files.insert(".npmrc".into());
     for path in files {
         if blobs.read(tree, &format!("{prefix}{path}"))? != working_file(&path)? {
             return Err(
@@ -79,20 +103,6 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             }
         }
     }
-    // JSON object equality ignores key order, while pnpm uses declaration
-    // order to break ties between overlapping override selectors.
-    if let Some(current) = after.get(".")
-        && current["pnpm"]["overrides"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .ne(project.root["pnpm"]["overrides"]
-                .as_object()
-                .into_iter()
-                .flatten())
-    {
-        return Err("converge requires unchanged overrides in package.json".into());
-    }
     let changes: Vec<_> = importers
         .iter()
         .filter(|id| before.contains_key(*id) || after.contains_key(*id))
@@ -115,11 +125,12 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         None => baseline.clone(),
     };
     let policy = Policy::from_manifest(after.get(".").ok_or("missing working tree package.json")?);
-    let config = policy.configuration(&project.config)?;
+    let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;
+    let config = policy.configuration(&working.config)?;
     let result = crate::registry::resolve(
         crate::registry::Lookup::Converge,
         allow_network.then_some(crate::registry::ProjectRc::Working),
-        &project.config,
+        &working.config,
         &after["."],
         |registry| {
             locksmith::converge(
@@ -127,12 +138,13 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 &candidate,
                 &changes,
                 locksmith::ConvergeOptions {
+                    baseline_configuration: Some(&base_config),
                     configuration: Some(&config),
                     registry,
                 },
             )
         },
     )?;
-    policy.check_peers(&project.config, &result, &after)?;
+    policy.check_peers(&working.config, &result, &after)?;
     Ok(result)
 }

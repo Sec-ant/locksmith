@@ -382,6 +382,7 @@ fn check_catalogs(
     importer: &Value,
     kind: DocumentKind,
     key: &str,
+    config: Option<&crate::WorkspaceConfig>,
     issues: &mut Vec<ValidationIssue>,
 ) {
     for group in DEPENDENCIES {
@@ -407,6 +408,15 @@ fn check_catalogs(
                 .get("catalogs")
                 .and_then(|v| v.get(catalog))
                 .and_then(|v| v.get(name));
+            // pnpm can omit a catalog record when the importer already has a
+            // matching resolution. The workspace declaration supplies the range.
+            if entry.is_none()
+                && let Some(range) = config.and_then(|c| c.catalogs.get(catalog)?.get(name))
+                && let Some(pin) = dependency["version"].as_str()
+                && crate::reconcile::accepts(name, range, pin, document)
+            {
+                continue;
+            }
             let catalog_version = entry.and_then(|v| v.get("version")).and_then(Value::as_str);
             let actual_name = entry
                 .and_then(|v| v.get("specifier"))
@@ -462,11 +472,19 @@ fn check_overrides(
 }
 
 pub(crate) fn validate(document: &Value, kind: DocumentKind) -> Vec<ValidationIssue> {
+    validate_with_config(document, kind, None)
+}
+
+pub(crate) fn validate_with_config(
+    document: &Value,
+    kind: DocumentKind,
+    config: Option<&crate::WorkspaceConfig>,
+) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     let overrides = crate::manifest::unconditional_overrides(document);
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_references(document, importer, kind, "importers", key, &mut issues);
-        check_catalogs(document, importer, kind, key, &mut issues);
+        check_catalogs(document, importer, kind, key, config, &mut issues);
         check_overrides(&overrides, importer, kind, key, &mut issues);
     }
     // Validation scans all edges once, including unreachable records. It does
@@ -509,7 +527,7 @@ fn check_references(
 
 pub(crate) fn prune(document: &mut Value, kind: DocumentKind) -> Result<(), LockfileError> {
     let reached = closure(document, kind, &keys(document, "importers"))?;
-    retain(document, kind, reached)
+    retain(document, kind, reached, None)
 }
 
 /// An instance is optional only when every path from the importers crosses an
@@ -602,6 +620,7 @@ pub(crate) fn prune_scoped(
     document: &mut Value,
     kind: DocumentKind,
     baseline: &Value,
+    config: Option<&crate::WorkspaceConfig>,
 ) -> Result<(), LockfileError> {
     let before = closure(baseline, kind, &keys(baseline, "importers"))?;
     let orphans = |field, reached: &BTreeSet<String>| -> BTreeSet<String> {
@@ -632,13 +651,14 @@ pub(crate) fn prune_scoped(
         return Err(LockfileError::InvalidGraph(issues));
     }
     reached.packages.extend(old_packages);
-    retain(document, kind, reached)
+    retain(document, kind, reached, config)
 }
 
 fn retain(
     document: &mut Value,
     kind: DocumentKind,
     reached: DependencyClosure,
+    config: Option<&crate::WorkspaceConfig>,
 ) -> Result<(), LockfileError> {
     for (name, keep) in [
         ("snapshots", reached.snapshots),
@@ -651,7 +671,7 @@ fn retain(
     let mut issues = Vec::new();
     let overrides = crate::manifest::unconditional_overrides(document);
     for (key, importer) in section(document, "importers").into_iter().flatten() {
-        check_catalogs(document, importer, kind, key, &mut issues);
+        check_catalogs(document, importer, kind, key, config, &mut issues);
         check_overrides(&overrides, importer, kind, key, &mut issues);
     }
     if !issues.is_empty() {

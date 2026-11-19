@@ -246,6 +246,7 @@ fn generated_override_specifiers_match_raw_manifests() {
             after: Some(&after),
         }],
         locksmith::ConvergeOptions {
+            baseline_configuration: None,
             configuration: Some(&locksmith::WorkspaceConfig {
                 override_tie_break: override_tie_break(),
                 ..Default::default()
@@ -481,6 +482,7 @@ fn reordered_overrides_merge_without_a_frozen_install_rewrite() {
             after: Some(&manifest),
         }],
         locksmith::ConvergeOptions {
+            baseline_configuration: None,
             configuration: Some(&locksmith::WorkspaceConfig {
                 override_tie_break: override_tie_break(),
                 ..Default::default()

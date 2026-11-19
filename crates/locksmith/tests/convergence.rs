@@ -62,6 +62,28 @@ fn changed_dependency_adopts_its_closure_and_retains_unchanged_sibling() {
 }
 
 #[test]
+fn convergence_preserves_the_original_yaml_for_an_untouched_package() {
+    let (_, donor, before, after) = fixture();
+    let original =
+        "  bar@1.0.0:\n    resolution:\n      integrity: sha512-test # keep this annotation\n";
+    let base = Lockfile::parse(&format!(
+        "lockfileVersion: '9.0'\nimporters:\n  app:\n    dependencies:\n      foo: {{specifier: 1.0.0, version: 1.0.0}}\n      bar: {{specifier: ^1.0.0, version: 1.0.0}}\npackages:\n{original}  foo@1.0.0: {{resolution: {{integrity: sha512-test}}}}\nsnapshots:\n  bar@1.0.0: {{}}\n  foo@1.0.0: {{}}\n"
+    )).unwrap();
+    let result = converge(
+        &base,
+        &donor,
+        &[change("app", &before, &after)],
+        Default::default(),
+    )
+    .unwrap();
+    assert!(result.to_yaml().unwrap().contains(original));
+    assert_eq!(
+        result.project().unwrap()["importers"]["app"]["dependencies"]["foo"]["version"],
+        "2.0.0"
+    );
+}
+
+#[test]
 fn adding_a_consumer_preserves_unaffected_peer_bindings_below_a_shared_release() {
     let parent = json!({"dependencies":{"parent":{"specifier":"1.0.0","version":"1.0.0"}}});
     let make = |installed: bool| {
@@ -295,6 +317,7 @@ fn adding_or_removing_a_root_provider_respects_workspace_inheritance() {
                 &installed,
                 &[change(".", before, after)],
                 locksmith::ConvergeOptions {
+                    baseline_configuration: None,
                     configuration: Some(&config),
                     registry: None,
                 },
@@ -687,4 +710,132 @@ fn moving_a_compatible_dependency_keeps_the_pin_and_updates_optionality() {
         );
         assert_eq!(doc["snapshots"]["orphan@1.0.0"], json!({}));
     }
+}
+
+#[test]
+fn an_extension_preserves_siblings_and_stops_at_an_existing_peer_provider() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+
+    let spec = json!({"adapter@1.0.0":{"dependencies":{"renderer":"1.0.0"}}});
+    // pnpm 9 writes the MD5 of the serialized extension rules.
+    let checksum = format!("{:x}", Md5::digest(spec.to_string().as_bytes()));
+    let before = WorkspaceConfig::default();
+    let after = WorkspaceConfig::from_pnpm(&json!({"packageExtensions":spec})).unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let make = |installed: bool| {
+        let host = if installed {
+            "1.0.0(theme@2.0.0)"
+        } else {
+            "1.0.0(theme@1.0.0)"
+        };
+        let theme = if installed { "2.0.0" } else { "1.0.0" };
+        let adapter = if installed {
+            "1.0.0(ui@1.0.0)"
+        } else {
+            "1.0.0"
+        };
+        let renderer = "1.0.0(ui@1.0.0)";
+        let mut body = json!({"dependencies":{"theme":theme}});
+        if installed {
+            body["dependencies"]["renderer"] = renderer.into();
+            body["transitivePeerDependencies"] = json!(["ui"]);
+        }
+        let lock = lock(
+            json!({".":{"dependencies":{"host":{"specifier":"1.0.0","version":host}}}}),
+            json!({
+                format!("host@{host}"):{"dependencies":{"adapter":adapter,"renderer":renderer,"ui":"1.0.0","theme":theme}},
+                format!("adapter@{adapter}"):body,
+                format!("renderer@{renderer}"):{"dependencies":{"ui":"1.0.0"}},
+                "ui@1.0.0":{},format!("theme@{theme}"): {}
+            }),
+        );
+        let mut doc = lock.project().unwrap().clone();
+        doc["packages"]["renderer@1.0.0"]["peerDependencies"] = json!({"ui":"1.0.0"});
+        doc["packages"]["host@1.0.0"]["peerDependencies"] = json!({"theme":"*"});
+        if installed {
+            doc["packageExtensionsChecksum"] = checksum.clone().into();
+        }
+        parse(doc)
+    };
+    let base = make(false);
+    let installed = make(true);
+    let result = converge(&base, &installed, &[], options).unwrap();
+    let doc = result.project().unwrap();
+    assert_eq!(doc["importers"], base.project().unwrap()["importers"]);
+    assert_eq!(doc["packages"], base.project().unwrap()["packages"]);
+    assert_eq!(
+        doc["snapshots"]["host@1.0.0(theme@1.0.0)"]["dependencies"],
+        json!({"adapter":"1.0.0(ui@1.0.0)","renderer":"1.0.0(ui@1.0.0)","ui":"1.0.0","theme":"1.0.0"})
+    );
+    assert_eq!(
+        doc["snapshots"]["adapter@1.0.0(ui@1.0.0)"]["dependencies"],
+        json!({"theme":"1.0.0","renderer":"1.0.0(ui@1.0.0)"})
+    );
+    assert_eq!(
+        doc["snapshots"].as_object().unwrap().len(),
+        base.project().unwrap()["snapshots"]
+            .as_object()
+            .unwrap()
+            .len()
+    );
+
+    let mut stale = base.project().unwrap().clone();
+    assert!(converge(&base, &parse(stale.clone()), &[], options).is_err());
+    stale["packageExtensionsChecksum"] = checksum.into();
+    assert!(converge(&base, &parse(stale.clone()), &[], options).is_err());
+    stale["snapshots"]["adapter@1.0.0"]["dependencies"]["renderer"] = "2.0.0".into();
+    stale["snapshots"]["renderer@2.0.0"] = json!({});
+    stale["packages"]["renderer@2.0.0"] = json!({"resolution":{"integrity":"sha512-test"}});
+    assert!(converge(&base, &parse(stale), &[], options).is_err());
+}
+
+#[test]
+fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    use md5::{Digest, Md5};
+
+    let make = |range: &str, pin: &str, catalog: &str| {
+        let rules = json!({"host@1":{"optionalDependencies":{"extra":range}}});
+        let checksum = format!("{:x}", Md5::digest(rules.to_string().as_bytes()));
+        let config = WorkspaceConfig::from_pnpm(&json!({
+            "packageExtensions":rules, "catalog":{"host":catalog}
+        }))
+        .unwrap();
+        let mut doc = lock(
+            json!({".":{"dependencies":{"host":{"specifier":"catalog:","version":"1.0.0"}}}}),
+            json!({"host@1.0.0":{"optionalDependencies":{"extra":pin}}, format!("extra@{pin}"):{"optional":true}}),
+        ).project().unwrap().clone();
+        doc["packageExtensionsChecksum"] = checksum.into();
+        (config, parse(doc))
+    };
+    let (before, base) = make("1.0.0", "1.0.0", "^1");
+    let (after, installed) = make("^1", "1.1.0", "^1");
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    let result = converge(&base, &installed, &[], options).unwrap();
+    let doc = result.project().unwrap();
+    assert_eq!(doc["snapshots"], base.project().unwrap()["snapshots"]);
+    assert_eq!(doc["packages"], base.project().unwrap()["packages"]);
+    assert_eq!(
+        doc["packageExtensionsChecksum"],
+        installed.project().unwrap()["packageExtensionsChecksum"]
+    );
+    assert!(doc.get("catalogs").is_none());
+
+    let (before, base) = make("1.0.0", "1.0.0", "^2");
+    let (after, installed) = make("^1", "1.1.0", "^2");
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&before),
+        configuration: Some(&after),
+        registry: None,
+    };
+    assert!(converge(&base, &installed, &[], options).is_err());
 }

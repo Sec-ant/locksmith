@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &candidate,
         &changes,
         locksmith::ConvergeOptions {
+            baseline_configuration: None,
             configuration: Some(&locksmith::WorkspaceConfig {
                 override_tie_break: tie_break,
                 ..Default::default()
