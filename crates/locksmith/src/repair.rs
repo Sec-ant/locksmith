@@ -1,5 +1,6 @@
 //! Repair an existing lock without preferring an earlier branch's legal pins.
 mod evidence;
+mod extensions;
 mod importers;
 mod peers;
 
@@ -77,10 +78,17 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
     check_configuration(doc, &metadata, context.configuration)?;
     let mut result = importers::repair(doc, &metadata, &mut evidence)?;
     let roots = context.manifests.keys().cloned().collect();
+    let mut checked_extensions = false;
     loop {
         if graph::closure(&result, DocumentKind::Project, &roots).is_err() {
             fill_missing(&mut result, &mut evidence)?;
             graph::closure(&result, DocumentKind::Project, &roots)?;
+        }
+        if !checked_extensions {
+            checked_extensions = true;
+            if extensions::repair(&mut result, context.configuration)? {
+                continue;
+            }
         }
         if matches!(result, Cow::Borrowed(_)) {
             break;

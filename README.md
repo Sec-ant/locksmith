@@ -4,7 +4,14 @@ Locksmith merges and repairs pnpm lockfiles and reduces unrelated changes after 
 
 ## Install
 
-Build the CLI from this checkout with Rust 1.89 or later.
+Install the prebuilt CLI on macOS or Linux with Homebrew.
+
+```sh
+brew tap sec-ant/locksmith https://github.com/Sec-ant/locksmith.git
+brew install sec-ant/locksmith/locksmith
+```
+
+For a private checkout, sign in with `gh auth login` and run `gh auth setup-git` before tapping. To build from source, use Rust 1.89 or later.
 
 ```sh
 cargo install --locked --path crates/locksmith-cli
@@ -31,7 +38,7 @@ locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
-`repair` reads the lockfile, manifests, and workspace settings at the same commit. It keeps valid pins and writes the repaired lock to stdout. A healthy lock comes back byte-for-byte. If a record is missing, Locksmith can use the commit’s parents. Add `--allow-network` to also supply missing release metadata. An unresolved repair reports the dependency on stderr and produces no YAML.
+`repair` reads the lockfile, manifests, and workspace settings at the same commit. It keeps valid pins and writes the repaired lock to stdout. If an exact override applies to a required package-extension dependency, `repair` restores a missing or stale pin when the lock contains one matching instance for that consumer’s peers. A healthy lock comes back byte-for-byte. If a record is missing, Locksmith can use the commit’s parents. Add `--allow-network` to also supply missing release metadata. An unresolved repair reports the dependency on stderr and produces no YAML.
 
 ## Reduce changes after an install
 

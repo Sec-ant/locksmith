@@ -280,3 +280,80 @@ fn repairs_a_catalog_snapshot_whose_own_pin_violates_its_recorded_range() {
         .replace("        version: 1.0.0", "        version: 1.0.1");
     assert_eq!(run(&corrupt, "1.0.0", None).unwrap(), expected);
 }
+
+#[test]
+fn repairs_a_required_extension_in_each_consumers_peer_scope() {
+    use md5::{Digest, Md5};
+
+    let extension = json!({"host@1.0.0":{"dependencies":{"addon":"1.0.0"}}});
+    let overrides = json!({"host@1>addon":"2.0.0"});
+    let cfg =
+        WorkspaceConfig::from_pnpm(&json!({"overrides":overrides,"packageExtensions":extension}))
+            .unwrap();
+    let manifests = BTreeMap::from([
+        (".".into(), json!({})),
+        ("a".into(), json!({"dependencies":{"host":"1.0.0"}})),
+        ("b".into(), json!({"dependencies":{"host":"1.0.0"}})),
+    ]);
+    let ctx = RepairContext {
+        manifests: &manifests,
+        configuration: &cfg,
+        patches: &BTreeMap::new(),
+        parents: &[],
+        registry: None,
+    };
+    let mut doc = json!({
+        "lockfileVersion":"9.0", "overrides":overrides,
+        "packageExtensionsChecksum":format!("{:x}",Md5::digest(extension.to_string())),
+        "importers":{".":{}}, "packages":{}, "snapshots":{}
+    });
+    for name in [
+        "addon@1.0.0",
+        "addon@2.0.0",
+        "host@1.0.0",
+        "ui@1.0.0",
+        "ui@2.0.0",
+    ] {
+        doc["packages"][name] = json!({"resolution":{"integrity":"sha512-example"}});
+    }
+    for name in ["addon@2.0.0", "host@1.0.0"] {
+        doc["packages"][name]["peerDependencies"] = json!({"ui":"*"});
+    }
+    for (app, ui) in [("a", "1.0.0"), ("b", "2.0.0")] {
+        let host = format!("1.0.0(ui@{ui})");
+        doc["importers"][app] =
+            json!({"dependencies":{"host":{"specifier":"1.0.0","version":host}}});
+        doc["snapshots"][format!("host@{host}")] = json!({"dependencies":{"ui":ui}});
+        doc["snapshots"][format!("addon@2.0.0(ui@{ui})")] = json!({"dependencies":{"ui":ui}});
+        doc["snapshots"][format!("ui@{ui}")] = json!({});
+    }
+    doc["snapshots"]["addon@1.0.0"] = json!({});
+    doc["snapshots"]["host@1.0.0(ui@1.0.0)"]["dependencies"]["addon"] = "1.0.0".into();
+    let run = |d: &Value| repair(&serde_saphyr::to_string(d).unwrap(), &ctx);
+    let result = run(&doc).unwrap();
+    let mut expected = doc.clone();
+    for ui in ["1.0.0", "2.0.0"] {
+        expected["snapshots"][format!("host@1.0.0(ui@{ui})")]["dependencies"]["addon"] =
+            format!("2.0.0(ui@{ui})").into();
+    }
+    assert_eq!(result.project(), Some(&expected));
+    let output = result.to_yaml().unwrap();
+    assert_eq!(repair(&output, &ctx).unwrap().to_yaml().unwrap(), output);
+
+    let mut missing = doc.clone();
+    missing["snapshots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("addon@2.0.0(ui@2.0.0)");
+    assert!(
+        matches!(run(&missing),Err(LockfileError::ResolutionRequired { path, .. }) if path==["snapshots","host@1.0.0(ui@2.0.0)","addon"])
+    );
+
+    doc["packages"]["plugin@1.0.0"] = json!({"resolution":{},"peerDependencies":{"addon":"*"}});
+    doc["snapshots"]["plugin@1.0.0(addon@1.0.0)"] = json!({"dependencies":{"addon":"1.0.0"}});
+    doc["snapshots"]["host@1.0.0(ui@1.0.0)"]["dependencies"]["plugin"] =
+        "1.0.0(addon@1.0.0)".into();
+    assert!(
+        matches!(run(&doc),Err(LockfileError::ResolutionRequired { path, .. }) if path==["snapshots","host@1.0.0(ui@1.0.0)","plugin"])
+    );
+}

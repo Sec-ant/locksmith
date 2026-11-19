@@ -1,6 +1,8 @@
 //! Reconcile existing dependency instances, preserving their package identity.
 use crate::{LinkedPeerEncoding, Value, graph};
 
+mod exact;
+pub(crate) use exact::same_binding;
 mod identity;
 use identity::{HashStyle, context, context_tokens, encode, link_peer_id};
 pub(crate) use identity::{

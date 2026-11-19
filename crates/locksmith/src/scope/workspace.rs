@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::{
     Lockfile, LockfileError, Value, WorkspaceConfig, config, graph, manifest, peer, reconcile,
 };
+use graph::{dependency, transitive};
 use reconcile::missing;
 
 const EDGES: [&str; 2] = ["dependencies", "optionalDependencies"];
@@ -46,20 +47,6 @@ pub(super) fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String
             .flatten()
             .map(move |(n, v)| (g, n, v))
     })
-}
-
-fn dependency<'a>(body: &'a Value, name: &str) -> Option<(&'static str, &'a str)> {
-    EDGES
-        .into_iter()
-        .find_map(|group| Some((group, body[group].get(name)?.as_str()?)))
-}
-
-fn transitive(body: &Value) -> impl Iterator<Item = &str> {
-    body["transitivePeerDependencies"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
 }
 
 fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(), LockfileError> {
@@ -694,7 +681,9 @@ impl Projector<'_> {
                         && rules[1][0].contains_key(name)
                         && !rules[1][1].contains_key(name)
                         && new_pkg["peerDependencies"].get(name).is_none()
-                        && let Some(pin) = self.exact_override([old, next], name, spec)
+                        && let Some(pin) =
+                            self.peers
+                                .exact_override([old, next], self.config, name, spec)
                     {
                         recovered = pin;
                         installed_edge = Some(("dependencies", recovered.as_str()));

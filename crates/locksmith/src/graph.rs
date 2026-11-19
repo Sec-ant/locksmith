@@ -42,6 +42,20 @@ pub(crate) fn section<'a>(document: &'a Value, key: &str) -> Option<&'a Map<Stri
     document.get(key).and_then(Value::as_object)
 }
 
+pub(crate) fn dependency<'a>(body: &'a Value, name: &str) -> Option<(&'static str, &'a str)> {
+    ["dependencies", "optionalDependencies"]
+        .into_iter()
+        .find_map(|group| Some((group, body[group].get(name)?.as_str()?)))
+}
+
+pub(crate) fn transitive(body: &Value) -> impl Iterator<Item = &str> {
+    body["transitivePeerDependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+}
+
 pub(crate) fn keys(document: &Value, key: &str) -> BTreeSet<String> {
     section(document, key)
         .into_iter()

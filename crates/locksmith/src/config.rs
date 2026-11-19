@@ -243,8 +243,29 @@ pub(crate) const EXTENSION_GROUPS: [&str; 4] = [
     "peerDependencies",
     "peerDependenciesMeta",
 ];
-type EffectiveExtensions<'a> = [[BTreeMap<&'a str, &'a Value>; 4]; 2];
+type ExtensionFields<'a> = [BTreeMap<&'a str, &'a Value>; 4];
+type EffectiveExtensions<'a> = [ExtensionFields<'a>; 2];
 type ExtensionRules<'a> = Vec<(&'a str, &'a Value)>;
+
+pub(crate) fn extension_fields<'a>(
+    rules: &[(&'a str, &'a Value)],
+    name: &str,
+    version: &str,
+) -> Option<ExtensionFields<'a>> {
+    let mut fields: ExtensionFields<'a> = Default::default();
+    for (selector, extension) in rules {
+        if crate::manifest::parent_matches(selector, name, version) {
+            for (i, group) in EXTENSION_GROUPS.iter().enumerate() {
+                if let Some(values) = extension.get(*group) {
+                    for (dep, value) in values.as_object()? {
+                        fields[i].entry(dep).or_insert(value);
+                    }
+                }
+            }
+        }
+    }
+    Some(fields)
+}
 
 pub(crate) struct ExtensionAddition<'a> {
     pub group: &'static str,
@@ -337,23 +358,10 @@ impl<'a> ResolutionCompatibility<'a> {
         }
         let (name, version) = crate::graph::package_key(key).rsplit_once('@')?;
         let rules = self.extensions.get(name)?;
-        let mut effective: EffectiveExtensions<'a> =
-            std::array::from_fn(|_| std::array::from_fn(|_| BTreeMap::new()));
-        for (side, rules) in rules.iter().enumerate() {
-            for (_, extension) in rules
-                .iter()
-                .filter(|(selector, _)| crate::manifest::parent_matches(selector, name, version))
-            {
-                for (field, group) in EXTENSION_GROUPS.iter().enumerate() {
-                    if let Some(values) = extension.get(*group) {
-                        for (name, value) in values.as_object()? {
-                            effective[side][field].entry(name).or_insert(value);
-                        }
-                    }
-                }
-            }
-        }
-        Some(effective)
+        Some([
+            extension_fields(&rules[0], name, version)?,
+            extension_fields(&rules[1], name, version)?,
+        ])
     }
 
     fn additional_dependencies(&self, key: &str) -> Option<Vec<ExtensionAddition<'a>>> {
