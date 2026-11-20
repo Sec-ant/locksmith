@@ -8,16 +8,6 @@ When `pnpm-lock.yaml` conflicts during a merge or rebase, the usual fix is to ru
 
 Locksmith works on the lockfile graph instead. It keeps every record your change does not require, works offline by default, and returns a healthy input byte-for-byte.
 
-Suppose you change `foo` from `1.0.0` to `2.0.0`, and `leaf` is `foo`'s only dependency. A fresh `pnpm install` also moves `bar` from `1.0.0` to `1.1.0`, even though `bar` is unrelated:
-
-| Record | `pnpm install` | `locksmith converge` |
-| --- | --- | --- |
-| `foo` 1.0.0 → 2.0.0 | changed, your edit | changed |
-| `leaf` 1.0.0 → 2.0.0 | changed, required by `foo` | changed |
-| `bar` 1.0.0 → 1.1.0 | changed, unrelated | stays 1.0.0 |
-
-The third row is the one that silently changes your dependency graph.
-
 | Starting point | Command |
 | --- | --- |
 | Two branches changed the lockfile | [`merge`](#merge-two-branches) |
@@ -80,7 +70,7 @@ locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. In the example above, `foo` and its dependency `leaf` move to `2.0.0`; `bar` stays at `1.0.0` because `^1.0.0` still accepts it.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 

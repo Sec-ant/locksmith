@@ -8,16 +8,6 @@ merge 或 rebase 时 `pnpm-lock.yaml` 发生冲突，通常的做法是跑一遍
 
 Locksmith 直接处理锁文件里的依赖图。它保留本次修改不需要改动的每一条记录，默认离线运行；输入健康时，输出与原文逐字节相同。
 
-假设你把 `foo` 从 `1.0.0` 改成 `2.0.0`，`leaf` 是 `foo` 唯一的依赖。重新跑 `pnpm install` 时，`bar` 也会从 `1.0.0` 变成 `1.1.0`，尽管它和这次修改无关：
-
-| 记录 | `pnpm install` | `locksmith converge` |
-| --- | --- | --- |
-| `foo` 1.0.0 → 2.0.0 | 改变，本次修改 | 改变 |
-| `leaf` 1.0.0 → 2.0.0 | 改变，`foo` 要求 | 改变 |
-| `bar` 1.0.0 → 1.1.0 | 改变，无关 | 保持 1.0.0 |
-
-第三行就是那种会悄悄改变依赖图、又不会被人注意到的变更。
-
 | 遇到的情况 | 使用的命令 |
 | --- | --- |
 | 两个分支都改了锁文件 | [`merge`](#合并两个分支的锁文件) |
@@ -80,7 +70,7 @@ locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-基准锁文件和安装后的锁文件必须分别与生成它们时的 manifest 和配置匹配。Locksmith 保留这次修改要求的变更，并在新声明仍然接受时恢复原有版本和 peer 绑定。在上面的例子里，`foo` 和它的依赖 `leaf` 变成 `2.0.0`；`bar` 保持 `1.0.0`，因为 `^1.0.0` 仍然接受它。
+基准锁文件和安装后的锁文件必须分别与生成它们时的 manifest 和配置匹配。Locksmith 保留这次修改所需的变更，并在新声明仍然允许时恢复原有版本和 peer 绑定。选择规则和示例见[收敛设计](docs/design.zh-CN.md#4-converge)。
 
 检查差异，再用 `converged.yaml` 替换 `pnpm-lock.yaml`。
 
