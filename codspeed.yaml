@@ -1,0 +1,7 @@
+benchmarks:
+  - name: Merge independent dependency edits
+    exec: benchmarks/cli merge
+  - name: Converge optional peer drift after an install
+    exec: benchmarks/cli converge
+  - name: Repair a missing snapshot from Git history
+    exec: benchmarks/cli repair
