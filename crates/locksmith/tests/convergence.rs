@@ -14,6 +14,11 @@ fn lock(importers: Value, snapshots: Value) -> Lockfile {
 fn parse(value: Value) -> Lockfile {
     Lockfile::parse(&value.to_string()).unwrap()
 }
+fn with_times(lock: &Lockfile, times: Value) -> Lockfile {
+    let mut doc = lock.project().unwrap().clone();
+    doc["time"] = times;
+    parse(doc)
+}
 fn change<'a>(id: &'a str, before: &'a Value, after: &'a Value) -> ManifestChange<'a> {
     ManifestChange {
         importer: id,
@@ -36,6 +41,64 @@ fn fixture() -> (Lockfile, Lockfile, Value, Value) {
         before,
         after,
     )
+}
+
+#[test]
+fn publication_times_follow_the_direct_versions_selected_from_both_lockfiles() {
+    let (baseline, candidate, before, after) = fixture();
+    let old = "2020-01-01T00:00:00.000Z";
+    let new = "2024-01-01T00:00:00.000Z";
+    for (version, prefix) in [("9.14.4", "/"), ("12.21.0", "")] {
+        let config =
+            locksmith::WorkspaceConfig::from_pnpm_version(&json!({}), &version.parse().unwrap())
+                .unwrap();
+        let old_foo = format!("{prefix}foo@1.0.0");
+        let new_foo = format!("{prefix}foo@2.0.0");
+        let kept_bar = format!("{prefix}bar@1.0.0");
+        let drifted_bar = format!("{prefix}bar@1.1.0");
+        let changes = [change("app", &before, &after)];
+        let result = converge(
+            &with_times(&baseline, json!({&old_foo:old, &kept_bar:old})),
+            &with_times(&candidate, json!({&new_foo:new, drifted_bar:new})),
+            &changes,
+            locksmith::ConvergeOptions {
+                configuration: Some(&config),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.project().unwrap()["time"],
+            json!({&kept_bar:old, &new_foo:new})
+        );
+    }
+}
+
+#[test]
+fn a_dependency_that_becomes_transitive_loses_its_last_publication_time() {
+    let (installed, _, after, _) = fixture();
+    let mut before = after.clone();
+    before["devDependencies"] = json!({"leaf":"1.0.0"});
+    let mut base = installed.project().unwrap().clone();
+    base["importers"]["app"]["devDependencies"] =
+        json!({"leaf":{"specifier":"1.0.0","version":"1.0.0"}});
+    base["time"] = json!({"/leaf@1.0.0":"2020-01-01T00:00:00.000Z"});
+    let result = converge(
+        &parse(base),
+        &with_times(&installed, json!({})),
+        &[change("app", &before, &after)],
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(result.project().unwrap()["time"], json!({}));
+}
+
+#[test]
+fn a_reinstall_that_only_adds_publication_times_keeps_the_original_lockfile() {
+    let (baseline, _, _, _) = fixture();
+    let candidate = with_times(&baseline, json!({"/foo@1.0.0":"2020-01-01T00:00:00.000Z"}));
+    let result = converge(&baseline, &candidate, &[], Default::default()).unwrap();
+    assert_eq!(result.to_yaml().unwrap(), baseline.to_yaml().unwrap());
 }
 
 #[test]
