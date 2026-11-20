@@ -1,3 +1,18 @@
+## 0.3.0 (2026-11-20)
+
+### Breaking Changes
+
+- Require `pnpm_version` in Rust `WorkspaceConfig` literals that specify every field (`None` if the version is unknown).
+
+### Features
+
+- Honor each pnpm version’s precedence for overlapping `overrides` in `converge` so upgrades retain compatible baseline versions and peer bindings.
+
+### Fixes
+
+- Keep a patched package’s locked dependency versions when `converge` updates its patch hash during a pnpm upgrade.
+- Prefer peer bindings from the branch using the final `packageManager` version when `merge` combines lockfiles from different pnpm versions.
+
 ## 0.2.1 (2026-11-20)
 
 ### Fixes
