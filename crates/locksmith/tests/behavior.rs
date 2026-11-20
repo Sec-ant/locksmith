@@ -508,6 +508,33 @@ fn script_only_changes_leave_the_lockfile_byte_identical() {
 }
 
 #[test]
+fn only_the_workspace_root_selects_the_package_manager_for_convergence() {
+    let source = lock(graph(json!({".": {}, "app": {}}), json!({})));
+    let before = json!({});
+    let after = json!({"packageManager": "pnpm@10.13.1"});
+    let run = |importer| {
+        locksmith::converge(
+            &source,
+            &source,
+            &[locksmith::ManifestChange {
+                importer,
+                before: Some(&before),
+                after: Some(&after),
+            }],
+            Default::default(),
+        )
+    };
+    assert_eq!(
+        run("app").unwrap().to_yaml().unwrap(),
+        source.to_yaml().unwrap()
+    );
+    assert!(matches!(
+        run("."),
+        Err(LockfileError::GlobalConfigurationChanged { .. })
+    ));
+}
+
+#[test]
 fn global_manifest_configuration_requires_an_explicit_policy() {
     use locksmith::{ManifestChange, converge};
     let baseline = lock(graph(json!({".":{}}), json!({})));

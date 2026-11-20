@@ -266,6 +266,9 @@ fn check_baseline_manifest(
         }
     }
     for field in ["pnpm", "packageManager", "devEngines"] {
+        if field == "packageManager" && change.importer != "." {
+            continue;
+        }
         if get(change.before, field) != get(change.after, field) {
             if field == "pnpm"
                 && change.importer == "."
