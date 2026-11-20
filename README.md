@@ -27,6 +27,12 @@ To install from a checkout with Rust 1.89 or later, run `cargo install --locked 
 
 Locksmith supports `lockfileVersion: '9.0'`, the default in pnpm 9–12.
 
+## Agent skill
+
+The [Locksmith skill](skills/locksmith/SKILL.md) guides lockfile merges, repairs, and convergence. Install the CLI above and add `skills/locksmith/` to your agent's skills.
+
+Try asking “Resolve the `pnpm-lock.yaml` conflict in this rebase.” The skill uses workspace context when available and enables registry lookups as needed. Say “offline” to skip them.
+
 ## Merge two branches
 
 Pass the common ancestor, your lockfile, and the other branch's lockfile in that order. This command works outside a Git repository.

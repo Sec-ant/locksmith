@@ -27,6 +27,12 @@ brew install sec-ant/locksmith/locksmith
 
 Locksmith 支持 pnpm 9–12 默认使用的 `lockfileVersion: '9.0'`。
 
+## Agent 技能
+
+[Locksmith 技能](skills/locksmith/SKILL.md)帮助 agent 合并、修复和收敛锁文件。按上文安装 CLI，再将 `skills/locksmith/` 添加到 agent 的技能目录。
+
+例如，可以直接说「解决这次 rebase 的 `pnpm-lock.yaml` 冲突」。技能会使用可用的工作区上下文，默认按需查询 registry。需要跳过查询时，在请求里注明「离线」。
+
 ## 合并两个分支的锁文件
 
 依次传入共同祖先、当前分支和另一分支的锁文件。在 Git 仓库外也可以运行。
