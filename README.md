@@ -110,6 +110,8 @@ Locksmith works offline by default. A contextual merge, `converge`, and `repair`
 
 ## Rust API
 
+Add the library with `cargo add es-locksmith` and import it as `locksmith`. The package is available on [crates.io](https://crates.io/crates/es-locksmith).
+
 Rust applications can call `merge`, `converge`, and `repair` with in-memory inputs, and apply peer policy with `inspect_peers`. The library performs no filesystem, network, Git, or package-manager operations; callers supply manifests, workspace configuration, and optional registry metadata.
 
 ```rust
@@ -167,4 +169,4 @@ In a separate comparison, we ran `locksmith merge --context` and pnpm 10.33.2’
 
 With Knope installed, run `just change` to record a user-facing change and its version bump in `.changeset/`. Commit that file with the change. When the changeset reaches `main`, Knope Bot opens or updates a release PR with the next version, `Cargo.lock`, and `CHANGELOG.md`.
 
-Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, and updates the Homebrew formula.
+Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io.
