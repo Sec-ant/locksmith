@@ -100,7 +100,18 @@ pub fn from_file<P: AsRef<Path>>(
     let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
     let policy = Policy::from_manifest(manifests.get(".").ok_or("missing root manifest")?);
     let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
-    let [base, ours, theirs] = source.each_ref().map(|s| policy.configuration(s));
+    let [base, ours, theirs] = source.each_ref().map(|s| -> Result<_> {
+        if let Some(manager) = s.get("packageManager") {
+            let version = manager
+                .as_str()
+                .and_then(|s| s.strip_prefix("pnpm@"))
+                .and_then(|v| v.parse().ok())
+                .ok_or("context.configurations[].packageManager must be an exact pnpm@version")?;
+            Ok(locksmith::WorkspaceConfig::from_pnpm_version(s, &version)?)
+        } else {
+            Ok(policy.configuration(s)?)
+        }
+    });
     let configurations = [base?, ours?, theirs?];
     let config = policy.configuration(&raw["configuration"])?;
     let patches = serde_json::from_value(raw["patches"].take())?;

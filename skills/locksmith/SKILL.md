@@ -49,7 +49,7 @@ From the workspace root, choose the commit that contains the lockfile and declar
 locksmith converge --allow-network "$baseline_ref" > "$scratch/candidate.yaml"
 ```
 
-Each lockfile must match its own declarations. Converge accepts manifest, catalog, override, and package extension edits. If it rejects a changed workspace setting, membership, `.npmrc`, or patch input, confirm the baseline, including the correct parent of a merge commit. Keep and verify the pnpm-generated lock when the rejected change is intentional.
+Each lockfile must match its own declarations. For a pnpm major upgrade, use the pre-upgrade baseline and the lock installed with the new version. Keep the exact `packageManager` in both root manifests. If overlapping overrides select a different release, check their order under the new pnpm version. If convergence rejects a workspace setting, membership, `.npmrc`, or patch change, check the baseline and merge parent. Keep and verify the pnpm-generated lock when the rejected change is intentional.
 
 ## Repair a committed lockfile
 

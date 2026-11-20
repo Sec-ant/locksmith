@@ -125,17 +125,15 @@ pub fn manifests(
 
 pub fn patches(
     config: &locksmith::WorkspaceConfig,
-    blobs: &mut Blobs,
-    tree: &str,
     prefix: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<BTreeMap<String, String>> {
     let mut patches = BTreeMap::new();
     for path in config.patches.iter().flat_map(|m| m.values()) {
         if !patches.contains_key(path) {
             let file = format!("{prefix}{}", relative(path)?);
-            let contents = blobs
-                .read(tree, &file)?
-                .ok_or_else(|| format!("missing configured patch {file}"))?;
+            let contents =
+                read(&file)?.ok_or_else(|| format!("missing configured patch {file}"))?;
             patches.insert(path.clone(), contents);
         }
     }
@@ -162,7 +160,7 @@ pub fn relative(path: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn hook_paths(config: &Value) -> Result<Vec<String>> {
+pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
     match config.get("pnpmfile") {
         Some(Value::String(s)) => Ok(vec![relative(s)?]),
         Some(Value::Array(a)) => a

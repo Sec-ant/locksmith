@@ -244,6 +244,110 @@ fn converge_reads_ref_and_worktree_and_outputs_only_required_changes() {
 }
 
 #[test]
+fn converge_across_a_pnpm_upgrade_keeps_baseline_pins_and_applies_final_overrides() {
+    let r = Repo::new();
+    let make = |child: &str, old: bool| {
+        let mut lock = json!({"lockfileVersion":"9.0","settings":{"autoInstallPeers":true,"excludeLinksFromLockfile":false},
+            "importers":{".":{"dependencies":{"plugin":{"specifier":"1.0.0","version":"1.0.0"}}}},
+            "packages":{"plugin@1.0.0":{"resolution":{"integrity":"sha512-plugin"}},
+                format!("child@{child}"):{"resolution":{"integrity":format!("sha512-{child}")}}},
+            "snapshots":{"plugin@1.0.0":{"dependencies":{"child":child}},format!("child@{child}"):{}}});
+        if old {
+            lock["packages"]["plugin@1.0.0"]["peerDependencies"] = json!({"color":"*"});
+            lock["packages"]["plugin@1.0.0"]["peerDependenciesMeta"] =
+                json!({"color":{"optional":true}});
+        } else {
+            lock["overrides"] = json!({"plugin>color":"-"});
+        }
+        lock.to_string()
+    };
+    let manifest = |version: &str| {
+        json!({"packageManager":format!("pnpm@{version}"),"dependencies":{"plugin":"1.0.0"}})
+            .to_string()
+    };
+    r.git(&["rm", "apps/web/package.json"]);
+    r.write(
+        "pnpm-workspace.yaml",
+        "packages: []\nonlyBuiltDependencies: []\n",
+    );
+    r.write("package.json", &manifest("10.33.2"));
+    r.write("pnpm-lock.yaml", &make("1.0.0", true));
+    r.commit("before upgrade");
+    r.write(
+        "pnpm-workspace.yaml",
+        "packages: []\nallowBuilds: {}\noverrides: {'plugin>color': '-'}\n",
+    );
+    r.write("package.json", &manifest("12.21.0"));
+    r.write("pnpm-lock.yaml", &make("1.1.0", false));
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    let result = graph(&out.stdout);
+    assert_eq!(
+        result["snapshots"]["plugin@1.0.0"]["dependencies"]["child"],
+        "1.0.0"
+    );
+    assert!(
+        result["packages"]["plugin@1.0.0"]
+            .get("peerDependencies")
+            .is_none()
+    );
+    assert!(
+        result["packages"]["plugin@1.0.0"]
+            .get("peerDependenciesMeta")
+            .is_none()
+    );
+    assert_eq!(result["overrides"]["plugin>color"], "-");
+    r.write("pnpm-lock.yaml", std::str::from_utf8(&out.stdout).unwrap());
+    let repeat = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(repeat.status.success(), "{}", report(&repeat));
+    assert_eq!(repeat.stdout, out.stdout);
+    r.write("pnpm-lock.yaml", &make("1.0.0", true));
+    let stale = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(!stale.status.success());
+    assert!(stale.stdout.is_empty());
+    assert!(report(&stale).contains("overrides"));
+}
+
+#[test]
+fn converge_accepts_a_removed_dot_relative_patch_during_a_pnpm_upgrade() {
+    let r = Repo::new();
+    let workspace = r.git(&["show", "HEAD:pnpm-workspace.yaml"]);
+    let unpatched = r.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let mut baseline = graph(unpatched.as_bytes());
+    // SHA-256 of the baseline patch contents, "old\n".
+    let hash = "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee";
+    let pin = format!("1.0.0(patch_hash={hash})");
+    baseline["patchedDependencies"] = json!({"left":{"hash":hash,"path":"patches/left.patch"}});
+    baseline["importers"]["apps/web"]["dependencies"]["left"]["version"] = json!(pin);
+    let snapshots = baseline["snapshots"].as_object_mut().unwrap();
+    let body = snapshots.remove("left@1.0.0").unwrap();
+    snapshots.insert(format!("left@{pin}"), body);
+    r.write("pnpm-lock.yaml", &baseline.to_string());
+    r.write("patches/left.patch", "old\n");
+    r.write(
+        "pnpm-workspace.yaml",
+        &format!("{workspace}\npatchedDependencies:\n  left: ./patches/left.patch\n"),
+    );
+    r.commit("patch left");
+
+    r.git(&["rm", "patches/left.patch"]);
+    r.write("pnpm-workspace.yaml", &workspace);
+    r.write("pnpm-lock.yaml", &unpatched);
+    r.write(
+        "package.json",
+        r#"{"private":true,"packageManager":"pnpm@12.21.0"}"#,
+    );
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    let result = graph(&out.stdout);
+    assert!(result.get("patchedDependencies").is_none());
+    assert_eq!(
+        result["importers"]["apps/web"]["dependencies"]["left"]["version"],
+        "1.0.0"
+    );
+}
+
+#[test]
 fn a_widened_catalog_keeps_one_release_across_new_and_existing_consumers() {
     let r = Repo::new();
     for (install, range, version) in [(false, "1.0.0", "1.0.0"), (true, "^1", "1.1.0")] {
@@ -367,6 +471,58 @@ fn explicit_cli_context_selects_pins_without_a_git_checkout() {
         .unwrap();
     assert!(out.status.success(), "{}", report(&out));
     assert_both(graph(&out.stdout));
+}
+
+#[test]
+fn a_pnpm_upgrade_preserves_the_new_resolvers_peers_and_mainline_additions() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"dependencies":{"widget":{"specifier":"1.0.0","version":"1.0.0"}}}},
+        "packages":{"widget@1.0.0":{"resolution":{"integrity":"sha512-widget"},"peerDependencies":{"host":"*"},"peerDependenciesMeta":{"host":{"optional":true}}}},
+        "snapshots":{"widget@1.0.0":{}}});
+    let mut main = base.clone();
+    main["importers"]["."]["dependencies"]["extra"] =
+        json!({"specifier":"1.0.0","version":"1.0.0"});
+    main["packages"]["extra@1.0.0"] = json!({"resolution":{"integrity":"sha512-extra"}});
+    main["snapshots"]["extra@1.0.0"] = json!({});
+    let mut upgrade = base.clone();
+    let bound = "1.0.0(host@2.0.0)";
+    upgrade["importers"]["."]["dependencies"]["widget"]["version"] = json!(bound);
+    upgrade["packages"]["host@2.0.0"] = json!({"resolution":{"integrity":"sha512-host"}});
+    upgrade["snapshots"] =
+        json!({"host@2.0.0":{},"widget@1.0.0(host@2.0.0)":{"dependencies":{"host":"2.0.0"}}});
+    for (name, doc) in [("base", base), ("main", main), ("upgrade", upgrade)] {
+        fs::write(dir.path().join(name), doc.to_string()).unwrap();
+    }
+    let older = json!({"packageManager":"pnpm@10.33.2"});
+    let context = json!({
+        "target":"ours",
+        "manifests":{".":{"packageManager":"pnpm@12.21.0","dependencies":{"widget":"1.0.0","extra":"1.0.0"}}},
+        "configurations":[older,older,{"packageManager":"pnpm@12.21.0"}],
+        "configuration":{"linkWorkspacePackages":false}, "patches":{}
+    });
+    fs::write(dir.path().join("context.json"), context.to_string()).unwrap();
+    let out = Command::new(CLI)
+        .current_dir(dir.path())
+        .args([
+            "merge",
+            "base",
+            "main",
+            "upgrade",
+            "--context",
+            "context.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    let merged = graph(&out.stdout);
+    let deps = &merged["importers"]["."]["dependencies"];
+    assert_eq!(deps["widget"]["version"], bound);
+    assert_eq!(deps["extra"]["version"], "1.0.0");
+    assert_eq!(
+        merged["snapshots"]["widget@1.0.0(host@2.0.0)"]["dependencies"]["host"],
+        "2.0.0"
+    );
 }
 
 #[test]

@@ -197,7 +197,7 @@ fn retain_children(
     let mut restored = BTreeSet::new();
     let default_config = crate::WorkspaceConfig::default();
     let config = options.configuration.unwrap_or(&default_config);
-    let overrides = crate::manifest::Overrides::new(base, config.override_tie_break);
+    let overrides = crate::manifest::Overrides::new(base, config);
     let mut versions = None;
     let lookup = options.registry.is_some()
         && base.get("pnpmfileChecksum").is_none()

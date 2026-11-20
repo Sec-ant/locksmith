@@ -3,7 +3,10 @@ use super::{
     GraphSources, MergeContext, accepts, alias, authorized_patch, desired_patch, missing, opaque,
     peer_names, reference,
 };
-use crate::{LockfileError, Value, graph, manifest, peer};
+use crate::{
+    LockfileError, Value, graph, manifest, peer,
+    workspace_links::{WorkspaceLinks, injected},
+};
 use serde_json::{Map, json};
 use std::collections::BTreeMap;
 
@@ -21,9 +24,6 @@ struct Pin {
     borrowed: bool,
 }
 
-/// A duplicate name is ambiguous only if a workspace link uses it.
-type WorkspacePackages<'a> = std::collections::HashMap<&'a str, Option<&'a str>>;
-
 pub(super) fn select(
     context: &MergeContext<'_>,
     output: &Value,
@@ -33,24 +33,15 @@ pub(super) fn select(
 ) -> Result<SelectedImporters, LockfileError> {
     let docs = sources.docs;
     let mut importers = Map::new();
-    let mut workspace_packages = WorkspacePackages::new();
-    for (id, package) in context.manifests {
-        if let Some(name) = package["name"].as_str() {
-            workspace_packages
-                .entry(name)
-                .and_modify(|id| *id = None)
-                .or_insert(Some(id));
-        }
-    }
     let selector = PinSelector {
         context,
         output,
         sources,
-        workspace_packages,
+        workspace_packages: WorkspaceLinks::new(context.manifests, context.configuration),
     };
     let mut configured_roots = BTreeMap::new();
     let mut configured_sources = BTreeMap::new();
-    let overrides = manifest::Overrides::new(output, context.configuration.override_tie_break);
+    let overrides = manifest::Overrides::new(output, context.configuration);
     for (id, package) in context.manifests {
         let mut record = sources
             .order
@@ -66,6 +57,10 @@ pub(super) fn select(
         }
         for (field, source) in [
             ("dependenciesMeta", package.get("dependenciesMeta")),
+            (
+                "linkDirectory",
+                manifest::link_directory(package, context.configuration),
+            ),
             (
                 "publishDirectory",
                 package
@@ -403,7 +398,7 @@ struct PinSelector<'a, 'graph> {
     context: &'a MergeContext<'a>,
     output: &'a Value,
     sources: &'a GraphSources<'graph>,
-    workspace_packages: WorkspacePackages<'a>,
+    workspace_packages: WorkspaceLinks<'a>,
 }
 
 impl PinSelector<'_, '_> {
@@ -423,7 +418,8 @@ impl PinSelector<'_, '_> {
             workspace_packages,
         } = self;
         let docs = sources.docs;
-        let local = workspace_link(name, specifier, id, package, workspace_packages, context)?;
+        let resolved = workspace_packages.resolve(name, specifier, id, package)?;
+        let local = resolved.as_ref().map(|(link, _)| link);
         if specifier.starts_with("workspace:") && !injected(name, package, context.configuration) {
             let link = local.ok_or_else(|| {
                 missing(
@@ -434,15 +430,14 @@ impl PinSelector<'_, '_> {
             return Ok(Pin {
                 side: context.target.index(),
                 key: link.clone(),
-                reference: link,
+                reference: link.clone(),
                 borrowed: false,
             });
         }
         let target = context.target.index();
         let preferred_local = |key: &str| -> Option<Pin> {
-            let link = local.as_ref()?;
-            let path = graph::linked_importer(id, link.strip_prefix("link:")?);
-            let workspace_version = context.manifests.get(&path)?["version"]
+            let (link, package) = resolved.as_ref()?;
+            let workspace_version = package.as_ref()?["version"]
                 .as_str()?
                 .parse::<node_semver::Version>()
                 .ok()?;
@@ -465,6 +460,7 @@ impl PinSelector<'_, '_> {
         // A configuration edit elsewhere in the workspace need not displace
         // the mainline's direct pin. Assembly still verifies its entire closure.
         if !alternative
+            && context.configurations[target].matches_pnpm(context.configuration)
             && !sources.unchanged_configuration[target]
             && sources.unchanged_rules[target]
             && let Some(pin) = super::preference::dependency(docs[target], id, name)
@@ -495,8 +491,13 @@ impl PinSelector<'_, '_> {
             CandidatePass::Compatible,
             CandidatePass::Rebuild,
         ] {
+            if sources.prefer_baseline && matches!(pass, CandidatePass::Exact) {
+                continue;
+            }
             for side in order {
-                if sources.unchanged_configuration[side] != matches!(pass, CandidatePass::Exact) {
+                if !sources.prefer_baseline
+                    && sources.unchanged_configuration[side] != matches!(pass, CandidatePass::Exact)
+                {
                     continue;
                 }
                 for source_group in manifest::GROUPS {
@@ -511,7 +512,7 @@ impl PinSelector<'_, '_> {
                     let Some(reference) = dep.get("version").and_then(Value::as_str) else {
                         continue;
                     };
-                    if local.as_deref() == Some(reference)
+                    if local.map(String::as_str) == Some(reference)
                         || accepts(name, specifier, reference, output)
                         || (dep.get("specifier").and_then(Value::as_str) == Some(specifier)
                             && opaque(specifier))
@@ -537,7 +538,9 @@ impl PinSelector<'_, '_> {
                             .is_some()
                             && desired_patch(&key, output, sources.docs).is_some()
                         {
-                            if authorized_patch(&key, output, sources.docs) {
+                            if sources.prefer_baseline
+                                || authorized_patch(&key, output, sources.docs)
+                            {
                                 selected = Some((side, reference.to_owned(), key));
                                 break;
                             }
@@ -592,7 +595,7 @@ impl PinSelector<'_, '_> {
                 }
             }
             if selected.is_none()
-                && let Some(link) = &local
+                && let Some(link) = local
             {
                 selected = Some((context.target.index(), link.clone(), link.clone()));
             }
@@ -613,8 +616,9 @@ impl PinSelector<'_, '_> {
                     alias(catalog_specifier.unwrap_or(specifier)).map_or(name, |(name, _)| name);
                 for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
                     if *side == super::PUBLISHED
-                        || sources.unchanged_configuration[*side]
-                            != matches!(pass, CandidatePass::Exact)
+                        || (!sources.prefer_baseline
+                            && sources.unchanged_configuration[*side]
+                                != matches!(pass, CandidatePass::Exact))
                         || sources.compatibility[*side].unchanged(key)
                             == matches!(pass, CandidatePass::Rebuild)
                     {
@@ -687,99 +691,6 @@ impl PinSelector<'_, '_> {
             borrowed,
         }))
     }
-}
-
-fn injected(name: &str, manifest: &Value, configuration: &crate::WorkspaceConfig) -> bool {
-    manifest
-        .get("dependenciesMeta")
-        .and_then(|v| v.get(name))
-        .and_then(|v| v.get("injected"))
-        .and_then(Value::as_bool)
-        .unwrap_or(configuration.resolution.inject_workspace_packages)
-}
-
-fn workspace_link(
-    name: &str,
-    specifier: &str,
-    importer: &str,
-    manifest: &Value,
-    workspace_packages: &WorkspacePackages,
-    context: &MergeContext<'_>,
-) -> Result<Option<String>, LockfileError> {
-    let workspace = specifier.strip_prefix("workspace:").map(str::trim);
-    let explicit_link = specifier.strip_prefix("link:");
-    let link_local = context
-        .configuration
-        .resolution
-        .parameters
-        .get("linkWorkspacePackages");
-    if workspace.is_none()
-        && explicit_link.is_none()
-        && !link_local.is_some_and(|v| v == true || v == "deep")
-    {
-        return Ok(None);
-    }
-    if injected(name, manifest, context.configuration) && explicit_link.is_none() {
-        return Ok(None);
-    }
-    let relative = explicit_link
-        .filter(|p| !p.starts_with('/'))
-        .or_else(|| workspace.filter(|r| r.starts_with('.')));
-    let (target, range) = if let Some(path) = relative {
-        (Some(graph::linked_importer(importer, path)), "*")
-    } else {
-        let (package, range) = if let Some(request) = workspace {
-            request
-                .rsplit_once('@')
-                .filter(|(n, _)| !n.is_empty())
-                .unwrap_or((name, request))
-        } else {
-            let (name, range) = alias(specifier).unwrap_or((name, specifier));
-            if range.parse::<node_semver::Range>().is_err() {
-                return Ok(None);
-            }
-            (name, range)
-        };
-        let first = match workspace_packages.get(package) {
-            Some(Some(id)) => Some((*id).to_owned()),
-            Some(None) => {
-                return Err(missing(
-                    &["importers", importer, name],
-                    "workspace package name is ambiguous",
-                ));
-            }
-            None => None,
-        };
-        (first, range)
-    };
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let Some(package) = context.manifests.get(&target) else {
-        return Ok(None);
-    };
-    if !((workspace.is_some() || relative.is_some()) && matches!(range, "" | "*" | "^" | "~"))
-        && !manifest::matches_version(range, package["version"].as_str())
-    {
-        return Ok(None);
-    }
-    let from: Vec<_> = importer
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != ".")
-        .collect();
-    let to: Vec<_> = target
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != ".")
-        .collect();
-    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    let relative = std::iter::repeat_n("..", from.len() - common)
-        .chain(to[common..].iter().copied())
-        .collect::<Vec<_>>()
-        .join("/");
-    Ok(Some(format!(
-        "link:{}",
-        if relative.is_empty() { "." } else { &relative }
-    )))
 }
 
 fn configured_peer_roots<'a>(

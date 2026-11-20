@@ -59,7 +59,7 @@ pub(crate) fn plan(
             .or_default()
             .push((selector.as_str(), body));
     }
-    let overrides = manifest::Overrides::new(doc, cfg.override_tie_break);
+    let overrides = manifest::Overrides::new(doc, cfg);
     let mut constraints = HashMap::new();
     for (release, pkg) in graph::section(doc, "packages").into_iter().flatten() {
         let Some((parent, version)) = release.rsplit_once('@') else {

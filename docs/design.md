@@ -169,7 +169,7 @@ For `merge --context FILE`, supply JSON like the following. The root workspace p
 }
 ```
 
-`configurations` contains the base, ours, and theirs settings in order. `configuration` holds the merged settings. `patches` maps each configured patch path to its file contents. The Git driver collects these inputs automatically. If a required project file is conflicted, it names the file and leaves the lock unmerged.
+`configurations` contains the base, ours, and theirs settings in order. For a pnpm upgrade, include the root `packageManager` string from each revision in its settings entry. Entries without it use the final root manifest's version. Among compatible graphs, Locksmith prefers one produced by the final pnpm version. `configuration` holds the merged settings. `patches` maps each configured patch path to its file contents. The Git driver collects these inputs automatically. If a required project file is conflicted, it names the file and leaves the lock unmerged.
 
 ### Worked example
 
@@ -186,6 +186,8 @@ The result is one `lib@1.0.0(a@3.0.0)(b@2.0.0)` snapshot. The app's importer ent
 ## 4. converge
 
 `converge` starts from an installed candidate and removes the changes the edit did not require. It is the operation behind "edit one dependency, keep the rest of the lockfile".
+
+For a cross-major pnpm upgrade, declare the exact pnpm version in each root manifest. Convergence checks the installed candidate against the final workspace and patch contents, prefers compatible baseline pins and peer bindings, and takes the bootstrap graph from the new pnpm version. Rust callers supply all final manifests, both versioned configurations, and the patch contents through `converge_with_patches` for a patched workspace.
 
 ### Inputs
 

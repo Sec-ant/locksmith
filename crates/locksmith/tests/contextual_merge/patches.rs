@@ -286,29 +286,31 @@ fn newly_created_patches_follow_exact_range_and_name_selector_precedence() {
     result.validate().unwrap();
 }
 
+fn transitive_patch_graph(patched: bool) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let suffix = if patched {
+        format!("(patch_hash={:x})", Sha256::digest(b"present\n"))
+    } else {
+        String::new()
+    };
+    let leaf = if patched { 2 } else { 1 };
+    let mut doc = json!({
+        "lockfileVersion":"9.0","settings":{"autoInstallPeers":true,"excludeLinksFromLockfile":false},
+        "importers":{".":{"dependencies":{"wrapper":{"specifier":"1.0.0","version":"1.0.0"}}}},
+        "packages":{"wrapper@1.0.0":{"resolution":{"integrity":"sha512-wrapper"}},"lib@1.0.0":{"resolution":{"integrity":"sha512-lib"}},format!("leaf@{leaf}.0.0"):{"resolution":{"integrity":format!("sha512-leaf{leaf}")}}},
+        "snapshots":{"wrapper@1.0.0":{"dependencies":{"lib":format!("1.0.0{suffix}")}},format!("lib@1.0.0{suffix}"):{"dependencies":{"leaf":format!("{leaf}.0.0")}},format!("leaf@{leaf}.0.0"):{}}
+    });
+    if patched {
+        doc["patchedDependencies"] = json!({"lib@1.0.0":{"hash":format!("{:x}",Sha256::digest(b"present\n")),"path":"lib.patch"}});
+    }
+    doc
+}
+
 #[test]
 fn transitive_patch_changes_prefer_an_existing_final_patch_graph() {
     use sha2::{Digest, Sha256};
-    let make = |patched: bool| {
-        let suffix = if patched {
-            format!("(patch_hash={:x})", Sha256::digest(b"present\n"))
-        } else {
-            String::new()
-        };
-        let leaf = if patched { 2 } else { 1 };
-        let mut doc = json!({
-            "lockfileVersion":"9.0","settings":{"autoInstallPeers":true,"excludeLinksFromLockfile":false},
-            "importers":{".":{"dependencies":{"wrapper":{"specifier":"1.0.0","version":"1.0.0"}}}},
-            "packages":{"wrapper@1.0.0":{"resolution":{"integrity":"sha512-wrapper"}},"lib@1.0.0":{"resolution":{"integrity":"sha512-lib"}},format!("leaf@{leaf}.0.0"):{"resolution":{"integrity":format!("sha512-leaf{leaf}")}}},
-            "snapshots":{"wrapper@1.0.0":{"dependencies":{"lib":format!("1.0.0{suffix}")}},format!("lib@1.0.0{suffix}"):{"dependencies":{"leaf":format!("{leaf}.0.0")}},format!("leaf@{leaf}.0.0"):{}}
-        });
-        if patched {
-            doc["patchedDependencies"] = json!({"lib@1.0.0":{"hash":format!("{:x}",Sha256::digest(b"present\n")),"path":"lib.patch"}});
-        }
-        Lockfile::parse(&doc.to_string()).unwrap()
-    };
-    let raw = make(false);
-    let patched = make(true);
+    let raw = Lockfile::parse(&transitive_patch_graph(false).to_string()).unwrap();
+    let patched = Lockfile::parse(&transitive_patch_graph(true).to_string()).unwrap();
     let empty = WorkspaceConfig::default();
     let config = cfg(&json!({"patchedDependencies":{"lib@1.0.0":"lib.patch"}}));
     for (contents, leaf) in [("present\n", 2), ("new\n", 1)] {
@@ -338,6 +340,56 @@ fn transitive_patch_changes_prefer_an_existing_final_patch_graph() {
             format!("{leaf}.0.0")
         );
         output.validate().unwrap();
+    }
+}
+
+#[test]
+fn upgrade_convergence_rehashes_patches_without_updating_their_dependencies() {
+    use locksmith::{ConvergeOptions, ManifestChange, converge_with_patches};
+    use sha2::{Digest, Sha256};
+
+    let baseline =
+        WorkspaceConfig::from_pnpm_version(&json!({}), &"10.33.2".parse().unwrap()).unwrap();
+    let config = WorkspaceConfig::from_pnpm_version(
+        &json!({"patchedDependencies":{"lib@1.0.0":"lib.patch"}}),
+        &"12.21.0".parse().unwrap(),
+    )
+    .unwrap();
+    let hash = format!("{:x}", Sha256::digest(b"present\n"));
+    let key = format!("lib@1.0.0(patch_hash={hash})");
+    for direct in [false, true] {
+        let mut old = transitive_patch_graph(false);
+        let mut installed = transitive_patch_graph(true);
+        installed["patchedDependencies"]["lib@1.0.0"] = json!(hash);
+        let mut manifest = json!({"dependencies":{"wrapper":"1.0.0"}});
+        if direct {
+            manifest["dependencies"]["lib"] = json!("1.0.0");
+            for doc in [&mut old, &mut installed] {
+                let pin = doc["snapshots"]["wrapper@1.0.0"]["dependencies"]["lib"].clone();
+                doc["importers"]["."]["dependencies"]["lib"] =
+                    json!({"specifier":"1.0.0","version":pin});
+            }
+        }
+        let result = converge_with_patches(
+            &Lockfile::parse(&old.to_string()).unwrap(),
+            &Lockfile::parse(&installed.to_string()).unwrap(),
+            &[ManifestChange {
+                importer: ".",
+                before: Some(&manifest),
+                after: Some(&manifest),
+            }],
+            ConvergeOptions {
+                baseline_configuration: Some(&baseline),
+                configuration: Some(&config),
+                registry: None,
+            },
+            &BTreeMap::from([("lib.patch".into(), "present\n".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            result.project().unwrap()["snapshots"][&key]["dependencies"]["leaf"],
+            "1.0.0"
+        );
     }
 }
 

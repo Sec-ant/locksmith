@@ -75,7 +75,7 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 
 ## Reduce changes after an install
 
-After editing a manifest, catalog, override, or package extension, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
+After editing dependencies or upgrading pnpm, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
 
 ```sh
 locksmith converge origin/main > converged.yaml
