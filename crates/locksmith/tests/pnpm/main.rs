@@ -98,23 +98,7 @@ fn install(directory: &Path, store: &Path, frozen: bool) {
 }
 
 fn cfg(value: &Value) -> WorkspaceConfig {
-    let mut config = WorkspaceConfig::from_pnpm(value).unwrap();
-    config.override_tie_break = override_tie_break();
-    let v = pnpm_version();
-    if v.major < 10 {
-        config.patch_encoding = locksmith::PatchEncoding::Md5Base32WithPath;
-    }
-    if v.major >= 11 {
-        config.linked_peer_encoding = locksmith::LinkedPeerEncoding::Path;
-        config.patch_encoding = locksmith::PatchEncoding::Sha256;
-    }
-    if v.major < 11
-        || (v.major == 11 && v < &node_semver::Version::new(11, 28, 12))
-        || (v.major == 12 && v < &node_semver::Version::new(12, 19, 0))
-    {
-        config.resolution.optional_peer_scope = locksmith::OptionalPeerScope::Workspace;
-    }
-    config
+    WorkspaceConfig::from_pnpm_version(value, pnpm_version()).unwrap()
 }
 
 fn override_tie_break() -> locksmith::OverrideTieBreak {

@@ -39,6 +39,7 @@ mod repair;
 mod scope;
 mod source;
 mod verify;
+mod workspace_links;
 
 pub use config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
@@ -52,5 +53,5 @@ pub use merge::{MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
 pub use repair::{RepairContext, RepairInput, repair};
-pub use scope::{ConvergeOptions, ManifestChange, converge};
+pub use scope::{ConvergeOptions, ManifestChange, converge, converge_with_patches};
 pub use serde_json::Value;

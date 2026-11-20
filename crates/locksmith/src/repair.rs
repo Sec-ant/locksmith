@@ -124,7 +124,7 @@ impl RepairInput {
     }
 }
 
-fn check_configuration(
+pub(crate) fn check_configuration(
     doc: &Value,
     metadata: &Value,
     cfg: &WorkspaceConfig,

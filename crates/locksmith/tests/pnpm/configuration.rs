@@ -1014,3 +1014,134 @@ fn removed_overrides_recover_extensions_before_rebinding_new_peers() {
     assert_eq!(package["version"], "18.2.0");
     assert_eq!(provider["version"], "18.3.1");
 }
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn catalog_range_overrides_and_publish_directory_match_a_fresh_install() {
+    use locksmith::{
+        ConvergeOptions, ManifestChange, MergeContext, MergeTarget, RepairContext, converge, merge,
+        repair,
+    };
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("workspace");
+    let store = root.path().join("store");
+    let settings = json!({
+        "packages": ["apps/*"],
+        "catalog": {"is-number":"^7"},
+        "catalogs": {"legacy":{"is-number":"^5"}, "current":{"is-number":"^7"}},
+        "overrides": {"is-number@7":"6.0.0"}
+    });
+    let mut manifests = BTreeMap::from([(
+        ".".to_owned(),
+        json!({"name":"root","private":true,"pnpm":{"overrides":settings["overrides"]}}),
+    )]);
+    for (name, specifier, publish) in [
+        (
+            "editor",
+            "catalog:",
+            json!({"directory":"dist","linkDirectory":false}),
+        ),
+        (
+            "reader",
+            "catalog:legacy",
+            json!({"directory":"dist","linkDirectory":true}),
+        ),
+        ("viewer", "catalog:current", json!({"linkDirectory":false})),
+    ] {
+        manifests.insert(
+            format!("apps/{name}"),
+            json!({"name":name,"dependencies":{"is-number":specifier},"publishConfig":publish}),
+        );
+    }
+    manifests.get_mut("apps/reader").unwrap()["dependencies"]["reader"] = json!("workspace:*");
+    let viewer = &mut manifests.get_mut("apps/viewer").unwrap()["dependencies"];
+    viewer["reader"] = json!("workspace:*");
+    viewer["relative"] = json!("workspace:../reader");
+    viewer["literal"] = json!("link:../reader");
+    let snapshot = |path: &Path, projects: &BTreeMap<String, Value>| {
+        fs::create_dir(path).unwrap();
+        for (id, manifest) in projects {
+            fs::create_dir_all(path.join(id)).unwrap();
+            fs::write(path.join(id).join("package.json"), manifest.to_string()).unwrap();
+        }
+        fs::write(
+            path.join("pnpm-workspace.yaml"),
+            serde_saphyr::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        install(path, &store, false);
+        fs::read_to_string(path.join("pnpm-lock.yaml")).unwrap()
+    };
+    let mut previous = manifests.clone();
+    previous.get_mut("apps/editor").unwrap()["publishConfig"]["linkDirectory"] = json!(true);
+    previous.get_mut("apps/reader").unwrap()["publishConfig"]["linkDirectory"] = json!(false);
+    let stale = snapshot(&root.path().join("before"), &previous);
+    let native = snapshot(&dir, &manifests);
+    let expected = Lockfile::parse(&native).unwrap();
+    let config = cfg(&settings);
+    let patches = BTreeMap::new();
+    let context = RepairContext {
+        manifests: &manifests,
+        configuration: &config,
+        patches: &patches,
+        parents: &[],
+        registry: None,
+    };
+    assert_eq!(
+        repair(&native, &context).unwrap().to_yaml().unwrap(),
+        native
+    );
+    let prior = Lockfile::parse(&stale).unwrap();
+    let merged = merge(
+        &prior,
+        &prior,
+        &prior,
+        Some(&MergeContext {
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configuration: &config,
+            configurations: [&config; 3],
+            patches: &patches,
+            registry: None,
+        }),
+    )
+    .unwrap();
+    let repaired = repair(&stale, &context).unwrap();
+    let changes = manifests
+        .iter()
+        .map(|(id, manifest)| ManifestChange {
+            importer: id,
+            before: previous.get(id),
+            after: Some(manifest),
+        })
+        .collect::<Vec<_>>();
+    let converged = converge(
+        &prior,
+        &expected,
+        &changes,
+        ConvergeOptions {
+            baseline_configuration: Some(&config),
+            configuration: Some(&config),
+            registry: None,
+        },
+    )
+    .unwrap();
+    for lock in [merged, repaired, converged] {
+        assert!(
+            lock.dependency_closure("apps/viewer")
+                .unwrap()
+                .importers
+                .contains("apps/reader")
+        );
+        for field in ["importers", "catalogs"] {
+            assert_eq!(
+                lock.project().unwrap()[field],
+                expected.project().unwrap()[field]
+            );
+        }
+        fs::write(dir.join("pnpm-lock.yaml"), lock.to_yaml().unwrap()).unwrap();
+        install(&dir, &store, true);
+    }
+}

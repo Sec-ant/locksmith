@@ -91,6 +91,41 @@ pub(crate) fn resolve(
     theirs: &Lockfile,
     context: &MergeContext<'_>,
 ) -> Result<Lockfile, LockfileError> {
+    resolve_sources([base, ours, theirs], context, false)
+}
+
+pub(crate) fn converge_upgrade(
+    baseline: &Lockfile,
+    installed: &Lockfile,
+    context: &MergeContext<'_>,
+) -> Result<Lockfile, LockfileError> {
+    use sha2::{Digest, Sha256};
+    let mut current = std::borrow::Cow::Borrowed(installed);
+    let mut seen = BTreeSet::new();
+    loop {
+        let next = resolve_sources([baseline, baseline, &current], context, true)?;
+        if next.documents == current.documents {
+            return Ok(next);
+        }
+        // Rebinding one instance can expose another admissible baseline pin.
+        // Detect recurrence without retaining a large dependency graph per pass.
+        let mut hash = Sha256::new();
+        serde_json::to_writer(&mut hash, &next.project()).expect("JSON values can be hashed");
+        if !seen.insert(hash.finalize()) {
+            return Err(missing(
+                &["snapshots"],
+                "pnpm migration did not reach stable peer bindings",
+            ));
+        }
+        current = std::borrow::Cow::Owned(next);
+    }
+}
+
+fn resolve_sources(
+    locks: [&Lockfile; 3],
+    context: &MergeContext<'_>,
+    prefer_baseline: bool,
+) -> Result<Lockfile, LockfileError> {
     if !context.manifests.contains_key(".") {
         return Err(missing(
             &["manifests", "."],
@@ -102,8 +137,7 @@ pub(crate) fn resolve(
             return Err(LockfileError::InvalidManifest(id.clone()));
         }
     }
-    let locks = [base, ours, theirs];
-    let docs = [base.project(), ours.project(), theirs.project()];
+    let docs = locks.map(Lockfile::project);
     let docs = docs.map(|d| d.ok_or_else(|| missing(&[], "missing project document")));
     let [b, o, t] = docs;
     let docs = [b?, o?, t?];
@@ -112,15 +146,29 @@ pub(crate) fn resolve(
         MergeTarget::Theirs => [2, 1, 0],
     };
     let target = order[0];
-    let matching_configuration = context
-        .configurations
-        .map(|source| source.resolution == context.configuration.resolution);
+    let matching_configuration = context.configurations.map(|source| {
+        source.matches_pnpm(context.configuration)
+            && source.resolution == context.configuration.resolution
+    });
     // Reuse a coherent resolution before mixing individually compatible records
     // from other configurations. This avoids unnecessary peer-context changes.
-    order.sort_by_key(|side| !matching_configuration[*side]);
+    order.sort_by_key(|&side| {
+        (
+            !matching_configuration[side],
+            !context.configurations[side].matches_pnpm(context.configuration),
+        )
+    });
     let metadata = metadata::resolve(docs, order, context)?;
+    if prefer_baseline {
+        crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
+    }
     let evidence = published::records(context, &metadata, docs, order)?;
     let branch_order = order;
+    // Migration convergence keeps admissible baseline pins. Headers and the
+    // bootstrap graph still come from the final package manager.
+    if prefer_baseline {
+        order = [1, 2, 0];
+    }
     let [first, second, third] = order;
     let order = [first, second, third, 3];
     let [b, o, t] = docs;
@@ -137,17 +185,14 @@ pub(crate) fn resolve(
         )
     });
     let final_override_document = json!({"overrides":metadata.get("overrides")});
-    let final_rules = manifest::Overrides::new(
-        &final_override_document,
-        context.configuration.override_tie_break,
-    );
-    let rules = std::array::from_fn(|side| {
-        manifest::Overrides::new(docs[side], configs[side].override_tie_break)
-    });
+    let final_rules = manifest::Overrides::new(&final_override_document, context.configuration);
+    let rules = std::array::from_fn(|side| manifest::Overrides::new(docs[side], configs[side]));
     let matching_overrides: [bool; 4] =
         std::array::from_fn(|side| rules[side].same_rules(&final_rules));
     let mut source_order = order;
-    source_order.sort_by_key(|side| !matching_overrides[*side]);
+    if !prefer_baseline {
+        source_order.sort_by_key(|side| !matching_overrides[*side]);
+    }
     let unqualified: Map<_, _> = graph::section(&metadata, "overrides")
         .into_iter()
         .flatten()
@@ -156,13 +201,11 @@ pub(crate) fn resolve(
         .collect();
     let unqualified = json!({"overrides": unqualified});
     let sources = GraphSources {
+        prefer_baseline,
         docs,
         rules,
         final_rules,
-        unqualified_rules: manifest::Overrides::new(
-            &unqualified,
-            context.configuration.override_tie_break,
-        ),
+        unqualified_rules: manifest::Overrides::new(&unqualified, context.configuration),
         order,
         candidates: std::cell::OnceCell::new(),
         registry: context.registry,
@@ -214,7 +257,7 @@ pub(crate) fn resolve(
         if extended || context.configuration.auto_dedupe {
             graph::refresh_optional(&mut output)?;
         }
-        let overrides = manifest::Overrides::new(&output, context.configuration.override_tie_break);
+        let overrides = manifest::Overrides::new(&output, context.configuration);
         for (id, value) in context.manifests {
             manifest::check(&overrides, id, Some(value), "merged")?;
         }
@@ -224,10 +267,11 @@ pub(crate) fn resolve(
             documents.insert(DocumentKind::Environment, Arc::clone(env));
         }
         documents.insert(DocumentKind::Project, Arc::new(output));
-        let result = Lockfile::with_documents(
+        let mut result = Lockfile::with_documents(
             documents,
             &[locks[target], locks[context.target.other_index()], locks[0]],
         );
+        result.preserve_baseline = prefer_baseline;
         result.validate()?;
         Ok(result)
     };
@@ -444,6 +488,7 @@ pub(crate) fn peer_names(doc: &Value, key: &str) -> BTreeSet<String> {
 type PackageCandidates<'a> = HashMap<&'a str, Vec<(usize, &'a str)>>;
 
 struct GraphSources<'a> {
+    prefer_baseline: bool,
     registry: Option<&'a crate::RegistryMetadata>,
     docs: [&'a Value; 4],
     rules: [manifest::Overrides<'a>; 4],

@@ -218,8 +218,8 @@ fn check_manifests(
     before: &WorkspaceConfig,
     after: &WorkspaceConfig,
 ) -> Result<(), LockfileError> {
-    let baseline_rules = manifest::Overrides::new(base, before.override_tie_break);
-    let candidate_rules = manifest::Overrides::new(donor, after.override_tie_break);
+    let baseline_rules = manifest::Overrides::new(base, before);
+    let candidate_rules = manifest::Overrides::new(donor, after);
     let mut supplied = HashSet::new();
     for change in changes {
         if !supplied.insert(change.importer) {

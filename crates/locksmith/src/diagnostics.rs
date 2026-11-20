@@ -98,7 +98,7 @@ pub fn inspect_peers(
             let resolved_version = resolved.and_then(|r| {
                 if let Some(path) = r.strip_prefix("link:") {
                     workspace_manifests?
-                        .get(&graph::linked_importer(".", path))?
+                        .get(&graph::linked_project(document.get("importers"), ".", path))?
                         .get("version")?
                         .as_str()
                 } else {

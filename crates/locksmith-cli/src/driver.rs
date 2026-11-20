@@ -107,7 +107,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         .each_ref()
         .map(|p| policy::Policy::from_manifest(&p.root).configuration(&p.config));
     let configurations = [base?, ours?, theirs?];
-    let patches = workspace::patches(&config, &mut blobs, &tree, prefix)?;
+    let patches = workspace::patches(&config, prefix, |file| blobs.read(&tree, file))?;
     let target = git::preferred_target(&inputs)?;
     let mut settings = None;
     let mut credentials = None;

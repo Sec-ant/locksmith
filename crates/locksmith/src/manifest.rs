@@ -1,14 +1,14 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
-use crate::{LockfileError, OverrideTieBreak, Value, graph};
+use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
 pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
+    let config = WorkspaceConfig::default();
     left.get("overrides") == right.get("overrides")
-        && Overrides::new(left, OverrideTieBreak::Last)
-            .same_rules(&Overrides::new(right, OverrideTieBreak::Last))
+        && Overrides::new(left, &config).same_rules(&Overrides::new(right, &config))
 }
 
 pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
@@ -245,7 +245,26 @@ pub(crate) fn check(
     {
         return Err(mismatch(importer, side, "publishDirectory differs"));
     }
+    if overrides.config.records_link_directory()
+        && record.get("publishDirectory").is_some()
+        && (record["linkDirectory"] == false)
+            != (manifest["publishConfig"]["linkDirectory"] == false)
+    {
+        return Err(mismatch(importer, side, "linkDirectory differs"));
+    }
     Ok(())
+}
+
+pub(crate) fn link_directory<'a>(
+    manifest: &'a Value,
+    config: &WorkspaceConfig,
+) -> Option<&'a Value> {
+    let publish = &manifest["publishConfig"];
+    publish.get("linkDirectory").filter(|v| {
+        config.records_link_directory()
+            && publish.get("directory").is_some()
+            && v.as_bool() == Some(false)
+    })
 }
 
 pub(crate) fn matches_version(range: &str, version: Option<&str>) -> bool {
@@ -326,7 +345,7 @@ struct OverrideRule<'a> {
 pub(crate) struct Overrides<'a> {
     document: &'a Value,
     by_name: BTreeMap<&'a str, Vec<OverrideRule<'a>>>,
-    tie_break: OverrideTieBreak,
+    config: &'a WorkspaceConfig,
 }
 
 impl<'a> Overrides<'a> {
@@ -348,7 +367,7 @@ impl<'a> Overrides<'a> {
             .collect()
     }
 
-    pub(crate) fn new(document: &'a Value, tie_break: OverrideTieBreak) -> Self {
+    pub(crate) fn new(document: &'a Value, config: &'a WorkspaceConfig) -> Self {
         let mut by_name: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (rule, value) in graph::section(document, "overrides").into_iter().flatten() {
             let (parent, name, range) = override_selector(rule);
@@ -362,12 +381,14 @@ impl<'a> Overrides<'a> {
         Self {
             document,
             by_name,
-            tie_break,
+            config,
         }
     }
 
     pub(crate) fn same_rules(&self, other: &Self) -> bool {
-        if self.tie_break != other.tie_break && self.by_name.values().any(|rules| rules.len() > 1) {
+        if self.config.override_tie_break != other.config.override_tie_break
+            && self.by_name.values().any(|rules| rules.len() > 1)
+        {
             return false;
         }
         self.by_name.len() == other.by_name.len()
@@ -409,9 +430,20 @@ impl<'a> Overrides<'a> {
         name: &str,
         specifier: &str,
     ) -> Result<Option<&'a str>, LockfileError> {
+        let Some(rules) = self.by_name.get(name) else {
+            return Ok(None);
+        };
+        let specifier = if self.config.matches_catalog_ranges() {
+            specifier
+                .strip_prefix("catalog:")
+                .and_then(|catalog| self.catalog_specifier(catalog, name))
+                .unwrap_or(specifier)
+        } else {
+            specifier
+        };
         let mut generic: Option<(Option<&str>, &str)> = None;
         let mut qualified: Option<(Option<&str>, &str)> = None;
-        for rule in self.by_name.get(name).into_iter().flatten() {
+        for rule in rules {
             let OverrideRule {
                 selector: rule,
                 parent,
@@ -442,13 +474,26 @@ impl<'a> Overrides<'a> {
             };
             if best.is_none_or(|(old, _)| {
                 intersects(old, range.unwrap_or(""))
-                    && (self.tie_break == OverrideTieBreak::Last
+                    && (self.config.override_tie_break == OverrideTieBreak::Last
                         || !intersects(range, old.unwrap_or("")))
             }) {
                 *best = Some((range, value));
             }
         }
         Ok(qualified.or(generic).map(|(_, value)| value))
+    }
+
+    fn catalog_specifier(&self, catalog: &str, name: &str) -> Option<&'a str> {
+        let catalog = if catalog.is_empty() {
+            "default"
+        } else {
+            catalog
+        };
+        self.config
+            .catalogs
+            .get(catalog)?
+            .get(name)
+            .map(String::as_str)
     }
 
     fn resolve(
@@ -462,18 +507,15 @@ impl<'a> Overrides<'a> {
         }
         if let Some(catalog) = value.strip_prefix("catalog:") {
             value = self
-                .document
-                .get("catalogs")
-                .and_then(|v| {
-                    v.get(if catalog.is_empty() {
+                .catalog_specifier(catalog, name)
+                .or_else(|| {
+                    let catalog = if catalog.is_empty() {
                         "default"
                     } else {
                         catalog
-                    })
+                    };
+                    self.document["catalogs"][catalog][name]["specifier"].as_str()
                 })
-                .and_then(|v| v.get(name))
-                .and_then(|v| v.get("specifier"))
-                .and_then(Value::as_str)
                 .ok_or_else(|| {
                     LockfileError::InvalidDocument(format!(
                         "override for {name} references a missing catalog entry"

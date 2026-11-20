@@ -166,6 +166,13 @@ impl Preferences {
                 {
                     return false;
                 }
+                // A matching release on the other branch can already contain
+                // the final declarations. Try it before switching its consumers.
+                if docs[other]["packages"].get(locator).is_some()
+                    && self.snapshots.insert(locator.to_owned())
+                {
+                    return true;
+                }
                 self.consumers(key, docs, target, other)
             }
             _ => return false,

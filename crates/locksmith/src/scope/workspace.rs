@@ -157,10 +157,10 @@ pub(super) fn apply(
     } else {
         BTreeSet::new()
     };
-    let overrides = manifest::Overrides::new(donor, after.override_tie_break);
+    let overrides = manifest::Overrides::new(donor, after);
     let mut override_edits = BTreeMap::<&str, BTreeSet<&str>>::new();
     if !names.is_empty() {
-        let previous = manifest::Overrides::new(base, before.override_tie_break);
+        let previous = manifest::Overrides::new(base, before);
         for doc in docs {
             for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
                 let pkg = graph::package_key(key);

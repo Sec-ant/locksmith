@@ -191,7 +191,7 @@ pub(crate) fn records(
             "new releases require the project's effective hook output",
         ));
     }
-    let rules = manifest::Overrides::new(metadata, config.override_tie_break);
+    let rules = manifest::Overrides::new(metadata, config);
     let mut releases = Vec::new();
     let mut needed = BTreeSet::new();
     for key in registry

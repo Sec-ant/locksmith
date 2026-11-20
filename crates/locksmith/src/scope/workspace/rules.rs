@@ -320,8 +320,8 @@ pub(in crate::scope) fn check_installed_rules(
     policy: &crate::config::ResolutionCompatibility<'_>,
     changed: &BTreeSet<&str>,
 ) -> Result<(), LockfileError> {
-    let previous = manifest::Overrides::new(base, before.override_tie_break);
-    let current = manifest::Overrides::new(donor, after.override_tie_break);
+    let previous = manifest::Overrides::new(base, before);
+    let current = manifest::Overrides::new(donor, after);
     let mut samples = std::collections::HashMap::new();
     for (key, body) in graph::section(base, "snapshots").into_iter().flatten() {
         samples.entry(graph::package_key(key)).or_insert(body);

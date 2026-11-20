@@ -12,7 +12,7 @@ use crate::{
     Result,
     git::{self, Blobs},
     policy::Policy,
-    workspace::{Members, Project, file_inputs},
+    workspace::{self, Members, Project},
 };
 
 fn working_file(path: &str) -> Result<Option<String>> {
@@ -36,6 +36,10 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix)?;
     let working = Project::from_files(working_file)?;
+    let policy = Policy::from_manifest(&working.root);
+    let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;
+    let config = policy.configuration(&working.config)?;
+    let upgrade = base_config.changes_pnpm_major(&config);
     for key in project
         .config
         .as_object()
@@ -45,19 +49,31 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     {
         let a = project.config.get(key);
         let b = working.config.get(key);
-        if !matches!(
-            key.as_str(),
-            "catalog" | "catalogs" | "overrides" | "packageExtensions"
-        ) && a != b
-        {
+        let supported = match key.as_str() {
+            "catalog" | "catalogs" | "overrides" | "packageExtensions" => true,
+            "patchedDependencies"
+            | "onlyBuiltDependencies"
+            | "allowBuilds"
+            | "ignoredBuiltDependencies"
+            | "trustLockfile"
+            | "verifyDepsBeforeRun"
+            | "pmOnFail"
+            | "minimumReleaseAgeExclude" => upgrade,
+            _ => false,
+        };
+        if a != b && !supported {
             return Err(format!("changed workspace setting {key} in pnpm-workspace.yaml or package.json requires resolution").into());
         }
     }
     if project.workspace != working.workspace {
         return Err("workspace membership changed in pnpm-workspace.yaml".into());
     }
-    let mut files: BTreeSet<_> = file_inputs(&project.config)?.into_iter().collect();
-    files.insert(".npmrc".into());
+    let mut files = if upgrade {
+        workspace::hook_paths(&project.config)?
+    } else {
+        workspace::file_inputs(&project.config)?
+    };
+    files.push(".npmrc".into());
     for path in files {
         if blobs.read(tree, &format!("{prefix}{path}"))? != working_file(&path)? {
             return Err(
@@ -65,6 +81,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             );
         }
     }
+    let patches = if upgrade {
+        workspace::patches(&config, "", working_file)?
+    } else {
+        BTreeMap::new()
+    };
     let path = format!("{prefix}pnpm-lock.yaml");
     let baseline_text = blobs
         .read(tree, &path)?
@@ -101,16 +122,13 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             after: after.get(id),
         })
         .collect();
-    let policy = Policy::from_manifest(after.get(".").ok_or("missing working tree package.json")?);
-    let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;
-    let config = policy.configuration(&working.config)?;
     let result = crate::registry::resolve(
         crate::registry::Lookup::Converge,
         allow_network.then_some(crate::registry::ProjectRc::Working),
         &working.config,
         &after["."],
         |registry| {
-            locksmith::converge(
+            locksmith::converge_with_patches(
                 &baseline,
                 &candidate,
                 &changes,
@@ -119,6 +137,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                     configuration: Some(&config),
                     registry,
                 },
+                &patches,
             )
         },
     )?;

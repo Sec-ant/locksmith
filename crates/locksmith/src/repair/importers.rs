@@ -15,7 +15,9 @@ pub(super) fn repair<'a>(
     let context = evidence.context;
     let mut result = Cow::Borrowed(doc);
     let mut used_catalogs = BTreeSet::new();
-    let overrides = manifest::Overrides::new(metadata, context.configuration.override_tie_break);
+    let links =
+        crate::workspace_links::WorkspaceLinks::new(context.manifests, context.configuration);
+    let overrides = manifest::Overrides::new(metadata, context.configuration);
     for id in graph::section(doc, "importers")
         .into_iter()
         .flat_map(|m| m.keys())
@@ -84,7 +86,21 @@ pub(super) fn repair<'a>(
             let prior = old[group]
                 .get(name)
                 .or_else(|| manifest::GROUPS.into_iter().find_map(|g| old[g].get(name)));
+            let prior_link = prior
+                .and_then(|dep| dep["version"].as_str())
+                .is_some_and(|pin| pin.starts_with("link:"));
+            let workspace_link = if prior_link {
+                links.resolve(name, &spec, id, manifest)?
+            } else {
+                None
+            };
             let retained = prior.and_then(|dep| dep["version"].as_str()).filter(|v| {
+                if let Some((link, _)) = &workspace_link {
+                    return link == v;
+                }
+                if spec.starts_with("workspace:") && v.starts_with("link:") {
+                    return false;
+                }
                 fits(
                     name,
                     range,
@@ -176,6 +192,10 @@ pub(super) fn repair<'a>(
                 manifest
                     .get("dependenciesMeta")
                     .filter(|m| !m.as_object().is_some_and(Map::is_empty)),
+            ),
+            (
+                "linkDirectory",
+                manifest::link_directory(manifest, context.configuration),
             ),
             (
                 "publishDirectory",

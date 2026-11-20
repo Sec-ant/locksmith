@@ -64,6 +64,63 @@ pub fn converge(
     changes: &[ManifestChange<'_>],
     options: ConvergeOptions<'_>,
 ) -> Result<Lockfile, LockfileError> {
+    converge_with_patches(baseline, candidate, changes, options, &BTreeMap::new())
+}
+
+/// Converge with the final workspace's patch contents, keyed by relative path.
+/// A cross-major migration uses all final manifests and verifies patch identities.
+pub fn converge_with_patches(
+    baseline: &Lockfile,
+    candidate: &Lockfile,
+    changes: &[ManifestChange<'_>],
+    options: ConvergeOptions<'_>,
+    patches: &BTreeMap<String, String>,
+) -> Result<Lockfile, LockfileError> {
+    if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
+        && before.changes_pnpm_major(after)
+    {
+        let installed = candidate.project().ok_or_else(|| {
+            crate::reconcile::missing(&["importers"], "missing candidate project")
+        })?;
+        let original = baseline
+            .project()
+            .ok_or_else(|| crate::reconcile::missing(&["importers"], "missing baseline project"))?;
+        let baseline_rules = manifest::Overrides::new(original, before);
+        let rules = manifest::Overrides::new(installed, after);
+        let mut manifests = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for change in changes {
+            if !seen.insert(change.importer) {
+                return Err(LockfileError::InvalidManifest(change.importer.into()));
+            }
+            manifest::check(&baseline_rules, change.importer, change.before, "baseline")?;
+            manifest::check(&rules, change.importer, change.after, "candidate")?;
+            if let Some(manifest) = change.after {
+                manifests.insert(change.importer.to_owned(), manifest.clone());
+            }
+        }
+        if let Some(id) = graph::keys(installed, "importers")
+            .into_iter()
+            .find(|id| !manifests.contains_key(id))
+        {
+            return Err(crate::reconcile::missing(
+                &["manifests", &id],
+                "pnpm migration requires every final workspace manifest",
+            ));
+        }
+        return crate::reconcile::converge_upgrade(
+            baseline,
+            candidate,
+            &crate::MergeContext {
+                target: crate::MergeTarget::Ours,
+                configurations: [before, before, after],
+                configuration: after,
+                manifests: &manifests,
+                patches,
+                registry: options.registry,
+            },
+        );
+    }
     let mut result = select(baseline, candidate, changes, options)?;
     if let Some(config) = options.configuration {
         let mut plan = crate::extensions::plan(
@@ -165,12 +222,10 @@ fn select(
             options.configuration.expect("verified configuration"),
         )?;
     }
+    let default_config = crate::WorkspaceConfig::default();
     let overrides = manifest::Overrides::new(
         result.project().unwrap(),
-        options
-            .configuration
-            .map(|c| c.override_tie_break)
-            .unwrap_or_default(),
+        options.configuration.unwrap_or(&default_config),
     );
     for change in changes {
         manifest::check(&overrides, change.importer, change.after, "output")?;
@@ -235,10 +290,8 @@ fn converge_manifests(
     configured: Option<&workspace::Projection>,
 ) -> Result<Lockfile, LockfileError> {
     let root_choices = configured.map(|p| &p.roots);
-    let override_tie_break = options
-        .configuration
-        .map(|config| config.override_tie_break)
-        .unwrap_or_default();
+    let default_config = crate::WorkspaceConfig::default();
+    let config = options.configuration.unwrap_or(&default_config);
     let base = baseline.project().ok_or_else(|| {
         LockfileError::InvalidDocument("missing baseline project document".into())
     })?;
@@ -247,9 +300,9 @@ fn converge_manifests(
     })?;
     let baseline_rules = manifest::Overrides::new(
         original.project().expect("baseline project"),
-        override_tie_break,
+        options.baseline_configuration.unwrap_or(config),
     );
-    let candidate_rules = manifest::Overrides::new(donor, override_tie_break);
+    let candidate_rules = manifest::Overrides::new(donor, config);
     let mut changed = BTreeMap::new();
     let mut specifiers = BTreeMap::new();
     let mut only_specifiers = true;
@@ -679,7 +732,11 @@ fn importer_dependency<'a>(
 fn local_target(document: &Value, importer: &str, name: &str, dep: &Value) -> Option<String> {
     let reference = dep.get("version")?.as_str()?;
     if let Some(path) = reference.strip_prefix("link:") {
-        return Some(graph::linked_importer(importer, path));
+        return Some(graph::linked_project(
+            document.get("importers"),
+            importer,
+            path,
+        ));
     }
     let key = graph::snapshot_key(name, reference, graph::section(document, "snapshots"));
     local_package(document, &key)

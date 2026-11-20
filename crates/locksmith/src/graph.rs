@@ -173,6 +173,29 @@ pub(crate) fn linked_importer(from: &str, target: &str) -> String {
     }
 }
 
+/// A workspace link can point at the project's published subdirectory.
+pub(crate) fn linked_project(importers: Option<&Value>, from: &str, path: &str) -> String {
+    let target = linked_importer(from, path);
+    let Some(importers) = importers else {
+        return target;
+    };
+    if importers.get(&target).is_some() {
+        return target;
+    }
+    let mut ancestor = target.as_str();
+    while ancestor != "." {
+        ancestor = ancestor.rsplit_once('/').map_or(".", |(parent, _)| parent);
+        if let Some(record) = importers.get(ancestor)
+            && record["linkDirectory"] != false
+            && let Some(dir) = record["publishDirectory"].as_str()
+            && linked_importer(ancestor, dir) == target
+        {
+            return ancestor.to_owned();
+        }
+    }
+    target
+}
+
 pub(crate) fn closure(
     document: &Value,
     kind: DocumentKind,
@@ -246,7 +269,7 @@ fn closure_with_snapshots(
             references(importer, kind, "importers", &key, include_dev, &mut issues)
         {
             if let Some(target) = reference.strip_prefix("link:") {
-                let target = linked_importer(&key, target);
+                let target = linked_project(importer_records, &key, target);
                 if importer_records.and_then(|map| map.get(&target)).is_some()
                     && queued_importers.insert(target.clone())
                 {

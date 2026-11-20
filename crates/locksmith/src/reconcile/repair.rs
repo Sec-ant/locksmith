@@ -12,6 +12,7 @@ fn repair_peer_declarations(
     key: &str,
     side: usize,
     package: &Value,
+    body: &Value,
     sources: &GraphSources<'_>,
 ) -> Result<(Value, BTreeSet<String>), LockfileError> {
     let mut result = package.clone();
@@ -37,6 +38,29 @@ fn repair_peer_declarations(
             continue;
         }
         let declaration = declaration.as_str().expect("peer declaration");
+        // A removed peer that was never installed has no edge or binding to
+        // replace. Keep the instance and retire the manifest declaration.
+        if sources
+            .final_rules
+            .apply(&parent, ".", name, declaration)?
+            .is_none()
+            && graph::dependency(body, name).is_none()
+            && (before.is_empty()
+                || after
+                    .iter()
+                    .all(|(rule, _)| manifest::override_selector(rule).2.is_none()))
+        {
+            for field in ["peerDependencies", "peerDependenciesMeta"] {
+                if let Some(entries) = result.get_mut(field).and_then(Value::as_object_mut) {
+                    entries.remove(name);
+                    if entries.is_empty() {
+                        result.as_object_mut().unwrap().remove(field);
+                    }
+                }
+            }
+            changed.insert(name.clone());
+            continue;
+        }
         let witnessed = sources.order.iter().find_map(|source| {
             let candidate = sources.docs[*source].get("packages")?.get(key)?;
             (sources.compatibility[*source].accepts(key)
@@ -246,7 +270,12 @@ pub(super) fn repair_snapshot(
     peers: &mut peer::Merger<'_>,
 ) -> Result<RepairedSnapshot, LockfileError> {
     let (package, mut changed_peers) =
-        repair_peer_declarations(graph::package_key(key), side, package, sources)?;
+        repair_peer_declarations(graph::package_key(key), side, package, body, sources)?;
+    let retired: BTreeSet<_> = changed_peers
+        .iter()
+        .filter(|name| package["peerDependencies"].get(*name).is_none())
+        .cloned()
+        .collect();
     let mut result = body.clone();
     let mut added_peers = PeerRequirements::new();
     let mut changed_contexts = PeerRequirements::new();
@@ -522,11 +551,12 @@ pub(super) fn repair_snapshot(
             if needs_patch
                 && !needs_override
                 && !needs_configuration
-                && desired_patch(&old_key, metadata, sources.docs) == Some(None)
+                && let Some(patch) = desired_patch(&old_key, metadata, sources.docs)
+                && (sources.prefer_baseline || patch.is_none())
             {
                 let source = peers.origin_side(&old_key).unwrap_or(side);
                 selected = peers
-                    .repatch(source, &old_key, None)
+                    .repatch(source, &old_key, patch)
                     .map(|key| crate::reconcile::reference(name, &key));
             }
             // Prefer a proven final-patch graph before deriving a new one.
@@ -673,10 +703,14 @@ pub(super) fn repair_snapshot(
         }
     }
     if changed.is_empty() && removed.is_empty() {
+        let mut peers = PeerChanges::default();
+        if !retired.is_empty() {
+            peers.supplied.insert(key.into(), retired);
+        }
         return Ok(RepairedSnapshot {
             body: result,
             package,
-            peers: PeerChanges::default(),
+            peers,
             extended: false,
         });
     }
@@ -781,13 +815,14 @@ pub(super) fn repair_snapshot(
             required: requirements,
             affected,
             unresolved,
-            supplied: if extended.is_empty() {
+            supplied: if extended.is_empty() && retired.is_empty() {
                 PeerRequirements::new()
             } else {
                 let mut names = extended
                     .iter()
                     .map(|name| peer::canonical_binding(name, &previous[name]).0.to_owned())
                     .collect::<BTreeSet<_>>();
+                names.extend(retired);
                 names.insert(parent_name.into());
                 BTreeMap::from([(key.into(), names)])
             },

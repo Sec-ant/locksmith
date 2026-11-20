@@ -1,10 +1,7 @@
 //! pnpm version conventions and peer acceptance used by filesystem adapters.
 use std::error::Error;
 
-use locksmith::{
-    LinkedPeerEncoding, Lockfile, LockfileError, OptionalPeerScope, OverrideTieBreak,
-    PatchEncoding, PeerRules, PeerVersionMatching, WorkspaceConfig,
-};
+use locksmith::{Lockfile, LockfileError, PeerRules, PeerVersionMatching, WorkspaceConfig};
 use serde_json::Value;
 
 pub struct Policy(Option<node_semver::Version>);
@@ -20,31 +17,10 @@ impl Policy {
     }
 
     pub fn configuration(&self, raw: &Value) -> Result<WorkspaceConfig, LockfileError> {
-        let mut config = WorkspaceConfig::from_pnpm(raw)?;
-        if let Some(v) = &self.0 {
-            config.extension_checksum = Some(if v.major < 10 {
-                locksmith::ExtensionChecksum::Md5
-            } else {
-                locksmith::ExtensionChecksum::Sha256
-            });
-            if v.major >= 12 {
-                config.override_tie_break = OverrideTieBreak::First;
-            }
-            if v.major < 10 {
-                config.patch_encoding = PatchEncoding::Md5Base32WithPath;
-            }
-            if v.major >= 11 {
-                config.linked_peer_encoding = LinkedPeerEncoding::Path;
-                config.patch_encoding = PatchEncoding::Sha256;
-            }
-            if v.major < 11
-                || (v.major == 11 && v < &node_semver::Version::new(11, 28, 12))
-                || (v.major == 12 && v < &node_semver::Version::new(12, 19, 0))
-            {
-                config.resolution.optional_peer_scope = OptionalPeerScope::Workspace;
-            }
+        match &self.0 {
+            Some(v) => WorkspaceConfig::from_pnpm_version(raw, v),
+            None => WorkspaceConfig::from_pnpm(raw),
         }
-        Ok(config)
     }
 
     pub fn check_peers(

@@ -24,7 +24,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let project = Project::read(&mut blobs, commit, prefix)?;
     let policy = Policy::from_manifest(&project.root);
     let config = policy.configuration(&project.config)?;
-    let patches = workspace::patches(&config, &mut blobs, commit, prefix)?;
+    let patches = workspace::patches(&config, prefix, |file| blobs.read(commit, file))?;
     let manifests = workspace::manifests(&project, &mut blobs, commit, prefix)?;
     // Release Git's mapped packfiles before allocating the lockfile graph.
     drop(blobs);
