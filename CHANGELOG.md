@@ -1,3 +1,10 @@
+## 0.3.1 (2026-11-20)
+
+### Fixes
+
+- Show `--help` output when `locksmith` runs without arguments.
+- Speed up `converge` in large workspaces by recovering peer bindings on demand and limiting Git's search for untracked workspace manifests.
+
 ## 0.3.0 (2026-11-20)
 
 ### Breaking Changes
