@@ -20,6 +20,18 @@ build:
 install:
     cargo install --locked --path crates/locksmith-cli
 
+# Run the public CLI benchmarks locally with CodSpeed.
+bench mode="walltime":
+    #!/bin/sh
+    set -eu
+    cargo build --locked --release -p locksmith-cli
+    export PATH="$PWD/target/release:$PATH"
+    LOCKSMITH_BENCH_DIR=$(mktemp -d)
+    export LOCKSMITH_BENCH_DIR
+    trap 'rm -r "$LOCKSMITH_BENCH_DIR"' EXIT
+    sh benchmarks/prepare.sh "$LOCKSMITH_BENCH_DIR"
+    codspeed run --mode "{{mode}}"
+
 # Describe a user-facing change and select its release level.
 change:
     knope change

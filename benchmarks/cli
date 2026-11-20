@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+cd "$LOCKSMITH_BENCH_DIR/worktree"
+case "$1" in
+  merge) set -- merge ../base.yaml ../ours.yaml ../theirs.yaml ;;
+  converge) set -- converge HEAD ;;
+  repair) set -- repair missing-snapshot ;;
+  *) exit 2 ;;
+esac
+exec "${LOCKSMITH_BIN:-locksmith}" "$@" > "${LOCKSMITH_OUTPUT:-/dev/null}"
