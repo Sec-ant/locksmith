@@ -6,7 +6,10 @@ use std::{
 use glob::{MatchOptions, Pattern};
 use serde_json::{Value, json};
 
-use super::{Result, git::Blobs};
+use super::{
+    Result,
+    git::{self, Blobs},
+};
 
 pub const CONFIG_FILES: &[&str] = &[
     "package.json",
@@ -269,6 +272,31 @@ impl Members {
             patterns.push(Pattern::new(&format!("{pattern}/package.json"))?);
         }
         Ok(this)
+    }
+
+    pub fn working_directories(&self, prefix: &str) -> Result<BTreeSet<String>> {
+        let mut args = vec!["ls-files", "-zc", "--others", "--exclude-standard"];
+        let exclude;
+        if !self.include.iter().any(|p| p.as_str().contains("**"))
+            && let Some(depth) = self
+                .include
+                .iter()
+                .map(|p| p.as_str().matches('/').count())
+                .max()
+        {
+            // Patterns include the manifest filename. Git's exclude is rooted
+            // at the repository, so count the workspace prefix as well.
+            let first_unused_depth = prefix.matches('/').count() + depth + 1;
+            exclude = format!("--exclude={}/", "/*".repeat(first_unused_depth));
+            args.push(&exclude);
+        }
+        args.extend([
+            "--",
+            ":(glob)**/package.json",
+            ":(glob)**/package.json5",
+            ":(glob)**/package.yaml",
+        ]);
+        self.directories(&git::output(&args)?, "")
     }
 
     pub fn directories(&self, paths: &str, prefix: &str) -> Result<BTreeSet<String>> {

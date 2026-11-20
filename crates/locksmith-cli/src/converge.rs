@@ -155,17 +155,7 @@ fn workspace_manifests(
     let mut importers = BTreeSet::from([".".to_owned()]);
     if project.workspace {
         importers.extend(members.directories(&git::workspace_paths(tree, prefix)?, prefix)?);
-        let paths = git::output(&[
-            "ls-files",
-            "-zc",
-            "--others",
-            "--exclude-standard",
-            "--",
-            ":(glob)**/package.json",
-            ":(glob)**/package.json5",
-            ":(glob)**/package.yaml",
-        ])?;
-        importers.extend(members.directories(&paths, "")?);
+        importers.extend(members.working_directories(prefix)?);
     }
     let mut before = BTreeMap::new();
     let mut after = BTreeMap::new();

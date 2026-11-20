@@ -30,3 +30,6 @@ base64.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 mimalloc = { version = "0.1.52", features = ["v2", "no_thp"] }
+
+[dev-dependencies]
+percent-encoding = "2"
