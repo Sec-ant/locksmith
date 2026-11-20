@@ -483,6 +483,49 @@ fn driver_prefers_default_branch_pins_in_either_merge_direction() {
         );
         r.git(&["merge", "--abort"]);
     }
+
+    r.git(&[
+        "config",
+        "--local",
+        "locksmith.mainline",
+        "refs/heads/topic",
+    ]);
+    r.git(&["switch", "trunk"]);
+    r.git(&["merge", "--no-commit", "topic"]);
+    let lock = graph(r.git(&["show", ":pnpm-lock.yaml"]).as_bytes());
+    assert_eq!(
+        lock["importers"]["apps/web"]["devDependencies"]["right"]["version"],
+        "1.2.0"
+    );
+    r.git(&["merge", "--abort"]);
+
+    r.git(&[
+        "config",
+        "--local",
+        "locksmith.mainline",
+        "refs/heads/missing",
+    ]);
+    let result = r.cmd("git", &["merge", "--no-commit", "topic"]);
+    assert!(!result.status.success());
+    assert!(report(&result).contains("invalid locksmith.mainline \"refs/heads/missing\""));
+}
+
+#[test]
+fn driver_prefers_ours_without_a_mainline() {
+    let r = Repo::new();
+    pin_right(&r, "1.1.0");
+    r.commit("main pin");
+    r.git(&["branch", "master"]);
+    r.git(&["switch", "topic"]);
+    pin_right(&r, "1.2.0");
+    r.commit("topic pin");
+
+    r.git(&["merge", "--no-commit", "main"]);
+    let lock = graph(r.git(&["show", ":pnpm-lock.yaml"]).as_bytes());
+    assert_eq!(
+        lock["importers"]["apps/web"]["devDependencies"]["right"]["version"],
+        "1.2.0"
+    );
 }
 
 #[test]

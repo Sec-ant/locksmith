@@ -135,7 +135,7 @@ The contextual merge treats the final manifests as the source of truth:
 4. Assemble the reachable graph: copy the selected snapshots and packages, rebind peers to the selected providers, apply overrides and patches, and apply package extensions.
 5. Validate the result. A missing version or release declaration produces `ResolutionRequired` with a `RegistryRequest`; the caller can supply metadata and retry.
 
-When several locked candidates are equally suitable, the target branch breaks the tie. The Git driver picks the target from the repository's mainline: `origin/HEAD` first, then local `main` or `master`. A mainline tip wins over a commit on mainline history; other ties keep `ours`.
+When several locked candidates are equally suitable, the target branch breaks the tie. The Git driver uses the ref configured in `locksmith.mainline`. The ref must resolve to a commit. With that setting unset, the driver uses the branch pointed to by `origin/HEAD` and its local counterpart. A mainline tip takes precedence over a commit on mainline history. Other ties keep `ours`, including when no mainline is available.
 
 If a selection fails later — a peer cannot be satisfied, or a required record is missing — Locksmith does not restart from scratch. It traces the failed record back to the importer edges that selected it, flips the preference for those edges and their affected consumers, and retries with the same inputs. The retry is bounded by the number of edges involved in the failure.
 

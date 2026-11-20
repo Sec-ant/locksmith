@@ -106,8 +106,27 @@ pub fn revisions(files: [&OsString; 3], path: &str) -> Result<DriverInputs> {
     Ok(DriverInputs { revisions, replay })
 }
 
-/// Prefer a side on the default branch's history; keep ours for other ties.
-pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget> {
+fn mainline_tips() -> Result<Vec<String>> {
+    let configured = Command::new("git")
+        .args(["config", "--null", "--get", "locksmith.mainline"])
+        .output()?;
+    match configured.status.code() {
+        Some(0) => {
+            let value = String::from_utf8(configured.stdout)?;
+            let reference = value.trim_end_matches('\0');
+            let tip = output(&[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{reference}^{{commit}}"),
+            ])
+            .map_err(|err| format!("invalid locksmith.mainline {reference:?}: {err}"))?;
+            return Ok(vec![tip.trim_end().to_owned()]);
+        }
+        Some(1) => (),
+        _ => return Err(failure(&configured).into()),
+    }
+
     let remote = Command::new("git")
         .args(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
         .output()?;
@@ -119,7 +138,7 @@ pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget>
                 .ok_or("invalid origin/HEAD")?;
             vec![format!("refs/heads/{name}"), remote]
         }
-        Some(1) => vec!["refs/heads/main".to_owned(), "refs/heads/master".to_owned()],
+        Some(1) => return Ok(Vec::new()),
         _ => return Err(failure(&remote).into()),
     };
     let tips = checked(
@@ -127,16 +146,21 @@ pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget>
             .args(["for-each-ref", "--format=%(refname) %(objectname)"])
             .args(&refs),
     )?;
-    let tips: Vec<_> = tips
+    Ok(tips
         .lines()
         .filter_map(|l| l.split_once(' '))
         .filter(|(r, _)| refs.iter().any(|wanted| wanted == r))
-        .map(|(_, id)| id)
-        .collect();
+        .map(|(_, id)| id.to_owned())
+        .collect())
+}
+
+/// Prefer a side on mainline history; keep ours for other ties.
+pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget> {
+    let tips = mainline_tips()?;
     let [_, ours, theirs] = &inputs.revisions;
     let on_main = |commit: &str| -> Result<bool> {
         for tip in &tips {
-            if commit == *tip {
+            if commit == tip.as_str() {
                 return Ok(true);
             }
             let result = Command::new("git")
@@ -151,8 +175,7 @@ pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget>
         Ok(false)
     };
     Ok(
-        if !tips.contains(&ours.as_str())
-            && (tips.contains(&theirs.as_str()) || (on_main(theirs)? && !on_main(ours)?))
+        if !tips.contains(ours) && (tips.contains(theirs) || (on_main(theirs)? && !on_main(ours)?))
         {
             locksmith::MergeTarget::Theirs
         } else {

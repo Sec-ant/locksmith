@@ -16,6 +16,10 @@ lint:
 build:
     cargo build --workspace --locked
 
+# Install the locksmith CLI from this checkout.
+install:
+    cargo install --locked --path crates/locksmith-cli
+
 # Run the Rust tests and documentation examples.
 test:
     cargo test --workspace --all-targets --locked

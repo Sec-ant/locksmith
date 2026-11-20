@@ -63,6 +63,12 @@ git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
 
 Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
 
+The driver uses `origin/HEAD` by default. To use another mainline, set `locksmith.mainline` in your clone. If neither is available, ties keep `ours`.
+
+```sh
+git config --local locksmith.mainline refs/heads/trunk
+```
+
 If Git pauses on the lockfile, resolve any project files named in the diagnostic, then open `pnpm-lock.yaml`. Resolve any conflict markers. If the text merged cleanly, review the dependency named in the diagnostic. Stage the resolved files with `git add` and continue the merge or rebase.
 
 ## Reduce changes after an install

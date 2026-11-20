@@ -63,6 +63,12 @@ git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
 
 在 merge 或 rebase 过程中，Git 需要对锁文件做三方合并时就会调用 Locksmith。驱动读取合并后的工作区声明，据此选择记录；两侧版本同样合适时，优先保留主干版本。
 
+驱动默认通过 `origin/HEAD` 识别主干。需要指定其他主干时，在本地仓库设置 `locksmith.mainline`。两者都没有设置时，平局保留 `ours`。
+
+```sh
+git config --local locksmith.mainline refs/heads/trunk
+```
+
 如果 Git 因锁文件暂停，先解决诊断中点名的项目文件，再打开 `pnpm-lock.yaml`。有冲突标记时直接编辑。如果文本已经合并干净，就检查诊断指出的依赖。确认后用 `git add` 暂存文件，继续 merge 或 rebase。
 
 ## 收敛安装后的变更
