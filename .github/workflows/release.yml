@@ -19,6 +19,8 @@ jobs:
        github.event.pull_request.user.login == 'knope-bot[bot]' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       commit: ${{ steps.metadata.outputs.commit }}
       tag: ${{ steps.metadata.outputs.tag }}
@@ -30,16 +32,29 @@ jobs:
       - name: Resolve release version and commit
         id: metadata
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "locksmith-cli") | .version')
           tag="v$version"
+          commit=$(git rev-parse HEAD)
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "Tag $GITHUB_REF_NAME must match package version $tag." >&2
             exit 1
           fi
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            # Create the tag before the parallel builds, while the release commit is on main.
+            tag_ref="refs/tags/$tag"
+            tag_exists=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" |
+              jq -r --arg ref "$tag_ref" 'any(.[]; .ref == $ref)')
+            if [[ "$tag_exists" == false ]]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                --raw-field "ref=$tag_ref" --raw-field "sha=$commit" --silent
+            fi
+          fi
           {
             echo "tag=$tag"
-            echo "commit=$(git rev-parse HEAD)"
+            echo "commit=$commit"
           } >> "$GITHUB_OUTPUT"
 
   binary:
@@ -88,6 +103,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,12 +122,12 @@ jobs:
           mkdir -p Formula
           visibility=$(gh repo view --json visibility --jq '.visibility | ascii_downcase')
           sh scripts/homebrew-formula.sh "${TAG#v}" dist/SHA256SUMS "$visibility" > Formula/locksmith.rb
-          # A draft can exist before GitHub creates its tag. Any existing tag must match the build.
+          # Only publish binaries built from the tagged commit.
           tag_ref="refs/tags/$TAG"
           refs=$(git ls-remote origin "$tag_ref" "$tag_ref^{}")
           tagged_commit=$(awk -v ref="$tag_ref" '$2 == ref { tag = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : tag }' <<< "$refs")
-          if [[ -n "$tagged_commit" && "$tagged_commit" != "$RELEASE_COMMIT" ]]; then
-            echo "Tag $TAG already points to $tagged_commit, expected $RELEASE_COMMIT." >&2
+          if [[ "$tagged_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "Tag $TAG points to ${tagged_commit:-no commit}, expected $RELEASE_COMMIT." >&2
             exit 1
           fi
           if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
@@ -122,7 +138,9 @@ jobs:
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*
           elif [[ "$draft" == true ]]; then
             gh release upload "$TAG" --clobber dist/*
-            gh release edit "$TAG" --target "$RELEASE_COMMIT" --draft=false
+            # GitHub checks the target's workflow files even with an existing tag.
+            # The verified tag determines the release commit.
+            gh release edit "$TAG" --target "$DEFAULT_BRANCH" --draft=false
           else
             gh release download "$TAG" --pattern SHA256SUMS --output - | cmp - dist/SHA256SUMS
           fi
