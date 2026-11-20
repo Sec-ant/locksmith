@@ -1,3 +1,11 @@
+## 0.2.1 (2026-11-20)
+
+### Fixes
+
+#### Publish the Rust library as `es-locksmith`
+
+Add an MIT license and publish the library on crates.io. Rust code imports it as `locksmith`.
+
 ## 0.2.0 (2026-11-20)
 
 ### Breaking Changes
