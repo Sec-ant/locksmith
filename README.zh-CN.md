@@ -2,7 +2,21 @@
 
 [English](README.md) · **简体中文**
 
-Locksmith 用来合并 pnpm 锁文件，也能在安装依赖后收敛 `pnpm-lock.yaml`，减少与本次修改无关的变更。
+Locksmith 用来合并 pnpm 锁文件，让无关的依赖变更留在 diff 之外。
+
+merge 或 rebase 时 `pnpm-lock.yaml` 发生冲突，通常的做法是跑一遍 `pnpm install`，让 pnpm 重新生成锁文件。锁文件会恢复有效，但 pnpm 会重新解析整张依赖图。无关依赖的版本和 peer 绑定可能跟着变，而锁文件的 diff 很少有人 review。
+
+Locksmith 直接处理锁文件里的依赖图。它保留本次修改不需要改动的每一条记录，默认离线运行；输入健康时，输出与原文逐字节相同。
+
+假设你把 `foo` 从 `1.0.0` 改成 `2.0.0`，`leaf` 是 `foo` 唯一的依赖。重新跑 `pnpm install` 时，`bar` 也会从 `1.0.0` 变成 `1.1.0`，尽管它和这次修改无关：
+
+| 记录 | `pnpm install` | `locksmith converge` |
+| --- | --- | --- |
+| `foo` 1.0.0 → 2.0.0 | 改变，本次修改 | 改变 |
+| `leaf` 1.0.0 → 2.0.0 | 改变，`foo` 要求 | 改变 |
+| `bar` 1.0.0 → 1.1.0 | 改变，无关 | 保持 1.0.0 |
+
+第三行就是那种会悄悄改变依赖图、又不会被人注意到的变更。
 
 | 遇到的情况 | 使用的命令 |
 | --- | --- |
@@ -31,7 +45,7 @@ Locksmith 支持 pnpm 9–12 默认使用的 `lockfileVersion: '9.0'`。
 locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 ```
 
-当两个分支修改了同一条依赖，合并后的工作区声明可以帮助确定版本。Git 合并驱动会自动读取这些声明，脚本也可以通过 `--context FILE` 提供相同的信息。[合并上下文格式](docs/design.zh-CN.md#合并上下文)
+当两个分支修改了同一条依赖，最终的工作区 manifest 决定保留哪个版本。Git 合并驱动会自动读取这些声明；脚本可以用 `--context FILE` 提供相同的信息，格式见[合并上下文](docs/design.zh-CN.md#合并上下文)。不带上下文时，Locksmith 做三方比较，可达记录有分歧就报告冲突。
 
 ### 配置 Git 合并驱动
 
@@ -47,39 +61,62 @@ locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
 ```
 
-在 merge 或 rebase 过程中，Git 需要对锁文件做三方合并时就会调用 Locksmith。驱动逐条检查依赖是否符合合并后的工作区声明。两边的版本都合适时，优先保留主干版本。
+在 merge 或 rebase 过程中，Git 需要对锁文件做三方合并时就会调用 Locksmith。驱动读取合并后的工作区声明，据此选择记录；两侧版本同样合适时，优先保留主干版本。
 
 如果 Git 因锁文件暂停，先解决诊断中点名的项目文件，再打开 `pnpm-lock.yaml`。有冲突标记时直接编辑。如果文本已经合并干净，就检查诊断指出的依赖。确认后用 `git add` 暂存文件，继续 merge 或 rebase。
 
 ## 收敛安装后的变更
 
-修改 manifest（如 `package.json`）、catalog、override 或包扩展规则后，照常运行 `pnpm install`。随后在工作区根目录运行以下命令。传入的 Git 引用应包含修改前的锁文件和工作区声明。
+修改 manifest（如 `package.json`）、catalog、override 或包扩展规则后，照常运行 `pnpm install`。随后在工作区根目录运行以下命令，传入的 Git 引用应包含修改前的锁文件和工作区声明。
 
 ```sh
 locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-基准锁文件和安装后的锁文件应分别与各自的工作区声明匹配。Locksmith 保留这次修改要求的变更，并在声明允许时恢复原有版本和各使用方的 peer 依赖绑定。命令成功后，检查差异，再用 `converged.yaml` 替换 `pnpm-lock.yaml`。
+基准锁文件和安装后的锁文件必须分别与生成它们时的 manifest 和配置匹配。Locksmith 保留这次修改要求的变更，并在新声明仍然接受时恢复原有版本和 peer 绑定。在上面的例子里，`foo` 和它的依赖 `leaf` 变成 `2.0.0`；`bar` 保持 `1.0.0`，因为 `^1.0.0` 仍然接受它。
+
+检查差异，再用 `converged.yaml` 替换 `pnpm-lock.yaml`。
 
 ## 修复已经合并的锁文件
 
-即使 Git 合并时没有报告冲突，锁文件也可能包含重复记录，或有依赖指向缺失的包实例。在工作区根目录运行以下命令，用同一个提交中的声明和配置检查锁文件。
+即使 Git 合并时没有报告冲突，锁文件也可能留下重复记录、过期的 importer 声明，或有依赖指向缺失的包实例。在工作区根目录运行以下命令，用同一个提交中的声明和配置检查锁文件。
 
 ```sh
 locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
-输入正确时，输出与原文逐字节相同。修复会保留有效的锁定版本，也可以从父提交恢复缺失的记录。成功后检查并应用需要的修改。如果现有信息仍不足以确定某条依赖，命令会在标准错误中点名该依赖，标准输出为空。
+输入健康时，输出与原文逐字节相同。修复会保留有效的锁定版本，也可以从父提交恢复缺失的记录；加上 `--allow-network` 时还可以使用 registry 元数据。如果现有信息仍不足以确定某条依赖，命令会在标准错误中点名该依赖，标准输出为空。
+
+## 脚本契约
+
+- 成功时，独立运行的命令把 YAML 写到标准输出。
+- 诊断写到标准错误。
+- 退出码 `1` 表示冲突、依赖选择待定或 peer 要求未满足；其他错误使用 `2`。
+- Git 驱动失败时返回 `1`，并把 Git 对三份输入做文本合并的结果写回锁文件，便于手动解决冲突。即使文本合并干净，Git 也会保留未合并状态，直到你确认诊断中指出的依赖。
 
 ## 按需查询 registry
 
-Locksmith 默认离线运行。使用工作区上下文的 `merge`、`converge` 和 `repair` 可以加上 `--allow-network`，从项目配置的 registry 查询包元数据。安装依赖仍由 pnpm 完成。
+Locksmith 默认离线运行。带上下文的 merge、`converge` 和 `repair` 可以加上 `--allow-network`，从项目配置的 registry 查询包元数据。CLI 会使用项目的 registry 设置和凭据，遵循版本发布时间和版本选择策略，并在本次命令中缓存结果。安装依赖仍由 pnpm 完成。
 
 ## Rust API
 
-Rust 应用可以直接把内存中的数据传给 `merge`、`converge` 和 `repair`。在本仓库运行 `cargo doc -p locksmith --no-deps --open` 可查看完整 API。[架构与调用示例](docs/design.zh-CN.md#rust-库-api)
+Rust 应用可以把内存中的数据直接传给 `merge`、`converge` 和 `repair`，也可以用 `inspect_peers` 应用 peer 策略。库本身不做文件系统、网络、Git 或包管理器操作；manifest、工作区配置和 registry 元数据都由调用方提供。
+
+```rust
+use locksmith::{Lockfile, LockfileError, merge};
+
+fn main() -> Result<(), LockfileError> {
+    let base = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {app: {}}\n")?;
+    let ours = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {app: {}, lib: {}}\n")?;
+    let merged = merge(&base, &ours, &base, None)?;
+    assert!(merged.project().unwrap()["importers"].get("lib").is_some());
+    Ok(())
+}
+```
+
+在本仓库运行 `cargo doc -p locksmith --no-deps --open` 可查看完整 API。数据模型和算法见[《Locksmith 的工作原理》](docs/design.zh-CN.md)。
 
 ## 性能
 
@@ -108,3 +145,12 @@ Rust 应用可以直接把内存中的数据传给 `merge`、`converge` 和 `rep
 | 384 | 248 KiB | 0.052 s / 17 MiB | 1.27 s / 196 MiB |
 
 </details>
+
+## 兼容性与限制
+
+- 支持 `lockfileVersion: '9.0'`，即 pnpm 9–12 的默认格式。实验性锁文件格式会按格式版本直接拒绝。
+- Locksmith 不安装依赖包，安装仍由 `pnpm install` 完成。
+- 库不做 I/O。CLI 负责读取项目文件、Git 和 registry。
+- registry 访问需要显式加上 `--allow-network`。
+- Git 合并驱动需要 Git 2.38 或更高版本。
+- 输出在写出前会重新校验；操作失败时不会产生半成品锁文件。

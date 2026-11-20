@@ -4,6 +4,20 @@
 
 Locksmith merges pnpm lockfiles and keeps unrelated dependency changes out of your diff.
 
+When `pnpm-lock.yaml` conflicts during a merge or rebase, the usual fix is to run `pnpm install` and let pnpm regenerate the file. The lockfile becomes valid, but pnpm re-resolves the whole graph. Unrelated versions and peer bindings can change, and lockfile diffs are rarely reviewed.
+
+Locksmith works on the lockfile graph instead. It keeps every record your change does not require, works offline by default, and returns a healthy input byte-for-byte.
+
+Suppose you change `foo` from `1.0.0` to `2.0.0`, and `leaf` is `foo`'s only dependency. A fresh `pnpm install` also moves `bar` from `1.0.0` to `1.1.0`, even though `bar` is unrelated:
+
+| Record | `pnpm install` | `locksmith converge` |
+| --- | --- | --- |
+| `foo` 1.0.0 → 2.0.0 | changed, your edit | changed |
+| `leaf` 1.0.0 → 2.0.0 | changed, required by `foo` | changed |
+| `bar` 1.0.0 → 1.1.0 | changed, unrelated | stays 1.0.0 |
+
+The third row is the one that silently changes your dependency graph.
+
 | Starting point | Command |
 | --- | --- |
 | Two branches changed the lockfile | [`merge`](#merge-two-branches) |
@@ -25,17 +39,17 @@ Locksmith supports `lockfileVersion: '9.0'`, the default in pnpm 9–12.
 
 ## Merge two branches
 
-Pass the common ancestor, your lockfile, and the other branch’s lockfile in that order. This command works outside a Git repository.
+Pass the common ancestor, your lockfile, and the other branch's lockfile in that order. This command works outside a Git repository.
 
 ```sh
 locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 ```
 
-If both branches changed the same dependency, the final workspace manifests can settle which version to use. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`. [Merge context format](docs/design.md#merge-context)
+If both branches changed the same dependency, the final workspace manifests decide which version to keep. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`; see [Merge context](docs/design.md#merge-context). Without context, Locksmith performs a three-way comparison and reports a conflict when a reachable record disagrees.
 
 ### Configure the Git merge driver
 
-Add this line to the repository’s `.gitattributes`.
+Add this line to the repository's `.gitattributes`.
 
 ```gitattributes
 /pnpm-lock.yaml merge=locksmith
@@ -47,7 +61,7 @@ Register the driver once per clone with Git 2.38 or later.
 git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
 ```
 
-Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver checks each dependency against the merged workspace and prefers the mainline version when both pins fit equally well.
+Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
 
 If Git pauses on the lockfile, resolve any project files named in the diagnostic, then open `pnpm-lock.yaml`. Resolve any conflict markers. If the text merged cleanly, review the dependency named in the diagnostic. Stage the resolved files with `git add` and continue the merge or rebase.
 
@@ -60,26 +74,49 @@ locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-Each lockfile should match its own workspace declarations. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where they still fit. After a successful run, review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. In the example above, `foo` and its dependency `leaf` move to `2.0.0`; `bar` stays at `1.0.0` because `^1.0.0` still accepts it.
+
+Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 
 ## Repair an already merged lockfile
 
-A clean Git merge can still leave a duplicate record or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
+A clean Git merge can still leave a duplicate record, a stale importer declaration, or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
 
 ```sh
 locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
-A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits. On success, review and apply any changes. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
+A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
+
+## Scripting contract
+
+- On success, the standalone commands write YAML to stdout.
+- Diagnostics go to stderr.
+- Exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
+- The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
 
 ## Optional registry access
 
-Locksmith works offline by default. A merge with workspace context, `converge`, or `repair` can query the configured registry for package metadata with `--allow-network`. Use pnpm to install packages.
+Locksmith works offline by default. A contextual merge, `converge`, and `repair` can query the configured registry for package metadata with `--allow-network`. The CLI uses the project's registry settings and credentials, respects release-age and version-selection settings, and caches metadata for the command. Package installation remains pnpm's job.
 
 ## Rust API
 
-Rust applications can call `merge`, `converge`, and `repair` with in-memory inputs. From a checkout, run `cargo doc -p locksmith --no-deps --open` for the API reference. [Architecture and library examples](docs/design.md#rust-library-api)
+Rust applications can call `merge`, `converge`, and `repair` with in-memory inputs, and apply peer policy with `inspect_peers`. The library performs no filesystem, network, Git, or package-manager operations; callers supply manifests, workspace configuration, and optional registry metadata.
+
+```rust
+use locksmith::{Lockfile, LockfileError, merge};
+
+fn main() -> Result<(), LockfileError> {
+    let base = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {app: {}}\n")?;
+    let ours = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {app: {}, lib: {}}\n")?;
+    let merged = merge(&base, &ours, &base, None)?;
+    assert!(merged.project().unwrap()["importers"].get("lib").is_some());
+    Ok(())
+}
+```
+
+Run `cargo doc -p locksmith --no-deps --open` from a checkout for the full API. For the data model and algorithms, see [How Locksmith works](docs/design.md).
 
 ## Performance
 
@@ -108,3 +145,12 @@ In a separate comparison, we ran `locksmith merge --context` and pnpm 10.33.2’
 | 384 | 248 KiB | 0.052 s / 17 MiB | 1.27 s / 196 MiB |
 
 </details>
+
+## Compatibility and limits
+
+- Supports `lockfileVersion: '9.0'`, the default in pnpm 9–12. Experimental lockfile formats are rejected by their format version.
+- Locksmith never installs packages. Run `pnpm install` for that.
+- The library performs no I/O. The CLI reads project files, Git, and the registry.
+- Registry access is opt-in with `--allow-network`.
+- The Git driver requires Git 2.38 or later.
+- The output is validated before it is written; a failed operation produces no partial lockfile.
