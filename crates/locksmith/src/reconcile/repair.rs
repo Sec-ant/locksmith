@@ -8,6 +8,28 @@ use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+struct SnapshotProviders<'a> {
+    source: Option<(usize, &'a str)>,
+    providers: BTreeMap<String, String>,
+}
+
+impl SnapshotProviders<'_> {
+    fn resolve(&mut self, peers: &mut peer::Merger<'_>) -> &mut BTreeMap<String, String> {
+        // Recovering an opaque peer identity can require a hash search. Edges
+        // that retain their locked references never need the enclosing scope.
+        if let Some((side, key)) = self.source.take()
+            && let Some(inherited) = peers.binding_context(side, key, &BTreeMap::new())
+        {
+            for (name, value) in inherited {
+                if name != "patch_hash" {
+                    self.providers.entry(name).or_insert(value);
+                }
+            }
+        }
+        &mut self.providers
+    }
+}
+
 fn repair_peer_declarations(
     key: &str,
     side: usize,
@@ -134,7 +156,7 @@ fn extend_dependencies(
     key: &str,
     side: usize,
     result: &mut Value,
-    previous: &mut BTreeMap<String, String>,
+    previous: &mut SnapshotProviders<'_>,
     metadata: &Value,
     sources: &GraphSources<'_>,
     peers: &mut peer::Merger<'_>,
@@ -145,6 +167,7 @@ fn extend_dependencies(
     if additions.is_empty() {
         return Ok((changed, requirements));
     }
+    let previous = previous.resolve(peers);
     let package_key = graph::package_key(key);
     let (parent_name, parent_version) = package_key.rsplit_once('@').expect("package identity");
     let parent = json!({"name":parent_name,"version":parent_version});
@@ -309,20 +332,16 @@ pub(super) fn repair_snapshot(
             extended: false,
         });
     }
-    let mut previous = BTreeMap::new();
-    if let Some(bindings) = peers.binding_context(side, key, &previous) {
-        previous.extend(
-            bindings
-                .into_iter()
-                .filter(|(name, _)| name != "patch_hash"),
-        );
-    }
+    let mut previous = SnapshotProviders {
+        source: Some((side, key)),
+        providers: BTreeMap::new(),
+    };
     for group in ["dependencies", "optionalDependencies"] {
         for (name, value) in graph::section(body, group).into_iter().flatten() {
             let reference = value
                 .as_str()
                 .ok_or_else(|| missing(&["snapshots", key, name], "expected reference"))?;
-            previous.insert(name.clone(), reference.into());
+            previous.providers.insert(name.clone(), reference.into());
         }
     }
     let Some((parent_name, parent_version)) = graph::package_key(key).rsplit_once('@') else {
@@ -537,8 +556,9 @@ pub(super) fn repair_snapshot(
                 old_version
             };
             let actual_name = alias(desired).map_or(old_name, |(n, _)| n);
+            let previous = previous.resolve(peers);
             let mut providers = previous.clone();
-            if let Some(bindings) = peers.binding_context(side, &old_key, &previous) {
+            if let Some(bindings) = peers.binding_context(side, &old_key, previous) {
                 for (name, binding) in bindings {
                     providers.entry(name).or_insert(binding);
                 }
@@ -595,7 +615,7 @@ pub(super) fn repair_snapshot(
                             continue;
                         }
                         let Some(bindings) =
-                            peers.source_context(*candidate_side, candidate, &previous)
+                            peers.source_context(*candidate_side, candidate, previous)
                         else {
                             continue;
                         };
@@ -627,12 +647,7 @@ pub(super) fn repair_snapshot(
                             continue;
                         }
                         if let Some(original) = peers
-                            .recontextualize_source(
-                                *candidate_side,
-                                candidate,
-                                &bindings,
-                                &previous,
-                            )
+                            .recontextualize_source(*candidate_side, candidate, &bindings, previous)
                             .and_then(|key| {
                                 peers.repatch(
                                     *candidate_side,
@@ -652,7 +667,7 @@ pub(super) fn repair_snapshot(
                         && let Some((candidate_side, candidate, required, affected, bindings)) =
                             deferred.take()
                         && let Some(original) = peers
-                            .recontextualize_source(candidate_side, candidate, &bindings, &previous)
+                            .recontextualize_source(candidate_side, candidate, &bindings, previous)
                             .and_then(|key| {
                                 peers.repatch(
                                     candidate_side,
@@ -714,6 +729,7 @@ pub(super) fn repair_snapshot(
             extended: false,
         });
     }
+    let previous = previous.resolve(peers);
     let mut requirements = PeerRequirements::new();
     let mut affected = PeerRequirements::new();
     for group in ["dependencies", "optionalDependencies"] {
@@ -744,7 +760,7 @@ pub(super) fn repair_snapshot(
                 })
                 .ok_or_else(|| missing(&["snapshots", &child], "missing instance"))?;
             let mut names = peer_names(sources.docs[child_side], &child);
-            if let Some(bindings) = peers.binding_context(child_side, &child, &previous) {
+            if let Some(bindings) = peers.binding_context(child_side, &child, previous) {
                 names.extend(bindings.into_keys().filter(|name| name != "patch_hash"));
             }
             if !names.is_disjoint(&removed) {

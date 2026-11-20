@@ -57,18 +57,16 @@ impl Registry {
                     key.eq_ignore_ascii_case("authorization")
                         .then(|| value.trim().to_owned())
                 });
+                let (registry, package) = path.rsplit_once('/').unwrap();
+                let name = percent_encoding::percent_decode_str(package)
+                    .decode_utf8()
+                    .unwrap();
                 requests.push(Response {
-                    path: path.into(),
+                    path: format!("{registry}/{name}"),
                     auth,
                 });
-                let name = path
-                    .trim_start_matches('/')
-                    .split_once('/')
-                    .unwrap()
-                    .1
-                    .replace("%2f", "/");
                 let (status, body) = packages
-                    .get(name.as_str())
+                    .get(name.as_ref())
                     .map_or(("404 Not Found", "{}".to_owned()), |doc| {
                         ("200 OK", doc.to_string())
                     });
@@ -157,7 +155,7 @@ fn registry_selection_uses_scope_auth_release_age_and_a_single_metadata_request(
     assert!(!root.join("node_modules").exists());
     let requests = registry.finish();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/private/@org%2flib");
+    assert_eq!(requests[0].path, "/private/@org/lib");
     assert_eq!(requests[0].auth.as_deref(), Some("Bearer scoped"));
 }
 

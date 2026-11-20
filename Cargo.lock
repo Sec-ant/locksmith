@@ -409,6 +409,7 @@ dependencies = [
  "jiff",
  "mimalloc",
  "node-semver",
+ "percent-encoding",
  "serde",
  "serde-saphyr",
  "serde_json",

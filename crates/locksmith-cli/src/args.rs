@@ -7,7 +7,7 @@ const MERGE_USAGE: &str = "Usage: locksmith merge BASE OURS THEIRS [--context FI
 
 /// Merge, repair and converge pnpm lockfiles.
 #[derive(Bpaf, Clone, Debug)]
-#[bpaf(options, generate(parser))]
+#[bpaf(options, generate(parser), fallback_to_usage)]
 pub enum Command {
     /// Print the Locksmith version
     #[bpaf(short('V'), long("version"))]

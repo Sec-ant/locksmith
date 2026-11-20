@@ -244,6 +244,38 @@ fn converge_reads_ref_and_worktree_and_outputs_only_required_changes() {
 }
 
 #[test]
+fn converge_in_a_nested_workspace_discovers_untracked_members() {
+    for (pattern, member) in [("apps/*", "apps/web"), ("apps/**", "apps/team/web")] {
+        let r = Repo::new();
+        r.write("nested/package.json", "{}");
+        r.write(
+            "nested/pnpm-workspace.yaml",
+            &format!("packages: ['{pattern}']"),
+        );
+        r.write("nested/.gitignore", "apps/ignored/\n");
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        r.write("nested/pnpm-lock.yaml", &lock.to_string());
+        r.commit("nested workspace");
+
+        r.write("nested/apps/ignored/package.json", "ignored by Git");
+        r.write(
+            &format!("nested/{member}/package.json"),
+            r#"{"name":"new-member","dependencies":{"local":"link:../local"}}"#,
+        );
+        lock["importers"][member] = json!({"dependencies":{"local":{"specifier":"link:../local","version":"link:../local"}}});
+        r.write("nested/pnpm-lock.yaml", &lock.to_string());
+
+        let out = Command::new(CLI)
+            .current_dir(r.0.path().join("nested"))
+            .args(["converge", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", report(&out));
+        assert_eq!(graph(&out.stdout)["importers"], lock["importers"]);
+    }
+}
+
+#[test]
 fn converge_across_a_pnpm_upgrade_keeps_baseline_pins_and_applies_final_overrides() {
     let r = Repo::new();
     let make = |child: &str, old: bool| {
@@ -535,6 +567,12 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
             .output()
             .unwrap()
     };
+    let help = run(&["--help"]);
+    let bare = run(&[]);
+    assert!(help.status.success() && bare.status.success());
+    assert!(!help.stdout.is_empty());
+    assert_eq!(bare.stdout, help.stdout);
+    assert!(bare.stderr.is_empty());
     for name in ["merge", "converge", "repair"] {
         let out = run(&[name, "--help"]);
         assert!(out.status.success());
@@ -563,6 +601,7 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
             .contains("merge BASE OURS THEIRS")
     );
     for args in [
+        &["converg"][..],
         &["merge", "base", "ours", "theirs", "--allow-network"][..],
         &[
             "merge",

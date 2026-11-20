@@ -137,10 +137,16 @@ fn offline_probe_detects_a_missing_transitive_snapshot_after_a_successful_instal
     assert_success(check_frozen(root, &store));
     let path = root.join("pnpm-lock.yaml");
     let before = fs::read_to_string(&path).unwrap();
-    let (head, snapshots) = before.rsplit_once("\nsnapshots:").unwrap();
-    let key = "  is-number@6.0.0: {}";
-    assert!(snapshots.contains(key));
-    let broken = format!("{head}\nsnapshots:{}", snapshots.replace(key, ""));
+    let mut documents: Vec<Value> = serde_saphyr::from_str_multiple(&before).unwrap();
+    documents
+        .iter_mut()
+        .find_map(|doc| {
+            doc.get_mut("snapshots")?
+                .as_object_mut()?
+                .remove("is-number@6.0.0")
+        })
+        .expect("installed transitive snapshot");
+    let broken = serde_saphyr::to_string_multiple(&documents).unwrap();
     fs::write(&path, &broken).unwrap();
     let output = check_frozen(root, &store);
     assert!(
