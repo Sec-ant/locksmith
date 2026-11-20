@@ -426,7 +426,7 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn ordinary_merge_accepts_non_utf8_file_paths() {
     use std::os::unix::ffi::OsStrExt;
