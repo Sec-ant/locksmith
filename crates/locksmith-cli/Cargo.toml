@@ -4,6 +4,8 @@ description = "Command-line interface for merging and converging pnpm lockfiles"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
 
 [lints]
 workspace = true
@@ -15,7 +17,7 @@ doc = false
 
 [dependencies]
 bpaf = { version = "0.9.29", features = ["derive"] }
-locksmith = { path = "../locksmith" }
+locksmith = { package = "es-locksmith", path = "../locksmith" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde-saphyr.workspace = true

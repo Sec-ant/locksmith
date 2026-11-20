@@ -124,7 +124,7 @@ fn main() -> Result<(), LockfileError> {
 }
 ```
 
-Run `cargo doc -p locksmith --no-deps --open` from a checkout for the full API. For the data model and algorithms, see [How Locksmith works](docs/design.md).
+Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full API. For the data model and algorithms, see [How Locksmith works](docs/design.md).
 
 ## Performance
 

@@ -1,9 +1,15 @@
 [package]
-name = "locksmith"
+name = "es-locksmith"
 description = "Merge and converge pnpm lockfiles"
+repository = "https://github.com/Sec-ant/locksmith"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+
+[lib]
+name = "locksmith"
 
 [lints]
 workspace = true

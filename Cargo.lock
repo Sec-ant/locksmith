@@ -210,6 +210,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "es-locksmith"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "md-5",
+ "node-semver",
+ "proptest",
+ "ryu-js",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -382,31 +399,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "locksmith"
-version = "0.2.0"
-dependencies = [
- "base64",
- "md-5",
- "node-semver",
- "proptest",
- "ryu-js",
- "serde",
- "serde-saphyr",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "locksmith-cli"
 version = "0.2.0"
 dependencies = [
  "base64",
  "bpaf",
+ "es-locksmith",
  "glob",
  "jiff",
- "locksmith",
  "mimalloc",
  "node-semver",
  "serde",
