@@ -1,0 +1,22 @@
+[package]
+versioned_files = [
+    "Cargo.toml",
+    { path = "Cargo.lock", dependency = "locksmith" },
+    { path = "Cargo.lock", dependency = "locksmith-cli" },
+]
+changelog = "CHANGELOG.md"
+
+[changes]
+ignore_conventional_commits = true
+
+[[workflows]]
+name = "change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+[[workflows]]
+name = "prepare-release"
+
+[[workflows.steps]]
+type = "PrepareRelease"

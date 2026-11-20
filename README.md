@@ -160,3 +160,9 @@ In a separate comparison, we ran `locksmith merge --context` and pnpm 10.33.2’
 - Registry access is opt-in with `--allow-network`.
 - The Git driver requires Git 2.38 or later.
 - The output is validated before it is written; a failed operation produces no partial lockfile.
+
+## Prepare a release
+
+With Knope installed, run `just change` to record a user-facing change and its version bump in `.changeset/`. Commit that file with the change. When preparing a release, run `just prepare-release` from a clean checkout with the existing version tags fetched. Knope uses the pending changesets to update the workspace version, both crates' entries in `Cargo.lock`, and `CHANGELOG.md`, then stages the changes.
+
+Commit the staged files and push a `v<version>` tag on that commit to trigger the GitHub release and Homebrew formula update.

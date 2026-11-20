@@ -20,6 +20,14 @@ build:
 install:
     cargo install --locked --path crates/locksmith-cli
 
+# Describe a user-facing change and select its release level.
+change:
+    knope change
+
+# Apply pending changesets to the workspace versions and changelog.
+prepare-release:
+    knope prepare-release
+
 # Run the Rust tests and documentation examples.
 test:
     cargo test --workspace --all-targets --locked
