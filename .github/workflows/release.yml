@@ -13,9 +13,10 @@ permissions:
 jobs:
   prepare:
     if: >-
-      github.event_name == 'push' ||
+      (github.event_name == 'push' && github.actor != 'knope-bot[bot]') ||
       (github.event.pull_request.merged == true &&
        github.head_ref == 'knope/release' &&
+       github.event.pull_request.user.login == 'knope-bot[bot]' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     outputs:
@@ -87,7 +88,6 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
-      RELEASE_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,17 +115,11 @@ jobs:
             exit 1
           fi
           if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
-            if [[ "$RELEASE_PR_AUTHOR" == 'knope-bot[bot]' ]]; then
+            if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
               echo "Knope Bot's draft release $TAG is missing. Rerun this job once the draft is available." >&2
               exit 1
-            elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-              gh api "repos/$GH_REPO/contents/CHANGELOG.md?ref=$RELEASE_COMMIT" -H 'Accept: application/vnd.github.raw+json' |
-                awk -v version="${TAG#v}" '/^## / { section = ($2 == version); next } section' > "$RUNNER_TEMP/release-notes.md"
-              test -s "$RUNNER_TEMP/release-notes.md"
-              gh release create "$TAG" --target "$RELEASE_COMMIT" --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" dist/*
-            else
-              gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*
             fi
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*
           elif [[ "$draft" == true ]]; then
             gh release upload "$TAG" --clobber dist/*
             gh release edit "$TAG" --target "$RELEASE_COMMIT" --draft=false
