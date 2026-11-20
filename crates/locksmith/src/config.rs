@@ -237,7 +237,7 @@ impl WorkspaceConfig {
                 inject_workspace_packages: decode(value, "injectWorkspacePackages")?
                     .unwrap_or(false),
                 package_extensions: value.get("packageExtensions").cloned(),
-                ignored_optional_dependencies: value.get("ignoredOptionalDependencies").cloned(),
+                ignored_optional_dependencies: ignored_optional_dependencies(value)?,
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
                 parameters: [
                     "peersSuffixMaxLength",
@@ -258,6 +258,14 @@ impl WorkspaceConfig {
             extension_checksum: None,
         })
     }
+}
+
+pub(crate) fn ignored_optional_dependencies(value: &Value) -> Result<Option<Value>, LockfileError> {
+    let names = decode::<Option<Vec<String>>>(value, "ignoredOptionalDependencies")?.flatten();
+    Ok(names.filter(|names| !names.is_empty()).map(|mut names| {
+        names.sort_unstable();
+        Value::from(names)
+    }))
 }
 
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(

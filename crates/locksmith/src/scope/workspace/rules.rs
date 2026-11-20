@@ -31,18 +31,13 @@ pub(in crate::scope) fn checked_overrides(
     if let Some(ref value) = expected {
         header["overrides"] = value.clone();
     }
-    let empty = |v: Option<&Value>| v.is_none_or(|v| v.as_object().is_some_and(|m| m.is_empty()));
-    if !(manifest::same_overrides(doc, &header) || empty(actual) && empty(expected.as_ref())) {
+    if !manifest::same_overrides(doc, &header) {
         return Err(missing(
             &["overrides"],
             "locked selectors or their precedence differ from the workspace declarations",
         ));
     }
-    Ok(if empty(expected.as_ref()) {
-        actual.cloned()
-    } else {
-        expected
-    })
+    Ok(expected.or_else(|| actual.cloned()))
 }
 
 pub(super) fn catalogs(

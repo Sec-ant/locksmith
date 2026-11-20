@@ -455,11 +455,11 @@ fn converge_manifests(
             }
         }
     }
-    if changed.is_empty() && configured.is_none() {
-        return Ok(baseline);
-    }
     if configured.is_none() {
         baseline.validate_with_config(options.configuration)?;
+        if changed.is_empty() {
+            return Ok(baseline);
+        }
     }
     if only_specifiers {
         let edits: Vec<_> = specifiers
