@@ -1,7 +1,5 @@
 # locksmith
 
-[简体中文](README.zh-CN.md)
-
 <div align="center">
 
 |                                                                                          `pnpm install`                                                                                           |                                                                               `locksmith converge HEAD`                                                                                |

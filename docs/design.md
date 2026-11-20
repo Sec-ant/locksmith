@@ -1,7 +1,5 @@
 # How Locksmith works
 
-**English** · [简体中文](design.zh-CN.md)
-
 This document explains the problem Locksmith solves, how a pnpm v9 lockfile represents a dependency graph, and how `merge`, `converge`, and `repair` change that graph. It assumes you have used pnpm but have not read `pnpm-lock.yaml` closely. Installation and command usage are in the [README](../README.md).
 
 ## 1. Why a lockfile is not a text file
