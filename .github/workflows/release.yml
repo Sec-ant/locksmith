@@ -3,12 +3,46 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.merged == true &&
+       github.head_ref == 'knope/release' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.metadata.outputs.commit }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve release version and commit
+        id: metadata
+        shell: bash
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "locksmith-cli") | .version')
+          tag="v$version"
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "Tag $GITHUB_REF_NAME must match package version $tag." >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
   binary:
+    needs: prepare
     strategy:
       matrix:
         include:
@@ -19,10 +53,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.commit }}
           persist-credentials: false
       - name: Build and check the native CLI
         shell: bash
@@ -30,7 +66,7 @@ jobs:
           rustup toolchain install 1.89.0 --profile minimal
           cargo +1.89.0 build --release --locked --bin locksmith --target "$TARGET"
           cd "target/$TARGET/release"
-          test "$(./locksmith --version)" = "locksmith ${GITHUB_REF_NAME#v}"
+          test "$(./locksmith --version)" = "locksmith ${TAG#v}"
           tar -czf "$GITHUB_WORKSPACE/locksmith-$TARGET.tar.gz" locksmith
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -39,7 +75,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: binary
+    needs: [prepare, binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -49,6 +85,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+      RELEASE_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,17 +105,38 @@ jobs:
           cd ..
           mkdir -p Formula
           visibility=$(gh repo view --json visibility --jq '.visibility | ascii_downcase')
-          sh scripts/homebrew-formula.sh "${GITHUB_REF_NAME#v}" dist/SHA256SUMS "$visibility" > Formula/locksmith.rb
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          sh scripts/homebrew-formula.sh "${TAG#v}" dist/SHA256SUMS "$visibility" > Formula/locksmith.rb
+          # A draft can exist before GitHub creates its tag. Any existing tag must match the build.
+          tag_ref="refs/tags/$TAG"
+          refs=$(git ls-remote origin "$tag_ref" "$tag_ref^{}")
+          tagged_commit=$(awk -v ref="$tag_ref" '$2 == ref { tag = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : tag }' <<< "$refs")
+          if [[ -n "$tagged_commit" && "$tagged_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "Tag $TAG already points to $tagged_commit, expected $RELEASE_COMMIT." >&2
+            exit 1
+          fi
+          if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$RELEASE_PR_AUTHOR" == 'knope-bot[bot]' ]]; then
+              echo "Knope Bot's draft release $TAG is missing. Rerun this job once the draft is available." >&2
+              exit 1
+            elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+              gh api "repos/$GH_REPO/contents/CHANGELOG.md?ref=$RELEASE_COMMIT" -H 'Accept: application/vnd.github.raw+json' |
+                awk -v version="${TAG#v}" '/^## / { section = ($2 == version); next } section' > "$RUNNER_TEMP/release-notes.md"
+              test -s "$RUNNER_TEMP/release-notes.md"
+              gh release create "$TAG" --target "$RELEASE_COMMIT" --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" dist/*
+            else
+              gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*
+            fi
+          elif [[ "$draft" == true ]]; then
+            gh release upload "$TAG" --clobber dist/*
+            gh release edit "$TAG" --target "$RELEASE_COMMIT" --draft=false
           else
-            gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --output - | cmp - dist/SHA256SUMS
+            gh release download "$TAG" --pattern SHA256SUMS --output - | cmp - dist/SHA256SUMS
           fi
           latest=$(gh release view --json tagName --jq .tagName)
-          if [[ "$latest" == "$GITHUB_REF_NAME" ]]; then
+          if [[ "$latest" == "$TAG" ]]; then
             git add Formula/locksmith.rb
             if ! git diff --cached --quiet; then
-              git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "build: update Homebrew formula to $GITHUB_REF_NAME"
+              git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "build: update Homebrew formula to $TAG"
               git pull --rebase
               git push
             fi

@@ -163,6 +163,6 @@ fn main() -> Result<(), LockfileError> {
 
 ## 准备发布
 
-安装 Knope 后，运行 `just change`，将面向用户的变更说明和版本升级级别记录到 `.changeset/`，并随代码一起提交。准备发布时，先拉取已有版本标签，再从干净的工作区运行 `just prepare-release`。Knope 会根据待发布的变更记录更新工作区版本、`Cargo.lock` 中两个 crate 的版本和 `CHANGELOG.md`，并将改动暂存。
+安装 Knope 后，运行 `just change`，将面向用户的变更说明和版本升级级别记录到 `.changeset/`，并随代码一起提交。变更记录合入 `main` 后，Knope Bot 会创建或更新发版 PR，其中包含下一版的版本号、`Cargo.lock` 和 `CHANGELOG.md`。
 
-提交暂存的改动，再为该提交创建并推送 `v<版本号>` 标签，即可触发 GitHub 发布和 Homebrew 公式更新。
+审核并合入发版 PR 后，GitHub Actions 会构建 macOS 和 Linux 二进制，上传产物并正式发布，再更新 Homebrew 公式。

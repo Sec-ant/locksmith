@@ -5,9 +5,21 @@ versioned_files = [
     { path = "Cargo.lock", dependency = "locksmith-cli" },
 ]
 changelog = "CHANGELOG.md"
+assets = "dist/*"
 
 [changes]
 ignore_conventional_commits = true
+
+[github]
+owner = "Sec-ant"
+repo = "locksmith"
+
+[bot.checks]
+enabled = false
+
+[bot.releases]
+enabled = true
+pull_request.title = "chore(release): v$version"
 
 [[workflows]]
 name = "change"
