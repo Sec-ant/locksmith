@@ -1,17 +1,21 @@
 # locksmith
 
-**English** · [简体中文](README.zh-CN.md)
+[简体中文](README.zh-CN.md)
+
+|                                                                                          `pnpm install`                                                                                           |                                                                               `locksmith converge HEAD`                                                                                |
+| :-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| [<img src="docs/diagrams/converge-install-diff.webp" width="280" height="872" alt="Lockfile diff after pnpm install, 47 additions and 26 deletions">](examples/converge/installed/pnpm-lock.yaml) | [<img src="docs/diagrams/converge-result-diff.webp" width="280" height="872" alt="Converged lockfile diff, 11 additions and 2 deletions">](examples/converge/converged/pnpm-lock.yaml) |
 
 Locksmith merges pnpm lockfiles and keeps unrelated dependency changes out of your diff.
 
-When `pnpm-lock.yaml` conflicts during a merge or rebase, the usual fix is to run `pnpm install` and let pnpm regenerate the file. The lockfile becomes valid, but pnpm re-resolves the whole graph. Unrelated versions and peer bindings can change, and lockfile diffs are rarely reviewed.
+When `pnpm-lock.yaml` conflicts during a merge or rebase, regenerating it can change unrelated versions and peer bindings. Even with the original lockfile in place, a dependency edit can change how pnpm resolves peers in other workspace projects.
 
-Locksmith works on the lockfile graph instead. It keeps every record your change does not require, works offline by default, and returns a healthy input byte-for-byte.
+Locksmith works directly on the lockfile graph and preserves versions and peer bindings that still fit. It works offline by default and returns the original bytes when the lockfile needs no changes.
 
-| Starting point | Command |
-| --- | --- |
-| Two branches changed the lockfile | [`merge`](#merge-two-branches) |
-| You edited dependencies and `pnpm install` changed more than you expected | [`converge`](#reduce-changes-after-an-install) |
+| Starting point                                                                      | Command                                        |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Two branches changed the lockfile                                                   | [`merge`](#merge-two-branches)                 |
+| You edited dependencies and `pnpm install` changed more than you expected           | [`converge`](#reduce-changes-after-an-install) |
 | Git already merged the lockfile, but some records are duplicated, stale, or missing | [`repair`](#repair-an-already-merged-lockfile) |
 
 ## Install
@@ -129,22 +133,22 @@ On a monorepo with 359–398 workspace projects and 8–11 MiB lockfiles, median
 
 These offline results cover Locksmith 0.1.2 on x86-64 Linux with a warm filesystem cache. Each input ran once per release on the same four CPUs, alternating which release ran first. Times include successes and refusals. P95 is the 95th percentile.
 
-| Operation | Cases | Mean time | Median time | P95 time | Mean peak RSS | Median peak RSS | P95 peak RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `merge` (three files) | 461 | 1.07 s | 1.00 s | 1.98 s | 244 MiB | 244 MiB | 264 MiB |
-| `merge --context` | 461 | 1.85 s | 1.36 s | 4.12 s | 262 MiB | 261 MiB | 302 MiB |
-| `converge` after an install | 68 | 1.04 s | 1.00 s | 1.41 s | 312 MiB | 316 MiB | 335 MiB |
-| `converge` with workspace rule edits | 186 | 1.30 s | 1.38 s | 1.63 s | 309 MiB | 310 MiB | 359 MiB |
-| `repair` | 796 | 0.90 s | 0.84 s | 1.77 s | 269 MiB | 281 MiB | 331 MiB |
+| Operation                            | Cases | Mean time | Median time | P95 time | Mean peak RSS | Median peak RSS | P95 peak RSS |
+| ------------------------------------ | ----: | --------: | ----------: | -------: | ------------: | --------------: | -----------: |
+| `merge` (three files)                |   461 |    1.07 s |      1.00 s |   1.98 s |       244 MiB |         244 MiB |      264 MiB |
+| `merge --context`                    |   461 |    1.85 s |      1.36 s |   4.12 s |       262 MiB |         261 MiB |      302 MiB |
+| `converge` after an install          |    68 |    1.04 s |      1.00 s |   1.41 s |       312 MiB |         316 MiB |      335 MiB |
+| `converge` with workspace rule edits |   186 |    1.30 s |      1.38 s |   1.63 s |       309 MiB |         310 MiB |      359 MiB |
+| `repair`                             |   796 |    0.90 s |      0.84 s |   1.77 s |       269 MiB |         281 MiB |      331 MiB |
 
 Both merge runs read three lockfiles. The context run also read prepared workspace data. The other commands include time spent reading from Git. The 186 rule edits cover 90 days of changes to catalogs, overrides, and package extensions. Peak RSS (resident memory) is the larger of the process-tree total sampled every 10 ms and the operating system’s single-process peak.
 
 In a separate comparison, we ran `locksmith merge --context` and pnpm 10.33.2’s `install --lockfile-only` on two generated workspaces with lockfile conflicts. Each command ran 11 times offline with a warm cache, alternating which ran first. Both outputs matched a clean pnpm resolution byte-for-byte.
 
 | Workspace projects | Lockfile size | Locksmith median time / peak RSS | pnpm median time / peak RSS |
-| ---: | ---: | ---: | ---: |
-| 64 | 40 KiB | 0.016 s / 8 MiB | 0.59 s / 153 MiB |
-| 384 | 248 KiB | 0.052 s / 17 MiB | 1.27 s / 196 MiB |
+| -----------------: | ------------: | -------------------------------: | --------------------------: |
+|                 64 |        40 KiB |                  0.016 s / 8 MiB |            0.59 s / 153 MiB |
+|                384 |       248 KiB |                 0.052 s / 17 MiB |            1.27 s / 196 MiB |
 
 </details>
 

@@ -1,0 +1,9 @@
+{
+  "name": "editor",
+  "private": true,
+  "dependencies": {
+    "react": "18.2.0",
+    "zustand": "4.5.7",
+    "immer": "10.1.1"
+  }
+}
