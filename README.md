@@ -2,9 +2,13 @@
 
 [简体中文](README.zh-CN.md)
 
+<div align="center">
+
 |                                                                                          `pnpm install`                                                                                           |                                                                               `locksmith converge HEAD`                                                                                |
 | :-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
 | [<img src="docs/diagrams/converge-install-diff.webp" width="280" height="872" alt="Lockfile diff after pnpm install, 47 additions and 26 deletions">](examples/converge/installed/pnpm-lock.yaml) | [<img src="docs/diagrams/converge-result-diff.webp" width="280" height="872" alt="Converged lockfile diff, 11 additions and 2 deletions">](examples/converge/converged/pnpm-lock.yaml) |
+
+</div>
 
 Locksmith merges pnpm lockfiles and keeps unrelated dependency changes out of your diff.
 
