@@ -152,6 +152,25 @@ pub fn converge_with_patches(
             )?;
         }
     }
+    let project = result
+        .documents
+        .get_mut(&crate::DocumentKind::Project)
+        .expect("converged project");
+    let base = baseline.project().expect("baseline project");
+    let installed = candidate.project().expect("candidate project");
+    // A reinstall can record timestamps even when every importer stays at its baseline pin.
+    let donor =
+        if installed.get("time").is_some() && project.get("importers") == base.get("importers") {
+            base
+        } else {
+            installed
+        };
+    if let Some(times) =
+        crate::reconcile::metadata::publication_times(project, [base, donor], options.configuration)
+        && project.get("time") != Some(&times)
+    {
+        std::sync::Arc::make_mut(project)["time"] = times;
+    }
     Ok(result)
 }
 

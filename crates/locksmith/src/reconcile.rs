@@ -253,7 +253,13 @@ fn resolve_sources(
         }
         let mut conflicts = Vec::new();
         crate::assembly::complete(&mut output, DocumentKind::Project, None, &mut conflicts)?;
-        metadata::publish_times(&mut output, [docs[0], docs[1], docs[2]], branch_order);
+        if let Some(times) = metadata::publication_times(
+            &output,
+            branch_order.map(|i| docs[i]),
+            Some(context.configuration),
+        ) {
+            output["time"] = times;
+        }
         if extended || context.configuration.auto_dedupe {
             graph::refresh_optional(&mut output)?;
         }

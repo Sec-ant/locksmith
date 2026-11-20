@@ -257,35 +257,55 @@ pub(crate) fn resolve(
 }
 
 /// pnpm records publication times for direct dependency locators only.
-pub(super) fn publish_times(output: &mut Value, docs: [&Value; 3], order: [usize; 3]) {
-    if !docs.iter().any(|doc| graph::section(doc, "time").is_some()) {
-        return;
-    }
+pub(crate) fn publication_times<const N: usize>(
+    project: &Value,
+    sources: [&Value; N],
+    config: Option<&crate::WorkspaceConfig>,
+) -> Option<Value> {
+    let sources = sources.map(|doc| graph::section(doc, "time"));
     let mut times = serde_json::Map::new();
-    let snapshots = graph::section(output, "snapshots");
-    for importer in graph::section(output, "importers")
-        .into_iter()
-        .flatten()
-        .map(|(_, v)| v)
-    {
+    if sources.iter().flatten().all(|times| times.is_empty()) {
+        return sources
+            .iter()
+            .any(Option::is_some)
+            .then(|| Value::Object(times));
+    }
+    let major = config
+        .and_then(|c| c.pnpm_version.as_ref())
+        .map(|v| v.major);
+    let snapshots = graph::section(project, "snapshots");
+    for (_, importer) in graph::section(project, "importers").into_iter().flatten() {
         for group in crate::manifest::GROUPS {
             for (name, dep) in graph::section(importer, group).into_iter().flatten() {
-                if let Some(version) = dep["version"].as_str().filter(|v| !v.starts_with("link:")) {
-                    let key = graph::snapshot_key(name, version, snapshots);
-                    let key = graph::package_key(&key);
-                    if !times.contains_key(key)
-                        && let Some(time) =
-                            order.iter().find_map(|i| docs[*i].get("time")?.get(key))
-                    {
-                        times.insert(key.into(), time.clone());
-                    }
+                let Some(version) = dep["version"].as_str().filter(|v| !v.starts_with("link:"))
+                else {
+                    continue;
+                };
+                let key = graph::snapshot_key(name, version, snapshots);
+                let key = graph::package_key(&key);
+                let reference = graph::package_key(version);
+                // pnpm 9 and 10 use /name@version, or the reference itself for files and paths.
+                let legacy = if reference.starts_with("file:") || reference.contains('/') {
+                    reference.to_owned()
+                } else {
+                    format!("/{name}@{reference}")
+                };
+                let keys: &[&str] = match major {
+                    Some(..=10) => &[&legacy],
+                    Some(_) => &[key],
+                    None => &[key, &legacy],
+                };
+                if let Some((key, time)) = sources
+                    .iter()
+                    .flatten()
+                    .find_map(|source| keys.iter().find_map(|key| source.get_key_value(*key)))
+                {
+                    times.insert(key.clone(), time.clone());
                 }
             }
         }
     }
-    if !times.is_empty() {
-        output["time"] = Value::Object(times);
-    }
+    Some(Value::Object(times))
 }
 
 /// pnpm records a catalog snapshot only for a direct dependency resolved

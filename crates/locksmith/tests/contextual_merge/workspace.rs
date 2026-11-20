@@ -662,32 +662,35 @@ fn final_manager_selects_its_bootstrap_graph_and_runtime_pin() {
 
 #[test]
 fn direct_aliases_keep_bare_version_pins_and_prune_stale_publication_times() {
-    let mut data = lock(1, 1, false).project().unwrap().clone();
-    data["time"] =
-        json!({"a@1.0.0":"2026-01-01T00:00:00.000Z","b@1.0.0":"2026-02-01T00:00:00.000Z"});
-    let input = Lockfile::parse(&data.to_string()).unwrap();
     let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"a":"npm:a@1.0.0"}}))]);
     let config = WorkspaceConfig::default();
-    let result = merge(
-        &input,
-        &input,
-        &input,
-        Some(&MergeContext {
-            registry: None,
-            target: MergeTarget::Ours,
-            manifests: &manifests,
-            configurations: [&config; 3],
-            configuration: &config,
-            patches: &BTreeMap::new(),
-        }),
-    )
-    .unwrap();
-    let data = result.project().unwrap();
-    assert_eq!(
-        data["importers"]["."]["dependencies"]["a"]["version"],
-        "1.0.0"
-    );
-    assert_eq!(data["time"], json!({"a@1.0.0":"2026-01-01T00:00:00.000Z"}));
+    for prefix in ["", "/"] {
+        let mut data = lock(1, 1, false).project().unwrap().clone();
+        let kept = format!("{prefix}a@1.0.0");
+        let stale = format!("{prefix}b@1.0.0");
+        data["time"] = json!({&kept:"2026-01-01T00:00:00.000Z",stale:"2026-02-01T00:00:00.000Z"});
+        let input = Lockfile::parse(&data.to_string()).unwrap();
+        let result = merge(
+            &input,
+            &input,
+            &input,
+            Some(&MergeContext {
+                registry: None,
+                target: MergeTarget::Ours,
+                manifests: &manifests,
+                configurations: [&config; 3],
+                configuration: &config,
+                patches: &BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let data = result.project().unwrap();
+        assert_eq!(
+            data["importers"]["."]["dependencies"]["a"]["version"],
+            "1.0.0"
+        );
+        assert_eq!(data["time"], json!({kept:"2026-01-01T00:00:00.000Z"}));
+    }
 }
 
 #[test]
