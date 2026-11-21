@@ -926,6 +926,15 @@ fn stale_candidate_settings_are_reported_even_when_the_two_locks_match() {
 
 #[test]
 fn reading_a_partial_clone_leaves_unrelated_historical_blobs_on_the_remote() {
+    check_partial_clone(false);
+}
+
+#[test]
+fn converge_reads_missing_manifests_from_a_filter_only_remote() {
+    check_partial_clone(true);
+}
+
+fn check_partial_clone(multiple_remotes: bool) {
     let repo = Repo::new();
     repo.write("unrelated/src.txt", "old source");
     repo.write("excluded/package.json", r#"{"name":"unused-old"}"#);
@@ -944,36 +953,33 @@ fn reading_a_partial_clone_leaves_unrelated_historical_blobs_on_the_remote() {
     repo.write("excluded/package.json", r#"{"name":"unused-new"}"#);
     repo.commit("change both members and unrelated files");
     repo.git(&["config", "uploadpack.allowFilter", "true"]);
-    let temp = tempfile::tempdir().unwrap();
-    let clone = temp.path().join("checkout");
-    let out = repo.cmd(
-        "git",
-        &[
-            "clone",
-            "--no-local",
-            "--filter=blob:none",
-            repo.0.path().to_str().unwrap(),
-            clone.to_str().unwrap(),
-        ],
-    );
-    assert!(out.status.success(), "{}", report(&out));
-    let run = |exe: &str, args: &[&str]| {
-        Command::new(exe)
-            .args(args)
-            .current_dir(&clone)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap()
-    };
-    let result = run(CLI, &["converge", baseline.trim()]);
+    let clone = Repo(tempfile::tempdir().unwrap());
+    let origin = repo.0.path().to_str().unwrap();
+    repo.git(&[
+        "clone",
+        "--no-local",
+        "--filter=blob:none",
+        origin,
+        clone.0.path().to_str().unwrap(),
+    ]);
+    if multiple_remotes {
+        let empty = repo.0.path().join(".git/empty.git");
+        let empty = empty.to_str().unwrap();
+        repo.git(&["init", "--bare", empty]);
+        clone.git(&["config", "--unset", "remote.origin.promisor"]);
+        clone.git(&["remote", "add", "empty", empty]);
+        clone.git(&["config", "remote.empty.promisor", "true"]);
+
+        // Both remotes lack the manifest until origin points back to the source.
+        clone.git(&["remote", "set-url", "origin", empty]);
+        let failed = clone.cmd(CLI, &["converge", baseline.trim()]);
+        assert!(!failed.status.success());
+        assert!(failed.stdout.is_empty());
+        clone.git(&["remote", "set-url", "origin", origin]);
+    }
+    let result = clone.cmd(CLI, &["converge", baseline.trim()]);
     assert!(result.status.success(), "{}", report(&result));
-    let missing = run(
-        "git",
-        &["rev-list", "--objects", "--missing=print", baseline.trim()],
-    );
-    assert!(missing.status.success(), "{}", report(&missing));
-    let missing = String::from_utf8(missing.stdout).unwrap();
+    let missing = clone.git(&["rev-list", "--objects", "--missing=print", baseline.trim()]);
     for oid in [other, excluded] {
         assert!(
             missing

@@ -796,3 +796,22 @@ fn catalog_links_use_the_local_manifest_version_with_context() {
     let invalid = Lockfile::parse(&value.to_string()).unwrap();
     assert!(merge(&invalid, &invalid, &invalid, None).is_err());
 }
+
+#[test]
+fn catalog_links_can_target_a_workspace_packages_external_publish_directory() {
+    let mut value = json!({
+        "lockfileVersion":"9.0",
+        "catalogs":{"default":{"lib":{"specifier":"^1","version":"1.2.0"}}},
+        "importers":{
+            ".":{"dependencies":{"lib":{"specifier":"catalog:","version":"link:dist/lib"}}},
+            "packages/lib":{"publishDirectory":"../../dist/lib"}
+        }
+    });
+    let input = Lockfile::parse(&value.to_string()).unwrap();
+    let output = merge(&input, &input, &input, None).unwrap();
+    assert_eq!(output.to_yaml().unwrap(), input.to_yaml().unwrap());
+
+    value["importers"]["packages/lib"]["linkDirectory"] = json!(false);
+    let unlinked = Lockfile::parse(&value.to_string()).unwrap();
+    assert!(merge(&unlinked, &unlinked, &unlinked, None).is_err());
+}

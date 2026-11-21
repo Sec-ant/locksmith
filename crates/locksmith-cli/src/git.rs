@@ -14,7 +14,10 @@ pub fn output(args: &[&str]) -> Result<String> {
 }
 
 fn checked(command: &mut Command) -> Result<String> {
-    let output = command.output()?;
+    checked_output(command.output()?)
+}
+
+fn checked_output(output: Output) -> Result<String> {
     if !output.status.success() {
         return Err(failure(&output).into());
     }
@@ -306,7 +309,7 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
         }
         query.push_str(&format!(":(top,literal){prefix}{path}\n"));
     }
-    let objects = with_input(
+    let listing = with_input(
         &[
             "rev-list",
             "--objects",
@@ -316,6 +319,7 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
         ],
         query.as_bytes(),
     )?;
+    let objects = checked_output(listing)?;
     let mut missing = String::new();
     for id in objects.lines().filter_map(|line| line.strip_prefix('?')) {
         if !oid(id) {
@@ -325,6 +329,8 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
         missing.push('\n');
     }
     if !missing.is_empty() {
+        // A batch can miss objects served by another promisor. cat-file reads
+        // each required manifest next, using Git's native remote selection.
         with_input(
             &[
                 "-c",
@@ -347,7 +353,7 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
     Ok(())
 }
 
-fn with_input(args: &[&str], input: &[u8]) -> Result<String> {
+fn with_input(args: &[&str], input: &[u8]) -> Result<Output> {
     let mut child = Command::new("git")
         .args(args)
         .stdin(Stdio::piped())
@@ -360,11 +366,10 @@ fn with_input(args: &[&str], input: &[u8]) -> Result<String> {
         .expect("piped Git stdin")
         .write_all(input);
     let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(failure(&output).into());
+    if output.status.success() {
+        written?;
     }
-    written?;
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(output)
 }
 
 /// The single cat-file process reads just the configuration blobs requested.

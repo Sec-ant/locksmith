@@ -126,11 +126,9 @@ pub fn converge_with_patches(
     }
     let mut result = select(baseline, candidate, changes, options)?;
     if let Some(config) = options.configuration {
-        let mut plan = crate::extensions::plan(
-            result.project().expect("converged project"),
-            config,
-            candidate.project(),
-        )?;
+        let project = result.project().expect("converged project");
+        crate::repair::check_recorded_settings(project, config)?;
+        let mut plan = crate::extensions::plan(project, config, candidate.project())?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(
                 result

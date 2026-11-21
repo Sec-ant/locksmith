@@ -67,6 +67,36 @@ fn unchanged_manifests_do_not_restore_a_broken_baseline_graph() {
 }
 
 #[test]
+fn converge_rejects_a_stale_baseline_even_when_the_candidate_settings_match() {
+    let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+    let baseline = parse(doc.clone());
+    let settings = json!({"addMissingPeerTypes":true});
+    let config =
+        locksmith::WorkspaceConfig::from_pnpm_version(&settings, &"12.21.0".parse().unwrap())
+            .unwrap();
+    doc["settings"] = settings;
+    let candidate = parse(doc);
+    let before = json!({});
+    let after = json!({"dependencies":{}});
+    let declarations = [change(".", &before, &after)];
+    for changes in [&[][..], &declarations[..]] {
+        let result = converge(
+            &baseline,
+            &candidate,
+            changes,
+            locksmith::ConvergeOptions {
+                configuration: Some(&config),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(result, Err(LockfileError::ResolutionRequired { path, .. })
+            if path == ["settings", "addMissingPeerTypes"])
+        );
+    }
+}
+
+#[test]
 fn publication_times_follow_the_direct_versions_selected_from_both_lockfiles() {
     let (baseline, candidate, before, after) = fixture();
     let old = "2020-01-01T00:00:00.000Z";
