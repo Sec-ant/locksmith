@@ -4,7 +4,7 @@
 
 Run `just setup` once per clone to check messages during `git commit`. Linked worktrees share the hook.
 
-Use Conventional Commits for commits and PR titles, for example `fix(merge): preserve peer bindings` or `ci: lint commit messages`. GitHub can use the PR title as the squash commit subject. [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/)
+Use Conventional Commits for commits and PR titles, for example `fix(merge): preserve peer bindings` or `ci: lint commit messages`. The PR title is the default subject when squash-merging. [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/)
 
 ## Changesets
 
