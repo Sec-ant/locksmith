@@ -17,6 +17,7 @@ mod args;
 mod converge;
 mod driver;
 mod git;
+mod inspect;
 mod merge;
 mod policy;
 mod registry;
@@ -55,6 +56,11 @@ fn run(command: Command) -> Result<()> {
             reference,
             allow_network,
         } => repair::run(&reference, allow_network)?,
+        Command::Inspect {
+            json,
+            pnpm_version,
+            file,
+        } => return inspect::run(&file, pnpm_version, json),
         Command::Version => {
             println!("locksmith {}", env!("CARGO_PKG_VERSION"));
             return Ok(());

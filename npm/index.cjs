@@ -3,12 +3,9 @@ const { spawn } = require('node:child_process');
 const { platformDirectory, getCliPath } = require('./platform.cjs');
 const native = require(join(platformDirectory(), 'locksmith.node'));
 
-function runWorkspace(command, ref, { cwd, allowNetwork = false, signal } = {}) {
+function runWorkspace(command, args, { cwd, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const args = [command];
-    if (allowNetwork) args.push('--allow-network');
-    args.push('--', ref);
-    const child = spawn(getCliPath(), args, { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(getCliPath(), [command, ...args], { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
     child.on('error', reject);
     const stdout = [];
     const stderr = [];
@@ -26,9 +23,14 @@ function runWorkspace(command, ref, { cwd, allowNetwork = false, signal } = {}) 
   });
 }
 
+function revisionArgs(ref, options) {
+  return options?.allowNetwork ? ['--allow-network', '--', ref] : ['--', ref];
+}
+
 module.exports = {
   ...native,
   getCliPath,
-  convergeWorkspace: (ref, options) => runWorkspace('converge', ref, options),
-  repairWorkspace: (ref = 'HEAD', options) => runWorkspace('repair', ref, options),
+  inspectWorkspace: (options) => runWorkspace('inspect', ['--json'], options).then(JSON.parse),
+  convergeWorkspace: (ref, options) => runWorkspace('converge', revisionArgs(ref, options), options),
+  repairWorkspace: (ref = 'HEAD', options) => runWorkspace('repair', revisionArgs(ref, options), options),
 };

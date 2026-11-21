@@ -875,3 +875,120 @@ fn newly_introduced_optional_peers_follow_workspace_sharing_settings() {
         install(&dir, &store, true);
     }
 }
+
+#[test]
+#[ignore = "requires PNPM_BIN"]
+fn inspection_agrees_with_fresh_strict_installs_of_local_tarballs() {
+    use locksmith::{Disposition, inspect};
+
+    let sandbox = tempfile::tempdir().unwrap();
+    let store = sandbox.path().join("store");
+    let source = sandbox.path().join("package");
+    fs::create_dir(&source).unwrap();
+    let pnpm = env::var_os("PNPM_BIN").unwrap();
+    let rules = PeerRules::from_pnpm(
+        &json!({}),
+        PeerVersionMatching::for_pnpm(Some(pnpm_version())),
+    )
+    .unwrap();
+    for (i, (range, version)) in [
+        (">=0.11 <=15", "15.8.0"),
+        (">=0.26 <=0.34", "0.34.33"),
+        ("19.0.0-rc.7", "19.0.0-rc.4"),
+        ("^1", "1.4.0-rc.1"),
+        ("^1", "2.0.0"),
+        (">1.0.0-rc.1", "1.0.0-rc.2"),
+        ("<1", "1.0.0-rc.1"),
+        ("<1.0.0", "1.0.0-rc.1"),
+        ("^1 || workspace:^2", "2.0.0"),
+        (">=2.0.0 <3.0.0", "2.1.0"),
+        ("latest", "2.0.0"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let project = sandbox.path().join(format!("project-{i}"));
+        let strict = sandbox.path().join(format!("strict-{i}"));
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&strict).unwrap();
+        for (file, manifest) in [
+            ("host", json!({"name":"host","version":version})),
+            (
+                "plugin",
+                json!({"name":"plugin","version":"1.0.0","peerDependencies":{"host":range}}),
+            ),
+        ] {
+            fs::write(source.join("package.json"), manifest.to_string()).unwrap();
+            super::assert_success(
+                Command::new("tar")
+                    .arg("-czf")
+                    .arg(project.join(format!("{file}.tgz")))
+                    .arg("-C")
+                    .arg(sandbox.path())
+                    .arg("package")
+                    .output()
+                    .unwrap(),
+            );
+        }
+        fs::write(project.join("package.json"), json!({"private":true,"packageManager":format!("pnpm@{}",pnpm_version()),"dependencies":{"host":"file:host.tgz","plugin":"file:plugin.tgz"}}).to_string()).unwrap();
+        fs::write(
+            project.join("pnpm-workspace.yaml"),
+            "packages: []\nautoInstallPeers: false\nminimumReleaseAge: 0\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".npmrc"),
+            "auto-install-peers=false\nmanage-package-manager-versions=false\n",
+        )
+        .unwrap();
+        super::copy_project(&project, &strict, &store);
+        let resolve = |dir: &std::path::Path, policy: &str| {
+            Command::new(&pnpm)
+                .current_dir(dir)
+                .env("CI", "true")
+                .args([
+                    "install",
+                    "--lockfile-only",
+                    "--no-frozen-lockfile",
+                    "--offline",
+                    "--ignore-scripts",
+                    "--reporter=ndjson",
+                    policy,
+                    "--store-dir",
+                ])
+                .arg(&store)
+                .output()
+                .unwrap()
+        };
+        super::assert_success(resolve(&project, "--strict-peer-dependencies=false"));
+        let lock = Lockfile::try_from(fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap())
+            .unwrap();
+        let diagnostic = inspect(&lock, &rules, None).unwrap();
+        assert!(
+            diagnostic
+                .peers
+                .iter()
+                .all(|p| p.requirement.disposition != Disposition::Unknown),
+            "unknown verdict for local tarballs: {range} with {version}"
+        );
+        let rejected = diagnostic
+            .peers
+            .iter()
+            .any(|p| p.requirement.disposition == Disposition::Rejected);
+        let oracle = resolve(&strict, "--strict-peer-dependencies");
+        if !oracle.status.success() {
+            let logs = format!(
+                "{}{}",
+                String::from_utf8_lossy(&oracle.stdout),
+                String::from_utf8_lossy(&oracle.stderr)
+            );
+            assert!(logs.contains("ERR_PNPM_PEER_DEP_ISSUES"), "{logs}");
+        }
+        assert_eq!(
+            rejected,
+            !oracle.status.success(),
+            "pnpm {}: {range} with {version}",
+            pnpm_version()
+        );
+    }
+}

@@ -988,3 +988,139 @@ fn check_partial_clone(multiple_remotes: bool) {
         );
     }
 }
+
+#[test]
+fn inspect_reads_the_lockfiles_own_workspace_without_git_or_writes() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let dir = sandbox.path().join("nested");
+    fs::create_dir_all(dir.join("packages/host")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"pnpm@10.34.9"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("packages/host/package.json"),
+        r#"{"name":"host","version":"2.0.0"}"#,
+    )
+    .unwrap();
+    let input = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1","version":"1.0.0"}}},"packages/host":{}},"packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1"}}},"snapshots":{"plugin@1.0.0":{"dependencies":{"host":"link:packages/host"}}}}).to_string();
+    let path = dir.join("pnpm-lock.yaml");
+    fs::write(&path, &input).unwrap();
+    let inspect = || {
+        Command::new(CLI)
+            .current_dir(sandbox.path())
+            .args(["inspect", "--json", "nested/pnpm-lock.yaml"])
+            .output()
+            .unwrap()
+    };
+    let ok = inspect();
+    assert!(ok.status.success(), "{}", report(&ok));
+    let result: Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(result["peerPolicy"], "pnpm10");
+    let finding = &result["peers"][0];
+    assert_eq!(finding["resolvedVersion"], "2.0.0");
+    assert_eq!(finding["status"], "outOfRange");
+    assert_eq!(finding["examplePath"], json!([".", "plugin@1.0.0"]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), input);
+    fs::write(&path, "lockfileVersion: '9.0'\nsnapshots: []\n").unwrap();
+    let invalid = inspect();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("snapshots"));
+}
+
+#[test]
+fn an_unpinned_strict_merge_accepts_only_the_configured_peer_exception() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = json!({"dependencies":{"plugin":"1.0.0","host":"2.0.0"}});
+    let raw = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1.0.0","version":"1.0.0(host@2.0.0)"},"host":{"specifier":"2.0.0","version":"2.0.0"}}}},"packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1"}},"host@2.0.0":{"resolution":{}}},"snapshots":{"plugin@1.0.0(host@2.0.0)":{"dependencies":{"host":"2.0.0"}},"host@2.0.0":{}}});
+    fs::write(dir.path().join("pnpm-lock.yaml"), raw.to_string()).unwrap();
+    for allowed in [true, false] {
+        let mut cfg = json!({"strictPeerDependencies":true});
+        if allowed {
+            cfg["peerDependencyRules"] = json!({"allowAny":["host"]});
+        }
+        let ctx = json!({"target":"ours","configuration":cfg,"configurations":[cfg,cfg,cfg],"patches":{},"manifests":{".":manifest}});
+        fs::write(dir.path().join("ctx.json"), ctx.to_string()).unwrap();
+        let out = Command::new(CLI)
+            .current_dir(dir.path())
+            .args([
+                "merge",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "--context",
+                "ctx.json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(if allowed { 0 } else { 1 }),
+            "{}",
+            report(&out)
+        );
+        if !allowed {
+            assert!(String::from_utf8_lossy(&out.stderr).contains("peer"));
+        }
+    }
+    fs::write(
+        dir.path().join("pnpm-workspace.yaml"),
+        "peerDependencyRules: { allowAny: [host] }\n",
+    )
+    .unwrap();
+    let out = Command::new(CLI)
+        .current_dir(dir.path())
+        .args(["inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(r["peerPolicy"], "unspecified");
+    assert_eq!(r["peers"][0]["disposition"], "unknown");
+}
+
+#[test]
+fn inspection_reads_versions_only_from_manifests_inside_the_selected_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let shared = temp.path().join("shared");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(
+        shared.join("package.json"),
+        r#"{"name":"host","version":"1.4.0"}"#,
+    )
+    .unwrap();
+    let check = |provider: &str| {
+        let pin = format!("link:{provider}");
+        let raw = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1","version":"1.0.0"}}},provider:{}},
+            "packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1"}}},"snapshots":{"plugin@1.0.0":{"dependencies":{"host":pin}}}});
+        fs::write(root.join("pnpm-lock.yaml"), raw.to_string()).unwrap();
+        let out = Command::new(CLI)
+            .current_dir(&root)
+            .args(["inspect", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", report(&out));
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let p = &result["peers"][0];
+        assert_eq!(p["reason"], "providerVersion");
+        assert!(p["resolvedVersion"].is_null());
+        assert_eq!(p["bindings"][0]["reference"], pin);
+    };
+    check("../shared");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&shared, root.join("linked")).unwrap();
+        check("linked");
+        fs::create_dir(root.join("member")).unwrap();
+        std::os::unix::fs::symlink(
+            shared.join("package.json"),
+            root.join("member/package.json"),
+        )
+        .unwrap();
+        check("member");
+    }
+}

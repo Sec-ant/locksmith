@@ -132,6 +132,9 @@ impl Source {
             let mut parsed: ParsedMap =
                 serde_saphyr::from_str_with_options(part, options(part.len()))?;
             let kind = document_kind(&mut parsed.value, &documents)?;
+            if let Some(packages) = parsed.value.get("packages").and_then(Value::as_object) {
+                crate::graph::check_peer_declarations(kind, packages)?;
+            }
             layouts.insert(kind, layout(Arc::clone(&normalized), range, &parsed));
             documents.insert(kind, Arc::new(Value::Object(parsed.value)));
         }

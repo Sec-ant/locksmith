@@ -145,7 +145,19 @@ pub fn inspect_peers(
     let input = Input::from(lock);
     job(move || {
         let options: PeerOptions = decode(options.unwrap_or_else(|| json!({})))?;
-        options.inspect(&input.parse()?)
+        options.peers(&input.parse()?)
+    })
+}
+
+#[napi]
+pub fn inspect(
+    lock: Either<String, &ParsedLockfile>,
+    options: Option<Value>,
+) -> AsyncTask<Job<BTreeMap<String, Value>>> {
+    let input = Input::from(lock);
+    job(move || {
+        let options: PeerOptions = decode(options.unwrap_or_else(|| json!({})))?;
+        options.report(&input.parse()?)
     })
 }
 

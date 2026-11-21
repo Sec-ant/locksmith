@@ -4,7 +4,7 @@
 //! comparison or `Some(&context)` to select records using the final workspace settings
 //! and manifests. [`converge`] retains changes required by manifest and workspace edits and
 //! restores unrelated baseline pins. [`repair`] fixes broken records against final workspace inputs.
-//! Call [`inspect_peers`] to apply peer policy.
+//! Call [`inspect`] for peer bindings, workspace reachability and package instances.
 //!
 //! Supports the default `lockfileVersion: '9.0'` format written by pnpm 9–12,
 //! including pnpm 11/12's separate environment document. Experimental lockfile
@@ -28,6 +28,7 @@ mod diagnostics;
 mod error;
 mod extensions;
 mod graph;
+mod inspect;
 mod lockfile;
 mod manifest;
 mod merge;
@@ -45,9 +46,16 @@ pub use config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
     PatchEncoding, ResolutionSettings, WorkspaceConfig,
 };
-pub use diagnostics::{PeerIssue, PeerRules, PeerVersionMatching, inspect_peers};
+pub use diagnostics::{
+    Disposition, PeerIssue, PeerRules, PeerStatus, PeerVersionMatching, UnknownReason,
+    inspect_peers,
+};
 pub use error::{Conflict, ConflictKind, LockfileError, ValidationIssue};
 pub use graph::DependencyClosure;
+pub use inspect::{
+    ExternalLink, Inspection, InspectionSummary, LinkSource, LockedRelease, PackageInstances,
+    PeerBinding, PeerGroup, PeerRequirement, inspect,
+};
 pub use lockfile::{DocumentKind, Lockfile};
 pub use merge::{MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};

@@ -1,11 +1,13 @@
 ---
 name: locksmith
-description: Resolves pnpm-lock.yaml merge and rebase conflicts, repairs stale or missing committed lockfile entries, and removes unrelated version or peer changes after pnpm install. Use for pnpm lockfile conflict, repair, or churn reports.
+description: Resolves pnpm-lock.yaml merge and rebase conflicts, repairs stale or missing committed lockfile entries, and removes unrelated version or peer changes after pnpm install. Inspects a single lockfile for unmet peers, workspace dependency paths, and packages with multiple versions or instances.
 ---
 
 # Locksmith
 
 Locksmith preserves pins and peer bindings allowed by the dependency declarations. It supports `lockfileVersion: '9.0'` (pnpm 9–12).
+
+For peer warnings or excess instances in an existing lockfile, run `locksmith inspect --json` from the workspace. Read the declaration and binding alongside `examplePath`. A null path means no workspace reaches that binding. Check `reason` on unknown findings. Matching locked versions are candidates for review.
 
 Find the pnpm workspace that owns the lockfile. Check `git status --short` and the relevant manifest, configuration, and patch changes. Use the project's pnpm version. If `locksmith --version` fails because the CLI is missing, see the [installation instructions](https://github.com/Sec-ant/locksmith#install).
 

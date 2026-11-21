@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{LockfileError, Value, graph, source::Source};
 
@@ -50,6 +53,39 @@ impl Lockfile {
 
     pub fn document(&self, kind: DocumentKind) -> Option<&Value> {
         self.documents.get(&kind).map(AsRef::as_ref)
+    }
+
+    /// Package-manager version recorded in pnpm's bootstrap document, when present.
+    pub fn recorded_pnpm_version(&self) -> Option<node_semver::Version> {
+        self.environment()?["importers"]["."]["packageManagerDependencies"]["pnpm"]["version"]
+            .as_str()?
+            .parse()
+            .ok()
+    }
+
+    /// Workspace manifests needed to determine the versions of linked peer providers.
+    pub fn linked_peer_projects(&self) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        let Some(doc) = self.project() else {
+            return ids;
+        };
+        for (key, snapshot) in graph::section(doc, "snapshots").into_iter().flatten() {
+            let package = &doc["packages"][graph::package_key(key)];
+            for (name, _) in graph::section(package, "peerDependencies")
+                .into_iter()
+                .flatten()
+            {
+                if let Some(path) =
+                    graph::dependency(snapshot, name).and_then(|(_, pin)| pin.strip_prefix("link:"))
+                {
+                    let id = graph::linked_project(doc.get("importers"), ".", path);
+                    if doc["importers"].get(&id).is_some() {
+                        ids.insert(id);
+                    }
+                }
+            }
+        }
+        ids
     }
 
     /// Inspect a project's full dependency closure, including distinct peer
