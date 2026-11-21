@@ -897,10 +897,11 @@ fn inspection_agrees_with_fresh_strict_installs_of_local_tarballs() {
         ("19.0.0-rc.7", "19.0.0-rc.4"),
         ("^1", "1.4.0-rc.1"),
         ("^1", "2.0.0"),
-        (">1.0.0-rc.1", "1.0.0-rc.1"),
+        (">1.0.0-rc.1", "1.0.0-rc.2"),
         ("<1", "1.0.0-rc.1"),
         ("<1.0.0", "1.0.0-rc.1"),
         ("^1 || workspace:^2", "2.0.0"),
+        (">=2.0.0 <3.0.0", "2.1.0"),
         ("latest", "2.0.0"),
     ]
     .into_iter()
@@ -963,6 +964,13 @@ fn inspection_agrees_with_fresh_strict_installs_of_local_tarballs() {
         let lock = Lockfile::try_from(fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap())
             .unwrap();
         let diagnostic = inspect(&lock, &rules, None).unwrap();
+        assert!(
+            diagnostic
+                .peers
+                .iter()
+                .all(|p| p.requirement.disposition != Disposition::Unknown),
+            "unknown verdict for local tarballs: {range} with {version}"
+        );
         let rejected = diagnostic
             .peers
             .iter()

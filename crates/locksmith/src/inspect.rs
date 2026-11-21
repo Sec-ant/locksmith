@@ -29,10 +29,19 @@ pub struct InspectionSummary {
 }
 
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExternalLink {
+    pub source_kind: LinkSource,
     pub from: String,
     pub dependency: String,
     pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkSource {
+    Importer,
+    Snapshot,
 }
 
 #[derive(Debug, Serialize)]

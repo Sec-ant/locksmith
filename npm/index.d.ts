@@ -101,7 +101,7 @@ export interface Inspection {
     examplePath: string[] | null
   }>
   multiplicity: Array<{ name: string; releases: Array<{ id: string; version: string | null; snapshots: number }> }>
-  externalLinks: Array<{ from: string; dependency: string; target: string }>
+  externalLinks: Array<{ sourceKind: 'importer' | 'snapshot'; from: string; dependency: string; target: string }>
 }
 export function inspect(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<Inspection>
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>

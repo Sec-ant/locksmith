@@ -3,7 +3,7 @@
 mod range;
 
 use crate::{Lockfile, LockfileError, Value, graph, manifest};
-use nodejs_semver::{Range, Version};
+use nodejs_semver::Version;
 pub(crate) use range::PeerRange;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -274,7 +274,7 @@ fn allowed_peer(
                     && wanted.is_none_or(|r| {
                         parent_version
                             .as_ref()
-                            .is_some_and(|v| Range::parse(r).is_ok_and(|r| r.satisfies(v)))
+                            .is_some_and(|v| range::satisfies_semver(v, r))
                     })
                 {
                     scoped = Some((rule, range));
@@ -285,7 +285,7 @@ fn allowed_peer(
     [global, scoped]
         .into_iter()
         .flatten()
-        .find(|(_, r)| Range::parse(r).is_ok_and(|r| r.satisfies(version)))
+        .find(|(_, r)| range::satisfies_semver(version, r))
         .map(|(rule, _)| format!("allowedVersions/{rule}"))
 }
 

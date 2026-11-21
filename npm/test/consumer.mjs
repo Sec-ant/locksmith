@@ -18,6 +18,16 @@ await validate(lock);
 assert.deepEqual(await dependencyClosure(lock, '.'), { importers: ['.'], packages: [], snapshots: [] });
 assert.deepEqual(await inspectPeers(yaml), []);
 assert.deepEqual((await api.inspect(lock)).summary, { workspaces: 1, packages: 0, snapshots: 0, reachableSnapshots: 0 });
+const linked = JSON.stringify({
+  lockfileVersion: '9.0',
+  importers: { '.': { dependencies: { plugin: { specifier: '1', version: '1.0.0' } } } },
+  packages: { 'plugin@1.0.0': { resolution: {}, peerDependencies: { host: '^1' } } },
+  snapshots: { 'plugin@1.0.0': { dependencies: { host: 'link:../shared' } } },
+});
+const external = await api.inspect(linked);
+assert.deepEqual(external.externalLinks, [{ sourceKind: 'snapshot', from: 'plugin@1.0.0', dependency: 'host', target: '../shared' }]);
+assert.equal(external.peers[0].reason, 'providerVersion');
+assert.deepEqual((await api.inspect(linked, { manifests: { '../shared': { name: 'host', version: '1.4.0' } } })).peers, []);
 assert.equal(require('es-locksmith').inspect, api.inspect);
 assert.equal(await merge(lock, yaml, lock), yaml);
 const context = { target: 'ours', manifests: { '.': {} }, configurations: [{}, {}, {}], configuration: {} };

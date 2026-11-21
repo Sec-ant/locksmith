@@ -13,14 +13,22 @@ pub fn run(file: &Path, override_version: Option<node_semver::Version>, json: bo
     let lock = Lockfile::try_from(
         fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?,
     )?;
-    let dir = file.parent().unwrap_or(Path::new("."));
+    let dir = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()?;
     let read = |relative: &str| -> Result<Option<String>> {
         let path = dir.join(relative);
-        match fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(s)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{}: {e}", path.display()).into()),
-        }
+        let resolved = match path.canonicalize() {
+            Ok(resolved) if resolved.starts_with(&dir) => resolved,
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display()).into()),
+        };
+        Ok(Some(
+            fs::read_to_string(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?,
+        ))
     };
     let root = workspace::read_manifest(".", read)?.unwrap_or_default();
     let version = override_version
@@ -87,7 +95,7 @@ fn print_report(out: &mut impl Write, r: &Inspection) -> io::Result<()> {
                 Disposition::Rejected => "rejects",
                 Disposition::Unknown => "undetermined",
             };
-            write!(out, " [strict peer policy: {disposition}]")?;
+            write!(out, " [peer policy: {disposition}]")?;
         }
         writeln!(
             out,

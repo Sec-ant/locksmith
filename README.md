@@ -110,7 +110,7 @@ A healthy lock comes back byte-for-byte. Repair preserves valid pins and can rec
 
 Run `pnpm locksmith inspect` from the workspace, or pass a lockfile path. Add `--json` for each requester's declared range, locked bindings, matching versions already in the lock, direct and reachable workspaces, and a shortest example path. The report also lists packages with multiple releases or instances and links outside the recorded graph.
 
-Inspection reads the lockfile and adjacent workspace settings offline. Linked providers get their version from their workspace manifest. For a standalone lock, `--pnpm-version 10.33.2` selects the resolver policy explicitly. Unknown findings include the missing evidence and the selected resolver’s strict-peer decision. Paths follow edges recorded in the lock, including optional dependencies and each starting workspace's dev dependencies.
+Inspection reads the lockfile and adjacent workspace settings offline. The CLI reads linked provider manifests inside the selected workspace. In-memory callers can also supply manifests for external links. For a standalone lock, `--pnpm-version 10.33.2` selects the resolver policy explicitly. Unknown findings identify the missing evidence. Exemptions name the matching project rule. Paths follow edges recorded in the lock, including optional dependencies and each starting workspace's dev dependencies.
 
 ## Scripting contract
 

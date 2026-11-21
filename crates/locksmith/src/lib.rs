@@ -53,8 +53,8 @@ pub use diagnostics::{
 pub use error::{Conflict, ConflictKind, LockfileError, ValidationIssue};
 pub use graph::DependencyClosure;
 pub use inspect::{
-    ExternalLink, Inspection, InspectionSummary, LockedRelease, PackageInstances, PeerBinding,
-    PeerGroup, PeerRequirement, inspect,
+    ExternalLink, Inspection, InspectionSummary, LinkSource, LockedRelease, PackageInstances,
+    PeerBinding, PeerGroup, PeerRequirement, inspect,
 };
 pub use lockfile::{DocumentKind, Lockfile};
 pub use merge::{MergeInput, merge};

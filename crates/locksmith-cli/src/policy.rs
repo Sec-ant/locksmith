@@ -18,10 +18,6 @@ impl Policy {
         }
     }
 
-    fn peer_rules(&self, raw: &Value) -> Result<PeerRules, LockfileError> {
-        PeerRules::from_pnpm(raw, PeerVersionMatching::for_pnpm(self.0.as_ref()))
-    }
-
     pub fn check_peers(
         &self,
         raw: &Value,
@@ -34,7 +30,11 @@ impl Policy {
                 .as_bool()
                 .ok_or("strictPeerDependencies must be a boolean")?,
         };
-        let rules = self.peer_rules(raw)?;
+        let version = self.0.clone().or_else(|| result.recorded_pnpm_version());
+        let matching = version.as_ref().map_or(PeerVersionMatching::Semver, |v| {
+            PeerVersionMatching::for_pnpm(Some(v))
+        });
+        let rules = PeerRules::from_pnpm(raw, matching)?;
         let issues = locksmith::inspect_peers(result, &rules, Some(manifests));
         if strict && !issues.is_empty() {
             return Err(LockfileError::UnmetPeers(issues).into());

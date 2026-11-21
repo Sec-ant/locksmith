@@ -101,12 +101,21 @@ fn reports_distinct_policy_exceptions_and_unknown_link_versions() {
             }
         );
     }
+    let impossible_exception = PeerRules::from_pnpm(
+        &json!({"peerDependencyRules":{"allowedVersions":{"host":">=2.0.0 <1.0.0"}}}),
+        PeerVersionMatching::ReleaseCompatible,
+    )
+    .unwrap();
+    assert_eq!(
+        inspect(&lock(&data), &impossible_exception, None)
+            .unwrap()
+            .peers[0]
+            .requirement
+            .status,
+        PeerStatus::OutOfRange
+    );
     let unclear = inspect(
-        &lock(&binding(
-            ">1.0.0-rc.1",
-            "1.0.0-rc.1",
-            json!({"resolution":{}}),
-        )),
+        &lock(&binding("latest", "1.0.0-rc.1", json!({"resolution":{}}))),
         &PeerRules::from_pnpm(&json!({}), PeerVersionMatching::Unspecified).unwrap(),
         None,
     )
@@ -221,4 +230,75 @@ fn rejects_malformed_peer_declarations_with_their_location() {
             matches!(Lockfile::parse(&data.to_string()),Err(LockfileError::InvalidGraph(issues)) if issues.iter().any(|i|i.path==path))
         );
     }
+}
+
+#[test]
+fn an_empty_comparator_intersection_and_an_open_wildcard_match_no_release() {
+    for policy in [
+        PeerVersionMatching::Pnpm9,
+        PeerVersionMatching::ReleaseCompatible,
+        PeerVersionMatching::Pnpm11,
+        PeerVersionMatching::Pnpm12,
+        PeerVersionMatching::Unspecified,
+    ] {
+        let rules = PeerRules {
+            version_matching: policy,
+            ..PeerRules::default()
+        };
+        for (wanted, version, satisfies) in [
+            (">1.0.0-rc.1", "1.0.0-rc.1", false),
+            (">1.0.0-rc.1", "1.0.0-alpha.1", false),
+            (">1.0.0-rc.1", "1.0.0-rc.2", true),
+            (">=2.0.0 <1.0.0", "0.8.0", false),
+            (">=2.0.0 <1.0.0", "2.1.0", false),
+            (">=2.0.0 <3.0.0", "2.1.0", true),
+            (">= 2.0.0 < 1.0.0 || ^4", "2.1.0", false),
+            (">=2.0.0 <1.0.0 || ^4", "4.1.0", true),
+            (">*", "2.1.0", false),
+            ("*", "2.1.0", true),
+            (">1", "2.1.0", true),
+            ("1.0.0 - 3.0.0", "2.1.0", true),
+        ] {
+            let report = inspect(
+                &lock(&binding(wanted, version, json!({"resolution":{}}))),
+                &rules,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                report.peers.is_empty(),
+                satisfies,
+                "{policy:?}: {version} in {wanted}"
+            );
+            if !satisfies {
+                let g = &report.peers[0];
+                assert_eq!(g.requirement.status, PeerStatus::OutOfRange);
+                assert_eq!(g.requirement.disposition, Disposition::Rejected);
+                assert!(g.matching_versions_in_lock.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn external_links_identify_importers_and_snapshots_with_the_same_key() {
+    let key = "app@1.0.0";
+    let data = json!({"lockfileVersion":"9.0",
+        "importers":{key:{"dependencies":{"other":{"specifier":"link:../shared","version":"link:../shared"}}}},
+        "packages":{key:{"resolution":{}}},
+        "snapshots":{key:{"dependencies":{"other":"link:shared"}}}});
+    let report = inspect(&lock(&data), &PeerRules::default(), None).unwrap();
+    let kinds: BTreeSet<_> = report
+        .external_links
+        .iter()
+        .filter(|l| l.from == key && l.dependency == "other" && l.target == "shared")
+        .map(|l| l.source_kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            locksmith::LinkSource::Importer,
+            locksmith::LinkSource::Snapshot
+        ])
+    );
 }

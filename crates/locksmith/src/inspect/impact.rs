@@ -2,7 +2,7 @@
 //! condensed DAG so temporary memory stays linear even on very wide workspaces.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::{ExternalLink, PeerGroup};
+use super::{ExternalLink, LinkSource, PeerGroup};
 use crate::{DocumentKind, LockfileError, Value, graph};
 use petgraph::{
     algo::kosaraju_scc,
@@ -36,10 +36,13 @@ impl<'a> Impact<'a> {
         let mut direct = vec![Vec::new(); roots.len()];
         let mut external_links = BTreeSet::new();
         let mut issues = Vec::new();
-        for (section, nodes) in [("importers", &workspaces), ("snapshots", &snapshots)] {
+        for (section, kind, nodes) in [
+            ("importers", LinkSource::Importer, &workspaces),
+            ("snapshots", LinkSource::Snapshot, &snapshots),
+        ] {
             for (&key, &from) in nodes {
                 let record = &doc[section][key];
-                let is_workspace = section == "importers";
+                let is_workspace = kind == LinkSource::Importer;
                 let mut edges = Vec::new();
                 for (group, name, pin) in graph::references(
                     record,
@@ -54,6 +57,7 @@ impl<'a> Impact<'a> {
                         let id = graph::linked_project(doc.get("importers"), base, relative);
                         let Some(target) = workspaces.get(id.as_str()) else {
                             external_links.insert(ExternalLink {
+                                source_kind: kind,
                                 from: key.to_string(),
                                 dependency: name.to_string(),
                                 target: id,

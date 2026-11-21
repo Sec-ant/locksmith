@@ -1,7 +1,8 @@
-//! Peer resolution in pnpm 9–11 uses Yarn's prerelease comparison. pnpm 11
-//! adds scheme ranges. pnpm 12 also checks the release core in its resolver.
+//! Peer ranges use npm comparator sets. pnpm policies also allow prereleases
+//! against their release core and, from pnpm 11, ranges inside scheme specs.
 use super::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
 use nodejs_semver::{Range, Version};
+use std::borrow::Cow;
 
 pub(crate) struct PeerRange(Vec<ParsedRange>);
 
@@ -9,7 +10,7 @@ impl PeerRange {
     pub(crate) fn new(wanted: &str, mode: PeerVersionMatching) -> Self {
         use PeerVersionMatching::*;
         let policies: &[_] = match mode {
-            Unspecified => &[ReleaseCompatible, Pnpm11, Pnpm12],
+            Unspecified => &[ReleaseCompatible, Pnpm11],
             _ => std::slice::from_ref(&mode),
         };
         Self(
@@ -30,7 +31,7 @@ impl PeerRange {
     ) -> Option<(PeerStatus, Disposition, Option<UnknownReason>)> {
         let mut outcomes = self.0.iter().map(|r| r.check(version));
         let first = outcomes.next().expect("at least one resolver policy");
-        if outcomes.all(|outcome| outcome == first) {
+        if outcomes.all(|other| other == first) {
             first
         } else {
             Some((
@@ -95,23 +96,21 @@ impl ParsedRange {
 
     fn accepts(&self, version: &Version) -> bool {
         if !version.is_prerelease() || self.mode == PeerVersionMatching::Semver {
-            return self.arms.iter().any(|arm| arm.range.satisfies(version));
+            return self
+                .arms
+                .iter()
+                .any(|arm| arm.range.as_ref().is_some_and(|r| r.satisfies(version)));
         }
-        let core = Version::new(
-            version.major(),
-            version.minor(),
-            version.patch(),
-            vec![],
-            vec![],
-        );
+        let core = Version::from((version.major(), version.minor(), version.patch()));
         self.arms.iter().any(|arm| {
+            let Some(range) = &arm.range else {
+                return false;
+            };
             arm.partial_ceiling
                 .as_ref()
                 .is_none_or(|upper| core < *upper)
-                && arm.range.satisfies_with_prerelease(version, true)
-                || (self.mode == PeerVersionMatching::Pnpm12
-                    || !arm.open_prerelease_bounds.contains(version))
-                    && arm.range.satisfies(&core)
+                && range.satisfies_with_prerelease(version, true)
+                || !arm.explicit_prerelease && range.satisfies(&core)
         })
     }
 
@@ -137,37 +136,63 @@ impl ParsedRange {
     }
 }
 
+pub(super) fn satisfies_semver(version: &Version, wanted: &str) -> bool {
+    wanted
+        .split("||")
+        .map(str::trim)
+        .filter_map(Alternative::parse)
+        .filter_map(|arm| arm.range)
+        .any(|range| range.satisfies(version))
+}
+
+fn comparator(text: &str) -> &str {
+    if text == ">*" { "<0.0.0-0" } else { text }
+}
+
 struct Alternative {
-    range: Range,
+    // None denotes a valid arm with an empty intersection.
+    range: Option<Range>,
     partial_ceiling: Option<Version>,
-    open_prerelease_bounds: Vec<Version>,
+    explicit_prerelease: bool,
 }
 
 impl Alternative {
     fn parse(text: &str) -> Option<Self> {
-        let range = Range::parse(text).ok()?;
+        let whole = comparator(text);
+        let mut range = Some(Range::parse(whole).ok()?);
         let mut partial_ceiling: Option<Version> = None;
-        let mut open_prerelease_bounds = Vec::new();
-        let mut tokens = text.split_whitespace();
+        let mut explicit_prerelease = false;
+        let mut tokens = text.split_whitespace().peekable();
         while let Some(token) = tokens.next() {
-            let Some((operator, body)) = token.split_at_checked(1) else {
-                continue;
-            };
-            if !matches!(operator, "<" | ">") {
-                continue;
+            // Whitespace is legal between an operator and its operand. A
+            // hyphen range is one comparator even though it spans three words.
+            let term: Cow<'_, str> =
+                if matches!(token, ">" | ">=" | "<" | "<=" | "=" | "~" | "~>" | "^")
+                    && tokens.peek().is_some()
+                {
+                    format!("{token}{}", tokens.next().unwrap()).into()
+                } else if tokens.next_if_eq(&"-").is_some() {
+                    format!("{token} - {}", tokens.next().unwrap_or("")).into()
+                } else {
+                    token.into()
+                };
+            let normalized = comparator(&term);
+            if normalized != whole
+                && let Ok(part) = Range::parse(normalized)
+            {
+                range = range.and_then(|r| r.intersect(&part));
             }
-            let body = if body.is_empty() {
-                tokens.next().unwrap_or("")
-            } else {
-                body
-            };
-            if let Ok(version) = Version::parse(body) {
-                // Yarn retries a prerelease as its release core, but an exclusive
-                // comparator still excludes the exact version it names.
-                if version.is_prerelease() {
-                    open_prerelease_bounds.push(version);
-                }
-            } else if operator == "<" && !body.is_empty() && !body.starts_with('=') {
+            if term.contains('-') {
+                explicit_prerelease |= term.split_whitespace().any(|part| {
+                    Version::parse(part.trim_start_matches(['<', '>', '=', '~', '^']))
+                        .is_ok_and(|v| v.is_prerelease())
+                });
+            }
+            if let Some(body) = term.strip_prefix('<')
+                && !body.is_empty()
+                && !body.starts_with('=')
+                && Version::parse(body).is_err()
+            {
                 // npm expands <2 (and <2.x) to <2.0.0-0, excluding 2.0.0-beta.
                 // An explicit <2.0.0 includes prereleases of 2.0.0.
                 if let Some(minimum) = Range::parse(body).ok().and_then(|r| r.min_version())
@@ -180,7 +205,7 @@ impl Alternative {
         Some(Self {
             range,
             partial_ceiling,
-            open_prerelease_bounds,
+            explicit_prerelease,
         })
     }
 }
