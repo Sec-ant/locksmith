@@ -11,8 +11,12 @@ use super::{
     git::{self, Blobs},
 };
 
+pub const MANIFEST_NAMES: [&str; 3] = ["package.json", "package.json5", "package.yaml"];
+
 pub const CONFIG_FILES: &[&str] = &[
     "package.json",
+    "package.json5",
+    "package.yaml",
     "pnpm-workspace.yaml",
     ".npmrc",
     ".pnpmfile.cjs",
@@ -38,11 +42,31 @@ pub fn check_conflicts(
     Ok(())
 }
 
-pub fn manifest(blobs: &mut Blobs, tree: &str, path: &str) -> Result<Value> {
-    let text = blobs
-        .read(tree, path)?
-        .ok_or_else(|| format!("missing {path} in {tree}"))?;
-    let value: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+pub fn read_manifest(
+    dir: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<Option<Value>> {
+    for name in MANIFEST_NAMES {
+        let path = if dir == "." {
+            name.to_owned()
+        } else {
+            format!("{dir}/{name}")
+        };
+        let Some(text) = read(&path)? else { continue };
+        return parse_manifest(&path, &text).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_manifest(path: &str, text: &str) -> Result<Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let value: Value = if path.ends_with(".json5") {
+        json5::from_str(text).map_err(|e| format!("{path}: {e}"))?
+    } else if path.ends_with(".yaml") {
+        serde_saphyr::from_str(text).map_err(|e| format!("{path}: {e}"))?
+    } else {
+        serde_json::from_str(text).map_err(|e| format!("{path}: {e}"))?
+    };
     if !value.is_object() {
         return Err(format!("{path}: expected an object").into());
     }
@@ -60,12 +84,7 @@ impl Project {
     }
 
     pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
-        let root: Value =
-            serde_json::from_str(&read("package.json")?.ok_or("missing package.json")?)
-                .map_err(|e| format!("package.json: {e}"))?;
-        if !root.is_object() {
-            return Err("package.json: expected an object".into());
-        }
+        let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
         let mut config = match root.get("pnpm") {
             Some(v) if v.is_object() => v.clone(),
             Some(_) => {
@@ -86,16 +105,30 @@ impl Project {
         if let Some(text) = &workspace {
             let settings: Option<serde_json::Map<String, Value>> =
                 serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
-            if let Some(settings) = settings {
+            if let Some(mut settings) = settings {
+                if version.as_ref().is_some_and(|v| v.major == 9) {
+                    // pnpm 9 takes these resolver settings from .npmrc.
+                    for key in [
+                        "peersSuffixMaxLength",
+                        "injectWorkspacePackages",
+                        "autoInstallPeers",
+                        "addMissingPeerTypes",
+                    ] {
+                        settings.remove(key);
+                    }
+                }
                 config.as_object_mut().unwrap().extend(settings);
             }
         }
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
-        for name in hook_paths(&config)? {
+        for name in hook_candidates(&config, version.as_ref().map(|v| v.major))? {
             if let Some(contents) = read(&name)? {
                 hooks.insert(name, Value::String(contents));
+                if config.get("pnpmfile").is_none() {
+                    break;
+                }
             }
         }
         if !hooks.is_empty() {
@@ -118,9 +151,14 @@ pub fn manifests(
     let mut manifests = BTreeMap::from([(".".into(), project.root.clone())]);
     if project.workspace {
         let members = Members::new(project)?;
-        for id in members.directories(&super::git::workspace_paths(tree, prefix)?, prefix)? {
-            let manifest = manifest(blobs, tree, &format!("{prefix}{id}/package.json"))?;
-            manifests.insert(id, manifest);
+        let tree_paths = git::workspace_paths(tree, prefix)?;
+        let paths = members.manifest_paths(&tree_paths, prefix);
+        git::prefetch_manifests(tree, prefix, &paths)?;
+        for (id, path) in paths {
+            let text = blobs
+                .read(tree, &format!("{prefix}{path}"))?
+                .ok_or_else(|| format!("missing manifest in {tree}:{prefix}{path}"))?;
+            manifests.insert(id.to_owned(), parse_manifest(path, &text)?);
         }
     }
     Ok(manifests)
@@ -163,7 +201,7 @@ pub fn relative(path: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
+fn hook_candidates(config: &Value, major: Option<u64>) -> Result<Vec<String>> {
     match config.get("pnpmfile") {
         Some(Value::String(s)) => Ok(vec![relative(s)?]),
         Some(Value::Array(a)) => a
@@ -171,8 +209,20 @@ pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
             .map(|s| relative(s.as_str().ok_or("pnpmfile expects paths")?))
             .collect(),
         Some(_) => Err("pnpmfile expects a path or a list of paths".into()),
-        None => Ok(vec![".pnpmfile.cjs".into(), ".pnpmfile.mjs".into()]),
+        None if major.is_some_and(|v| v < 11) => Ok(vec![".pnpmfile.cjs".into()]),
+        None => Ok(vec![".pnpmfile.mjs".into(), ".pnpmfile.cjs".into()]),
     }
+}
+
+pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
+    if config.get("pnpmfile").is_some() {
+        return hook_candidates(config, None);
+    }
+    Ok(config["pnpmfileChecksum"]
+        .as_object()
+        .into_iter()
+        .flat_map(|files| files.keys().cloned())
+        .collect())
 }
 
 pub fn file_inputs(config: &Value) -> Result<Vec<String>> {
@@ -262,14 +312,33 @@ impl Members {
                 Some(p) => (&mut this.exclude, p),
                 None => (&mut this.include, value.as_str()),
             };
-            if pattern.contains(['{', '}', '(', ')', '\\']) || pattern.starts_with('!') {
+            if pattern.contains(['(', ')', '\\']) || pattern.starts_with(['!', '/']) {
                 return Err(format!("unsupported workspace glob {value:?}").into());
             }
-            let pattern = pattern
-                .strip_prefix("./")
-                .unwrap_or(pattern)
-                .trim_end_matches('/');
-            patterns.push(Pattern::new(&format!("{pattern}/package.json"))?);
+            // Expand before normalizing: alternatives can have different depths.
+            let expanded = brace_expansion::expand_with_max(pattern, 1025);
+            if expanded.len() > 1024 {
+                return Err(format!("too many alternatives in workspace glob {value:?}").into());
+            }
+            for alternative in expanded {
+                let mut parts = Vec::new();
+                for part in alternative.split('/') {
+                    match part {
+                        "" | "." => (),
+                        ".." => {
+                            if parts.pop().is_none() {
+                                return Err(
+                                    format!("workspace glob escapes the root: {value:?}").into()
+                                );
+                            }
+                        }
+                        _ => parts.push(part),
+                    }
+                }
+                if !parts.is_empty() {
+                    patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
+                }
+            }
         }
         Ok(this)
     }
@@ -296,31 +365,32 @@ impl Members {
             ":(glob)**/package.json5",
             ":(glob)**/package.yaml",
         ]);
-        self.directories(&git::output(&args)?, "")
+        let paths = git::output(&args)?;
+        Ok(self
+            .manifest_paths(&paths, "")
+            .into_keys()
+            .map(str::to_owned)
+            .collect())
     }
 
-    pub fn directories(&self, paths: &str, prefix: &str) -> Result<BTreeSet<String>> {
-        let mut dirs = BTreeSet::new();
+    fn manifest_paths<'a>(&self, paths: &'a str, prefix: &str) -> BTreeMap<&'a str, &'a str> {
+        let mut manifests = BTreeMap::new();
         for path in paths
             .split_terminator('\0')
             .filter_map(|p| p.strip_prefix(prefix))
         {
-            let Some((dir, file)) = path.rsplit_once('/') else {
+            let Some((dir, name)) = path.rsplit_once('/') else {
                 continue;
             };
-            if matches!(file, "package.json" | "package.json5" | "package.yaml")
-                && self.contains(dir)
-            {
-                if file != "package.json" {
-                    return Err(format!(
-                        "expected a JSON workspace manifest, found {prefix}{path}"
-                    )
-                    .into());
+            if MANIFEST_NAMES.contains(&name) && self.contains(dir) {
+                // package.json < package.json5 < package.yaml in pnpm's search order.
+                let selected = manifests.entry(dir).or_insert(path);
+                if path < *selected {
+                    *selected = path;
                 }
-                dirs.insert(dir.to_owned());
             }
         }
-        Ok(dirs)
+        manifests
     }
 
     pub fn contains(&self, dir: &str) -> bool {

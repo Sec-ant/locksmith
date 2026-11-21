@@ -1,6 +1,6 @@
 //! Read the committed merge inputs without consulting a partially updated index.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
@@ -261,6 +261,110 @@ pub fn workspace_paths(tree: &str, prefix: &str) -> Result<String> {
         "--",
         scope,
     ])
+}
+
+/// In a blobless clone, cat-file lazily fetches one missing object per request.
+/// Fetch just the selected manifests together, leaving Git's usual promisor
+/// selection in charge when multiple remotes are configured.
+pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>) -> Result<()> {
+    if paths.is_empty() || env::var_os("GIT_NO_LAZY_FETCH").is_some() {
+        return Ok(());
+    }
+    let remotes = Command::new("git")
+        .args([
+            "config",
+            "--null",
+            "--type=bool",
+            "--get-regexp",
+            r"^remote\..*\.promisor$",
+        ])
+        .output()?;
+    if remotes.status.code() == Some(1) {
+        return Ok(());
+    }
+    if !remotes.status.success() {
+        return Err(failure(&remotes).into());
+    }
+    let mut names = std::str::from_utf8(&remotes.stdout)?
+        .split_terminator('\0')
+        .filter_map(|record| {
+            record
+                .strip_suffix(".promisor\ntrue")?
+                .strip_prefix("remote.")
+        });
+    let Some(remote) = names.next() else {
+        return Ok(());
+    };
+    if names.next().is_some() {
+        return Ok(());
+    }
+
+    let mut query = format!("{tree}^{{tree}}\n--\n");
+    for path in paths.values() {
+        if path.contains(['\r', '\n']) || prefix.contains(['\r', '\n']) {
+            return Err(format!("unsupported configuration path {prefix}{path:?}").into());
+        }
+        query.push_str(&format!(":(top,literal){prefix}{path}\n"));
+    }
+    let objects = with_input(
+        &[
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+            "--stdin",
+        ],
+        query.as_bytes(),
+    )?;
+    let mut missing = String::new();
+    for id in objects.lines().filter_map(|line| line.strip_prefix('?')) {
+        if !oid(id) {
+            return Err("invalid missing Git object ID".into());
+        }
+        missing.push_str(id);
+        missing.push('\n');
+    }
+    if !missing.is_empty() {
+        with_input(
+            &[
+                "-c",
+                "fetch.negotiationAlgorithm=noop",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-prune",
+                "--refmap=",
+                "--recurse-submodules=no",
+                "--filter=blob:none",
+                "--stdin",
+                "--",
+                remote,
+            ],
+            missing.as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+fn with_input(args: &[&str], input: &[u8]) -> Result<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let written = child
+        .stdin
+        .take()
+        .expect("piped Git stdin")
+        .write_all(input);
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(failure(&output).into());
+    }
+    written?;
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 /// The single cat-file process reads just the configuration blobs requested.

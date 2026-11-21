@@ -750,3 +750,49 @@ fn registry_pin_and_matching_workspace_release_follow_final_link_policy() {
         );
     }
 }
+
+#[test]
+fn catalog_links_use_the_local_manifest_version_with_context() {
+    let config = cfg(&json!({"catalogs":{"local":{"lib":"^1"}},"linkWorkspacePackages":true}));
+    let mut value = json!({"lockfileVersion":"9.0","catalogs":{"local":{"lib":{"specifier":"^1","version":"1.2.0"}}},
+        "importers":{".":{"dependencies":{"lib":{"specifier":"catalog:local","version":"link:packages/lib"}}},"packages/lib":{}}});
+    let input = Lockfile::parse(&value.to_string()).unwrap();
+    let plain = merge(&input, &input, &input, None).unwrap();
+    assert_eq!(plain.project().unwrap(), input.project().unwrap());
+    for (version, compatible) in [("1.2.0", true), ("2.0.0", false)] {
+        let manifests = BTreeMap::from([
+            (".".into(), json!({"dependencies":{"lib":"catalog:local"}})),
+            (
+                "packages/lib".into(),
+                json!({"name":"lib","version":version}),
+            ),
+        ]);
+        let result = merge(
+            &input,
+            &input,
+            &input,
+            Some(&MergeContext {
+                target: MergeTarget::Ours,
+                manifests: &manifests,
+                configuration: &config,
+                configurations: [&config; 3],
+                registry: None,
+                patches: &BTreeMap::new(),
+            }),
+        );
+        if compatible {
+            assert_eq!(
+                result.unwrap().project().unwrap()["importers"]["."]["dependencies"]["lib"]["version"],
+                "link:packages/lib"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "an incompatible workspace version cannot satisfy the catalog"
+            );
+        }
+    }
+    value["importers"]["."]["dependencies"]["lib"]["version"] = json!("link:missing");
+    let invalid = Lockfile::parse(&value.to_string()).unwrap();
+    assert!(merge(&invalid, &invalid, &invalid, None).is_err());
+}

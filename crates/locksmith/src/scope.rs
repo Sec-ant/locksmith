@@ -76,6 +76,9 @@ pub fn converge_with_patches(
     options: ConvergeOptions<'_>,
     patches: &BTreeMap<String, String>,
 ) -> Result<Lockfile, LockfileError> {
+    if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
+        crate::repair::check_recorded_settings(project, config)?;
+    }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
         && before.changes_pnpm_major(after)
     {

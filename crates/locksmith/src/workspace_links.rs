@@ -45,6 +45,26 @@ impl<'a> WorkspaceLinks<'a> {
         importer: &str,
         manifest: &Value,
     ) -> Result<Option<(String, Option<&'a Value>)>, LockfileError> {
+        let specifier = if let Some(catalog) = specifier.strip_prefix("catalog:") {
+            let catalog = if catalog.is_empty() {
+                "default"
+            } else {
+                catalog
+            };
+            self.config
+                .catalogs
+                .get(catalog)
+                .and_then(|entries| entries.get(name))
+                .ok_or_else(|| {
+                    missing(
+                        &["catalogs", catalog, name],
+                        "final workspace has no declaration",
+                    )
+                })?
+                .as_str()
+        } else {
+            specifier
+        };
         let workspace = specifier.strip_prefix("workspace:").map(str::trim);
         let explicit_link = specifier.strip_prefix("link:");
         let link_local = self

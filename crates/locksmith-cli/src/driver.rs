@@ -27,9 +27,10 @@ fn project_conflicts(
             return false;
         };
         inputs.contains(path)
-            || path
-                .strip_suffix("/package.json")
-                .is_some_and(|dir| workspaces.iter().any(|w| w.contains(dir)))
+            || path.rsplit_once('/').is_some_and(|(dir, name)| {
+                workspace::MANIFEST_NAMES.contains(&name)
+                    && workspaces.iter().any(|w| w.contains(dir))
+            })
     })
 }
 
@@ -92,7 +93,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         .each_ref()
         .map(|r| Project::read(&mut blobs, r, prefix));
     let sources = [base?, ours?, theirs?];
-    let root_conflict = ["package.json", "pnpm-workspace.yaml", ".npmrc"]
+    let root_conflict = workspace::CONFIG_FILES
         .iter()
         .any(|p| conflicts.contains(&format!("{prefix}{p}")));
     if root_conflict {

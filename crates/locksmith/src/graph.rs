@@ -442,6 +442,15 @@ fn check_catalogs(
             if !spec
                 .zip(dependency["version"].as_str())
                 .is_some_and(|(spec, pin)| {
+                    // A linked importer has no registry pin of its own. Its
+                    // version is in the target manifest, outside the lock.
+                    if let Some(path) = pin.strip_prefix("link:") {
+                        let target = linked_project(document.get("importers"), key, path);
+                        return document["importers"].get(&target).is_some()
+                            && entry.is_none_or(|e| {
+                                crate::reconcile::metadata::catalog_entry_version(spec, e).is_some()
+                            });
+                    }
                     crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)
                 })
             {

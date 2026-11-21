@@ -828,3 +828,157 @@ fn repair_reports_ambiguous_duplicates_without_emitting_yaml() {
     assert!(out.stdout.is_empty());
     assert!(String::from_utf8_lossy(&out.stderr).contains("x@1.0.0"));
 }
+
+#[test]
+fn normalized_workspace_globs_and_pnpm_manifest_formats_keep_healthy_importers() {
+    let repo = Repo::new();
+    let lock = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let web = repo.git(&["show", "HEAD:apps/web/package.json"]);
+    repo.write(
+        "pnpm-workspace.yaml",
+        "packages: ['{apps,libs}/tmp/.././*']\n",
+    );
+    repo.write(
+        "package.json",
+        "\u{feff}{\"packageManager\":\"pnpm@10.34.9\"}",
+    );
+    repo.write("apps/web/package.json", &format!("\u{feff}{web}"));
+    repo.write(
+        "apps/web/package.json5",
+        "// JSON5\n{name:'web',dependencies:{left:'1.0.0'},devDependencies:{right:'^1.0.0'},}",
+    );
+    repo.write("apps/web/package.yaml", "invalid: [");
+    repo.commit("multiple manifest formats");
+    for args in [["repair", "HEAD"], ["converge", "HEAD"]] {
+        let out = repo.cmd(CLI, &args);
+        assert!(out.status.success(), "{}", report(&out));
+        assert_eq!(out.stdout, lock.as_bytes());
+    }
+
+    // The working tree and Git revision can use different manifest formats.
+    repo.git(&["rm", "apps/web/package.json"]);
+    let out = repo.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, lock.as_bytes());
+    repo.commit("use JSON5");
+    repo.git(&["rm", "apps/web/package.json5", "package.json"]);
+    repo.write("package.yaml", "packageManager: pnpm@10.34.9\n");
+    repo.write(
+        "apps/web/package.yaml",
+        "name: web\ndependencies: {left: 1.0.0}\ndevDependencies: {right: ^1.0.0}\n",
+    );
+    repo.commit("use YAML");
+    for args in [["repair", "HEAD"], ["converge", "HEAD^"]] {
+        let out = repo.cmd(CLI, &args);
+        assert!(out.status.success(), "{}", report(&out));
+        assert_eq!(out.stdout, lock.as_bytes());
+    }
+}
+
+#[test]
+fn repair_keeps_the_active_hooks_dependencies() {
+    let repo = Repo::new();
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    repo.write(
+        ".pnpmfile.mjs",
+        "export const hooks = { readPackage(pkg) {return pkg} }\n",
+    );
+    repo.write(".pnpmfile.cjs", "module.exports = {};\n");
+    // pnpm 12 records the SHA-256 of the selected .mjs hook.
+    let mut lock: Value =
+        serde_json::from_str(&repo.git(&["show", "HEAD:pnpm-lock.yaml"])).unwrap();
+    lock["pnpmfileChecksum"] = json!("sha256-hcrgxuD4yzd6wArCpuECMwsXbpMreZHhRY4a0MX/XXA=");
+    repo.write("pnpm-lock.yaml", &lock.to_string());
+    repo.commit("record active hook");
+    let out = repo.cmd(CLI, &["repair", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+
+    repo.write(
+        "apps/web/package.json",
+        r#"{"name":"web","dependencies":{"left":"1.0.0"}}"#,
+    );
+    repo.commit("static declarations differ from the locked importer");
+    let out = repo.cmd(CLI, &["repair", "HEAD"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(report(&out).contains("pnpmfile"), "{}", report(&out));
+}
+
+#[test]
+fn stale_candidate_settings_are_reported_even_when_the_two_locks_match() {
+    let repo = Repo::new();
+    repo.write(
+        "pnpm-workspace.yaml",
+        "packages: ['apps/*']\npeersSuffixMaxLength: 32\n",
+    );
+    repo.commit("change only the suffix length");
+    for args in [["converge", "HEAD"], ["repair", "HEAD"]] {
+        let out = repo.cmd(CLI, &args);
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(
+            report(&out).contains("peersSuffixMaxLength"),
+            "{}",
+            report(&out)
+        );
+    }
+}
+
+#[test]
+fn reading_a_partial_clone_leaves_unrelated_historical_blobs_on_the_remote() {
+    let repo = Repo::new();
+    repo.write("unrelated/src.txt", "old source");
+    repo.write("excluded/package.json", r#"{"name":"unused-old"}"#);
+    repo.commit("baseline files");
+    let baseline = repo.git(&["rev-parse", "HEAD"]);
+    let other = repo.git(&["rev-parse", "HEAD:unrelated/src.txt"]);
+    let excluded = repo.git(&["rev-parse", "HEAD:excluded/package.json"]);
+    // All three historical blobs are missing after a blobless checkout.
+    repo.write(
+        "apps/web/package.json",
+        &repo
+            .git(&["show", "HEAD:apps/web/package.json"])
+            .replace("web", "renamed"),
+    );
+    repo.write("unrelated/src.txt", "new source");
+    repo.write("excluded/package.json", r#"{"name":"unused-new"}"#);
+    repo.commit("change both members and unrelated files");
+    repo.git(&["config", "uploadpack.allowFilter", "true"]);
+    let temp = tempfile::tempdir().unwrap();
+    let clone = temp.path().join("checkout");
+    let out = repo.cmd(
+        "git",
+        &[
+            "clone",
+            "--no-local",
+            "--filter=blob:none",
+            repo.0.path().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", report(&out));
+    let run = |exe: &str, args: &[&str]| {
+        Command::new(exe)
+            .args(args)
+            .current_dir(&clone)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+    };
+    let result = run(CLI, &["converge", baseline.trim()]);
+    assert!(result.status.success(), "{}", report(&result));
+    let missing = run(
+        "git",
+        &["rev-list", "--objects", "--missing=print", baseline.trim()],
+    );
+    assert!(missing.status.success(), "{}", report(&missing));
+    let missing = String::from_utf8(missing.stdout).unwrap();
+    for oid in [other, excluded] {
+        assert!(
+            missing
+                .lines()
+                .any(|line| line.strip_prefix('?') == Some(oid.trim()))
+        );
+    }
+}
