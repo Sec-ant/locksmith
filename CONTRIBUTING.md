@@ -23,3 +23,9 @@ Preserve pnpm 9 and 10 publication times for direct dependencies retained by `me
 Knope adds the bullet. A one-line summary can keep the `#` from `just change`. When users need migration steps, use `# Short title`, leave a blank line, and put the steps below it. Knope renders that entry as a subsection.
 
 Run `just check-changesets` to check the format and `knope --dry-run prepare-release` to preview the changelog.
+
+## Node packages
+
+Run `sh scripts/node/check-package.sh` with Node.js 22+, npm, Git and Rust on your platform. It builds the addon and CLI, packs them, and installs the tarballs by name from a temporary local registry. Build outputs are under `target/npm/`.
+
+The Knope release workflow publishes the eight platform packages before the main npm package. For the initial publish, configure a short-lived npm granular token with package-creation and publish access and 2FA bypass as the `NPM_BOOTSTRAP_TOKEN` secret in the GitHub `npm` environment. After the packages exist, authorize `Sec-ant/locksmith`, workflow `release.yml`, environment `npm`, for direct publishing on each of the nine packages. Remove the bootstrap secret and revoke the token. Subsequent releases authenticate with OIDC. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)

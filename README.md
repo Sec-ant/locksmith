@@ -22,7 +22,14 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 
 ## Install
 
-Install the prebuilt CLI on macOS or Linux with Homebrew.
+Install the Node.js API and CLI as a project dependency. The package provides prebuilt binaries for Node.js 22 and later on macOS, Windows, and Linux (glibc and musl), on x64 and arm64.
+
+```sh
+pnpm add -D es-locksmith
+pnpm exec locksmith --help
+```
+
+You can also install the CLI on macOS or Linux with Homebrew.
 
 ```sh
 brew tap sec-ant/locksmith https://github.com/Sec-ant/locksmith.git
@@ -108,6 +115,22 @@ A healthy lock comes back byte-for-byte. Repair preserves valid pins and can rec
 
 With a complete Git clone, Locksmith works offline by default. In a partial clone, Git may fetch missing objects from its remote. A contextual merge, `converge`, and `repair` can query the configured registry for package metadata with `--allow-network`. The CLI uses the project's registry settings and credentials, respects release-age and version-selection settings, and caches metadata for the command. Package installation remains pnpm's job.
 
+## Node.js API
+
+Use `convergeWorkspace` to compare a Git ref with an installed worktree. It returns the YAML for review and leaves the working tree untouched.
+
+```js
+import { convergeWorkspace } from 'es-locksmith'
+
+const yaml = await convergeWorkspace('origin/main', { cwd: process.cwd() })
+```
+
+`repairWorkspace(ref, options)` reads a committed lockfile. Both workspace methods accept `cwd`, `signal`, and `allowNetwork` and use the bundled CLI. `getCliPath()` returns its executable path.
+
+For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual merge or repair to allow duplicate-key recovery.
+
+Use `parse(yaml)` to reuse a parsed lockfile across calls. `validate`, `dependencyClosure`, and `inspectPeers` check references, trace an importer, and report peer issues. In-memory errors expose a `code` and `details`, including conflict paths and requests for missing registry metadata. Both ESM and CommonJS are supported. [TypeScript API](npm/index.d.ts)
+
 ## Rust API
 
 Add the library with `cargo add es-locksmith` and import it as `locksmith`. The package is available on [crates.io](https://crates.io/crates/es-locksmith).
@@ -145,4 +168,4 @@ Pull requests time `merge`, `converge`, and `repair` on a 314-project workspace 
 
 With Knope installed, run `just change` to record a user-facing change and its version bump in `.changeset/`. Commit that file with the change. When the changeset reaches `main`, Knope Bot opens or updates a release PR with the next version, `Cargo.lock`, and `CHANGELOG.md`. See the [changeset style guide](CONTRIBUTING.md#changesets).
 
-Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io.
+Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io and npm.

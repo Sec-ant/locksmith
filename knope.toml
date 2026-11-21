@@ -1,6 +1,8 @@
 [package]
 versioned_files = [
     "Cargo.toml",
+    "npm/package.json",
+    { path = "Cargo.lock", dependency = "locksmith-node" },
     { path = "Cargo.lock", dependency = "es-locksmith" },
     { path = "Cargo.lock", dependency = "locksmith-cli" },
 ]

@@ -60,7 +60,7 @@ prepare-release:
 # Run the Rust tests and documentation examples.
 test:
     cargo test --workspace --all-targets --locked
-    cargo test --workspace --doc --locked
+    cargo test --workspace --exclude locksmith-node --doc --locked
 
 # Run the same changeset and Rust checks as CI.
 check: check-changesets fmt-check lint test

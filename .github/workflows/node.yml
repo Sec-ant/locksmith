@@ -1,0 +1,75 @@
+name: Node packages
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, platform: darwin-arm64 }
+          - { os: macos-15-intel, platform: darwin-x64 }
+          - { os: windows-2025, platform: win32-x64-msvc }
+          - { os: windows-11-arm, platform: win32-arm64-msvc }
+          - { os: ubuntu-22.04, platform: linux-x64-gnu }
+          - { os: ubuntu-22.04-arm, platform: linux-arm64-gnu }
+          - { os: ubuntu-22.04, platform: linux-x64-musl }
+          - { os: ubuntu-22.04-arm, platform: linux-arm64-musl }
+    name: npm (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        if: ${{ !endsWith(matrix.platform, '-musl') }}
+        with:
+          toolchain: 1.89.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: ${{ !endsWith(matrix.platform, '-musl') }}
+        with:
+          node-version: 22
+      - name: Build and install the npm packages
+        if: ${{ !endsWith(matrix.platform, '-musl') }}
+        shell: bash
+        run: sh scripts/node/check-package.sh
+      - name: Build and install on Alpine
+        if: endsWith(matrix.platform, '-musl')
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e CARGO_PROFILE_RELEASE_STRIP \
+            rust:1.89.0-alpine3.22@sha256:4b800f2e72e04be908e5f634c504c741bd943b763d1d8ad7b096cc340e1b5b46 sh -ec '
+              apk add --no-cache build-base git nodejs npm perl
+              git config --global --add safe.directory /src
+              export RUSTFLAGS="-C target-feature=-crt-static"
+              sh scripts/node/check-package.sh'
+      - name: Verify installation with pnpm
+        if: matrix.platform == 'linux-x64-gnu'
+        run: |
+          npm install --global pnpm@10.34.9
+          npm install --prefix "$RUNNER_TEMP/typecheck" typescript@5.9.3
+          LOCKSMITH_TSC="$RUNNER_TEMP/typecheck/node_modules/typescript/bin/tsc" node scripts/node/test-install.mjs target/npm pnpm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.commit
+        with:
+          name: npm-${{ matrix.platform }}
+          path: target/npm/es-locksmith-${{ matrix.platform }}-*.tgz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.commit && matrix.platform == 'linux-x64-gnu'
+        with:
+          name: npm-root
+          path: target/npm/es-locksmith-[0-9]*.tgz
+          if-no-files-found: error
