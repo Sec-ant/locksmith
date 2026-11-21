@@ -65,6 +65,18 @@ jobs:
           npm install --global pnpm@10.34.9
           npm install --prefix "$RUNNER_TEMP/typecheck" typescript@5.9.3
           LOCKSMITH_TSC="$RUNNER_TEMP/typecheck/node_modules/typescript/bin/tsc" npm --prefix npm test -- pnpm
+      - name: Package the tested CLI for GitHub Releases and Homebrew
+        if: inputs.commit && (startsWith(matrix.platform, 'darwin-') || endsWith(matrix.platform, '-gnu'))
+        shell: bash
+        run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          tar -czf "locksmith-$target.tar.gz" -C target/npm/native locksmith
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.commit && (startsWith(matrix.platform, 'darwin-') || endsWith(matrix.platform, '-gnu'))
+        with:
+          name: cli-${{ matrix.platform }}
+          path: locksmith-*.tar.gz
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: inputs.commit
         with:
