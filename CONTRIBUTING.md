@@ -29,7 +29,3 @@ Run `just check-changesets` to check the format and `knope --dry-run prepare-rel
 With Node.js 22+, npm, Git and Rust installed, run `npm --prefix npm run build` to build the addon and CLI and pack them under `target/npm/`. Run `npm --prefix npm test` to install the tarballs by name from a temporary registry and test the installed package.
 
 GNU/Linux builds also require cargo-zigbuild, Zig and GNU binutils. The pack step targets glibc 2.28 and checks the symbol requirements of both binaries. Prereleases of all npm packages use the `next` dist-tag.
-
-The release workflow uses npm trusted publishing (OIDC). It publishes the eight platform packages before the main package. To register new names, a signed-in npm maintainer can stage a separate bootstrap version with `npm stage publish`. Keep it staged until the first release is publicly available. Rejecting the only staged version removes npm's `0.0.0-stage` placeholder and blocks reuse of the name for 24 hours. [npm staged publishing](https://docs.npmjs.com/staged-publishing/)
-
-When the release is ready, run `npm trust github <package> --repo Sec-ant/locksmith --file release.yml --env npm --allow-publish` for each of the nine packages. The workflow must publish each package within 48 hours to validate its new trust configuration. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
