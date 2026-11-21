@@ -22,12 +22,15 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 
 ## Install
 
-Install the Node.js API and CLI as a project dependency. The package provides prebuilt binaries for Node.js 22 and later on macOS, Windows, and Linux (glibc and musl), on x64 and arm64.
+Install the Node.js API and CLI as a project dependency. The package provides prebuilt binaries for Node.js 22 and later on macOS, Windows, and Linux (glibc 2.28 or later, or musl), on x64 and arm64.
 
 ```sh
 pnpm add -D es-locksmith
-pnpm exec locksmith --help
+export PATH="$PWD/node_modules/.bin:$PATH"
+locksmith --help
 ```
+
+Run the `export` from the project root in each shell where you use the local CLI. A previous `pnpm exec` adds the directory to `PATH` only for that invocation.
 
 You can also install the CLI on macOS or Linux with Homebrew.
 
@@ -64,11 +67,13 @@ Add this line to the repository's `.gitattributes`.
 /pnpm-lock.yaml merge=locksmith
 ```
 
-Register the driver once per clone with Git 2.38 or later.
+Register the driver once per clone with Git 2.38 or later. Git runs it from the worktree root, so it can use the project-local executable even when launched from an editor.
 
 ```sh
-git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
+git config merge.locksmith.driver './node_modules/.bin/locksmith merge --git-driver %O %A %B %P'
 ```
+
+For a Homebrew or Cargo install, use `locksmith` in the driver command and make sure its directory is on Git's `PATH`.
 
 Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
 

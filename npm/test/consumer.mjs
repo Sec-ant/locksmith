@@ -66,6 +66,16 @@ git('worktree', 'add', '--detach', repo, 'HEAD');
 assert.equal(await api.convergeWorkspace('HEAD', { cwd: repo }), yaml);
 assert.equal(await api.repairWorkspace('HEAD', { cwd: repo }), yaml);
 await assert.rejects(api.convergeWorkspace('missing-ref', {cwd: repo}), { code: 'CLI_FAILED' });
+if (process.platform !== 'win32') {
+  // A separate process can exhaust its file descriptors without affecting other tests.
+  execFileSync('sh', ['-c', 'ulimit -n 96 && exec "$@"', 'sh', process.execPath, '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { openSync } from 'node:fs';
+    import { repairWorkspace } from 'es-locksmith';
+    assert.throws(() => { for (;;) openSync('/dev/null', 'r'); }, { code: 'EMFILE' });
+    await assert.rejects(repairWorkspace(), { code: 'EMFILE' });
+  `]);
+}
 // Exercise the executable shim installed by the consumer's package manager.
 function launch(flag) {
   if (process.platform === 'win32') {

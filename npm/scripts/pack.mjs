@@ -14,6 +14,7 @@ const targets = {
   'x86_64-unknown-linux-musl': ['linux', 'x64', 'musl'],
 };
 const platformName = parts => 'es-locksmith-' + parts.join('-');
+const glibcFloor = '2.28';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 process.chdir(repository);
@@ -27,7 +28,11 @@ const [os, cpu, abi] = parts;
 if (process.env.LOCKSMITH_PLATFORM && process.env.LOCKSMITH_PLATFORM !== parts.join('-')) {
   throw new Error(`Expected ${process.env.LOCKSMITH_PLATFORM} but Rust is targeting ${target}`);
 }
-execFileSync('cargo', ['build', '--release', '--locked', '--target', target, '-p', 'locksmith-node', '-p', 'locksmith-cli'], { stdio: 'inherit' });
+const gnu = abi === 'gnu';
+execFileSync('cargo', [
+  gnu ? 'zigbuild' : 'build', '--release', '--locked', '--target', gnu ? `${target}.${glibcFloor}` : target,
+  '-p', 'locksmith-node', '-p', 'locksmith-cli',
+], { stdio: 'inherit' });
 const root = join(output, 'root');
 const native = join(output, 'native');
 for (const dir of [root, native]) {
@@ -57,6 +62,23 @@ const library = { win32: 'locksmith_node.dll', darwin: 'liblocksmith_node.dylib'
 const cli = os === 'win32' ? 'locksmith.exe' : 'locksmith';
 copyFileSync(join(binaries, library), join(native, 'locksmith.node'));
 copyFileSync(join(binaries, cli), join(native, cli));
+
+if (gnu) {
+  const compare = new Intl.Collator('en', { numeric: true }).compare;
+  for (const file of ['locksmith.node', cli]) {
+    const table = execFileSync('readelf', ['--version-info', '--wide', join(native, file)], {
+      encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' },
+    });
+    const versions = Array.from(table.matchAll(/\bName: GLIBC_(\S+)/g), match => match[1]);
+    if (!versions.length) throw new Error(`No glibc requirements found in ${file}`);
+    for (const version of versions) {
+      if (!/^\d+(?:\.\d+)+$/.test(version) || compare(version, glibcFloor) > 0) {
+        throw new Error(`${file} requires GLIBC_${version}, outside the glibc ${glibcFloor} baseline`);
+      }
+    }
+    console.log(`${file}: highest required symbol version is GLIBC_${versions.sort(compare).at(-1)}`);
+  }
+}
 
 execFileSync(process.execPath, [
   process.env.npm_execpath, 'pack', root, native, '--ignore-scripts', '--pack-destination', output, '--silent',

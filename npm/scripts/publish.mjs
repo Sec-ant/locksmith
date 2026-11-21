@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const [dir, tag] = process.argv.slice(2);
 const { name, version } = JSON.parse(readFileSync('npm/package.json', 'utf8'));
 if (tag !== 'v' + version) throw new Error(`Release tag ${tag} does not match npm version ${version}`);
+const distTag = version.split('+')[0].includes('-') ? ['--tag', 'next'] : [];
 const rootTar = join(dir, `${name}-${version}.tgz`);
 const packed = JSON.parse(execFileSync('tar', ['-xOzf', rootTar, 'package/package.json'], { encoding: 'utf8' }));
 if (packed.name !== name || packed.version !== version) throw new Error('Unexpected root package');
@@ -30,7 +31,7 @@ async function published(pkg) {
 }
 
 function publish(pkg) {
-  execFileSync('npm', ['publish', pkg.path, '--access', 'public', '--registry=https://registry.npmjs.org'], { stdio: 'inherit' });
+  execFileSync('npm', ['publish', pkg.path, ...distTag, '--access', 'public', '--registry=https://registry.npmjs.org'], { stdio: 'inherit' });
 }
 
 const root = packages.pop();

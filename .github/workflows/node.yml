@@ -43,12 +43,31 @@ jobs:
         if: ${{ !endsWith(matrix.platform, '-musl') }}
         with:
           node-version: 22
+      - name: Install the GNU/Linux build tools
+        if: endsWith(matrix.platform, '-gnu')
+        run: |
+          python3 -m pip install --only-binary=:all: --target "$RUNNER_TEMP/zig-tools" cargo-zigbuild==0.24.1 ziglang==0.14.1
+          echo "$RUNNER_TEMP/zig-tools/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/zig-tools/ziglang" >> "$GITHUB_PATH"
       - name: Build and install the npm packages
         if: ${{ !endsWith(matrix.platform, '-musl') }}
         shell: bash
         run: |
           npm --prefix npm run build
           npm --prefix npm test
+      - name: Run the CLI and addon on glibc 2.28
+        if: endsWith(matrix.platform, '-gnu')
+        run: |
+          docker run --rm -i -v "$PWD/target/npm/native:/opt/locksmith:ro" -v "$(command -v node):/usr/local/bin/node:ro" \
+            almalinux:8@sha256:768bedc30fe0a536adb0a65d2eddb7caad364e514fbddd0ae9e026975f590342 /usr/local/bin/node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { createRequire } from 'node:module';
+          assert.equal(process.report.getReport().header.glibcVersionRuntime, '2.28');
+          execFileSync('/opt/locksmith/locksmith', ['--version'], { stdio: 'inherit' });
+          const addon = createRequire(import.meta.url)('/opt/locksmith/locksmith.node');
+          await addon.validate("lockfileVersion: '9.0'\nimporters: {'.': {}}\n");
+          JS
       - name: Build and install on Alpine
         if: endsWith(matrix.platform, '-musl')
         run: |

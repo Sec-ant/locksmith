@@ -9,11 +9,11 @@ function runWorkspace(command, ref, { cwd, allowNetwork = false, signal } = {}) 
     if (allowNetwork) args.push('--allow-network');
     args.push('--', ref);
     const child = spawn(getCliPath(), args, { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.on('error', reject);
     const stdout = [];
     const stderr = [];
-    child.stdout.on('data', chunk => stdout.push(chunk));
-    child.stderr.on('data', chunk => stderr.push(chunk));
-    child.on('error', reject);
+    child.stdout?.on('data', chunk => stdout.push(chunk));
+    child.stderr?.on('data', chunk => stderr.push(chunk));
     child.on('close', (exitCode, signal) => {
       if (exitCode === 0) {
         resolve(Buffer.concat(stdout).toString('utf8'));
