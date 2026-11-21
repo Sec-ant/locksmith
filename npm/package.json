@@ -1,0 +1,30 @@
+{
+  "name": "es-locksmith",
+  "version": "0.3.3",
+  "description": "Merge, converge and repair pnpm lockfiles with Rust",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sec-ant/locksmith.git",
+    "directory": "npm"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./index.cjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    }
+  },
+  "bin": {
+    "locksmith": "./cli.cjs"
+  },
+  "scripts": {
+    "build": "node scripts/pack.mjs",
+    "test": "node test/install.mjs"
+  }
+}

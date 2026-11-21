@@ -23,3 +23,9 @@ Preserve pnpm 9 and 10 publication times for direct dependencies retained by `me
 Knope adds the bullet. A one-line summary can keep the `#` from `just change`. When users need migration steps, use `# Short title`, leave a blank line, and put the steps below it. Knope renders that entry as a subsection.
 
 Run `just check-changesets` to check the format and `knope --dry-run prepare-release` to preview the changelog.
+
+## Node packages
+
+With Node.js 22+, npm, Git and Rust installed, run `npm --prefix npm run build` to build the addon and CLI and pack them under `target/npm/`. Run `npm --prefix npm test` to install the tarballs by name from a temporary registry and test the installed package.
+
+GNU/Linux builds also require cargo-zigbuild, Zig and GNU binutils. The pack step targets glibc 2.28 and checks the symbol requirements of both binaries. Prereleases of all npm packages use the `next` dist-tag.

@@ -22,7 +22,14 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 
 ## Install
 
-Install the prebuilt CLI on macOS or Linux with Homebrew.
+Install the Node.js API and CLI as a project dependency. The package provides prebuilt binaries for Node.js 22 and later on macOS, Windows, and Linux (glibc 2.28 or later, or musl), on x64 and arm64.
+
+```sh
+pnpm add -D es-locksmith
+pnpm locksmith --help
+```
+
+You can also install the CLI on macOS or Linux with Homebrew.
 
 ```sh
 brew tap sec-ant/locksmith https://github.com/Sec-ant/locksmith.git
@@ -30,6 +37,8 @@ brew install sec-ant/locksmith/locksmith
 ```
 
 To install from a checkout with Rust 1.89 or later, run `cargo install --locked --path crates/locksmith-cli` from the repository root.
+
+In `package.json` scripts or with a Homebrew or Cargo install, use `locksmith` directly.
 
 Locksmith supports `lockfileVersion: '9.0'`, the default in pnpm 9–12.
 
@@ -44,7 +53,7 @@ Try asking “Resolve the `pnpm-lock.yaml` conflict in this rebase.” The skill
 Pass the common ancestor, your lockfile, and the other branch's lockfile in that order. This command works outside a Git repository.
 
 ```sh
-locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
+pnpm locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 ```
 
 If both branches changed the same dependency, the final workspace manifests decide which version to keep. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`; see [Merge context](docs/design.md#merge-context). Without context, Locksmith performs a three-way comparison and reports a conflict when a reachable record disagrees.
@@ -57,10 +66,10 @@ Add this line to the repository's `.gitattributes`.
 /pnpm-lock.yaml merge=locksmith
 ```
 
-Register the driver once per clone with Git 2.38 or later.
+Register the driver once per clone with Git 2.38 or later. Git runs it from the worktree root. The local executable path works independently of your shell's `PATH` and skips pnpm's pre-run install checks during a merge.
 
 ```sh
-git config merge.locksmith.driver 'locksmith merge --git-driver %O %A %B %P'
+git config merge.locksmith.driver './node_modules/.bin/locksmith merge --git-driver %O %A %B %P'
 ```
 
 Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
@@ -78,7 +87,7 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 After editing dependencies or upgrading pnpm, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
 
 ```sh
-locksmith converge origin/main > converged.yaml
+pnpm locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
@@ -91,7 +100,7 @@ Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 A clean Git merge can still leave a duplicate record, a stale importer declaration, or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
 
 ```sh
-locksmith repair HEAD > repaired.yaml
+pnpm locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
@@ -107,6 +116,22 @@ A healthy lock comes back byte-for-byte. Repair preserves valid pins and can rec
 ## Optional registry access
 
 With a complete Git clone, Locksmith works offline by default. In a partial clone, Git may fetch missing objects from its remote. A contextual merge, `converge`, and `repair` can query the configured registry for package metadata with `--allow-network`. The CLI uses the project's registry settings and credentials, respects release-age and version-selection settings, and caches metadata for the command. Package installation remains pnpm's job.
+
+## Node.js API
+
+Use `convergeWorkspace` to compare a Git ref with an installed worktree. It returns the YAML for review and leaves the working tree untouched.
+
+```js
+import { convergeWorkspace } from 'es-locksmith'
+
+const yaml = await convergeWorkspace('origin/main', { cwd: process.cwd() })
+```
+
+`repairWorkspace(ref, options)` reads a committed lockfile. Both workspace methods accept `cwd`, `signal`, and `allowNetwork` and use the bundled CLI. `getCliPath()` returns its executable path.
+
+For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual merge or repair to allow duplicate-key recovery.
+
+Use `parse(yaml)` to reuse a parsed lockfile across calls. `validate`, `dependencyClosure`, and `inspectPeers` check references, trace an importer, and report peer issues. In-memory errors expose a `code` and `details`, including conflict paths and requests for missing registry metadata. Both ESM and CommonJS are supported. [TypeScript API](npm/index.d.ts)
 
 ## Rust API
 
@@ -145,4 +170,4 @@ Pull requests time `merge`, `converge`, and `repair` on a 314-project workspace 
 
 With Knope installed, run `just change` to record a user-facing change and its version bump in `.changeset/`. Commit that file with the change. When the changeset reaches `main`, Knope Bot opens or updates a release PR with the next version, `Cargo.lock`, and `CHANGELOG.md`. See the [changeset style guide](CONTRIBUTING.md#changesets).
 
-Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io.
+Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io and npm.
