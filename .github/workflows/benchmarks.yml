@@ -32,44 +32,38 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.98.1
       - run: cargo build --locked --release -p locksmith-cli
       - name: Prepare worktree and verify outputs
+        id: prepare
         run: |
           scratch=$(mktemp -d)
           echo "LOCKSMITH_BENCH_DIR=$scratch" >> "$GITHUB_ENV"
           echo "$PWD/target/release" >> "$GITHUB_PATH"
           PATH="$PWD/target/release:$PATH" sh benchmarks/prepare.sh "$scratch"
-      - name: Measure CLI wall time and memory separately
-        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
-        with:
-          mode: walltime,memory
-      - name: Compare PR and base on the same runner
+      - name: Check CLI wall time on the same runner
         if: github.event_name == 'pull_request'
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
           cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" --locked --release -p locksmith-cli
-          sudo apt-get update -qq
-          sudo apt-get install -y hyperfine
           base="$RUNNER_TEMP/base/target/release/locksmith"
           head="$PWD/target/release/locksmith"
           for case in merge:merged converge:ours repair:base; do
             operation=${case%:*}
             LOCKSMITH_BIN="$base" LOCKSMITH_OUTPUT="$RUNNER_TEMP/base-result" benchmarks/cli "$operation"
             cmp "$LOCKSMITH_BENCH_DIR/${case#*:}.yaml" "$RUNNER_TEMP/base-result"
-            hyperfine --shell=none --warmup 2 --runs 11 --export-markdown "$RUNNER_TEMP/times.md" \
-              -n Base "env LOCKSMITH_BIN='$base' benchmarks/cli $operation" \
-              -n PR "env LOCKSMITH_BIN='$head' benchmarks/cli $operation"
-            {
-              echo "### $operation"
-              cat "$RUNNER_TEMP/times.md"
-              echo
-            } >> "$GITHUB_STEP_SUMMARY"
           done
+          rustc --edition=2024 benchmarks/compare.rs -o "$RUNNER_TEMP/compare"
+          "$RUNNER_TEMP/compare" "$base" "$head" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Measure CPU and memory with CodSpeed
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        with:
+          mode: simulation,memory

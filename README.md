@@ -130,7 +130,7 @@ Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full AP
 
 ## Performance
 
-[CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks CLI wall time and memory on a 314-project workspace derived from the README example. The lockfile shares the same dependency graph across 300 copies of one site. Pull requests also compare `merge`, `converge`, and `repair` with the base revision on the same GitHub runner. To time the commands locally, install hyperfine and run `just bench`.
+Pull requests time `merge`, `converge`, and `repair` on a 314-project workspace derived from the README example. The fixture repeats one site's dependency graph 300 times. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 
