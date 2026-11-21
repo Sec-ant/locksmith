@@ -30,6 +30,6 @@ With Node.js 22+, npm, Git and Rust installed, run `npm --prefix npm run build` 
 
 GNU/Linux builds also require cargo-zigbuild, Zig and GNU binutils. The pack step targets glibc 2.28 and checks the symbol requirements of both binaries. Prereleases of all npm packages use the `next` dist-tag.
 
-The release workflow uses npm trusted publishing (OIDC). It publishes the eight platform packages before the main package. Before the first release, a signed-in npm maintainer can use `npm stage publish` to register new names. npm creates a public `0.0.0-stage` placeholder for each. [npm staged publishing](https://docs.npmjs.com/staged-publishing/)
+The release workflow uses npm trusted publishing (OIDC). It publishes the eight platform packages before the main package. To register new names, a signed-in npm maintainer can stage a separate bootstrap version with `npm stage publish`. Keep it staged until the first release is publicly available. Rejecting the only staged version removes npm's `0.0.0-stage` placeholder and blocks reuse of the name for 24 hours. [npm staged publishing](https://docs.npmjs.com/staged-publishing/)
 
 When the release is ready, run `npm trust github <package> --repo Sec-ant/locksmith --file release.yml --env npm --allow-publish` for each of the nine packages. The workflow must publish each package within 48 hours to validate its new trust configuration. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
