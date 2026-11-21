@@ -235,7 +235,6 @@ pub(crate) fn resolve(
         output["overrides"] = rules;
     }
     if let Some(patches) = &config.patches {
-        output["patchedDependencies"] = json!({});
         for (name, path) in patches {
             let path = path.as_str();
             let contents = context.patches.get(path).ok_or_else(|| {
@@ -389,5 +388,5 @@ pub(crate) fn effective_overrides(
         }
         rules.insert(selector.clone(), Value::from(value));
     }
-    Ok(Some(Value::Object(rules)))
+    Ok((!rules.is_empty()).then_some(Value::Object(rules)))
 }

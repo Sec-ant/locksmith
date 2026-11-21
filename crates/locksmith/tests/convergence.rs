@@ -44,6 +44,29 @@ fn fixture() -> (Lockfile, Lockfile, Value, Value) {
 }
 
 #[test]
+fn unchanged_manifests_do_not_restore_a_broken_baseline_graph() {
+    let manifests = json!({"dependencies":{"lib":"^1.0.0"}});
+    let importers = json!({".":{"dependencies":{"lib":{"specifier":"^1.0.0","version":"1.0.0"}}}});
+    let baseline = lock(
+        importers.clone(),
+        json!({"lib@1.0.0":{"dependencies":{"leaf":"1.0.0"}}}),
+    );
+    let candidate = lock(
+        importers,
+        json!({"lib@1.0.0":{"dependencies":{"leaf":"1.0.0"}},"leaf@1.0.0":{}}),
+    );
+    assert!(matches!(
+        converge(
+            &baseline,
+            &candidate,
+            &[change(".", &manifests, &manifests)],
+            Default::default()
+        ),
+        Err(LockfileError::InvalidGraph(_))
+    ));
+}
+
+#[test]
 fn publication_times_follow_the_direct_versions_selected_from_both_lockfiles() {
     let (baseline, candidate, before, after) = fixture();
     let old = "2020-01-01T00:00:00.000Z";

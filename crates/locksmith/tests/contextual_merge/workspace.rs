@@ -7,6 +7,29 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 #[test]
+fn empty_workspace_rules_stay_absent_in_the_merged_lockfile() {
+    let input = Lockfile::parse("lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\nimporters:\n  .: {}\n").unwrap();
+    let config = cfg(&json!({"overrides": {}, "patchedDependencies": {}}));
+    let result = merge(
+        &input,
+        &input,
+        &input,
+        Some(&MergeContext {
+            registry: None,
+            target: MergeTarget::Ours,
+            manifests: &BTreeMap::from([(".".into(), json!({}))]),
+            configurations: [&config; 3],
+            configuration: &config,
+            patches: &BTreeMap::new(),
+        }),
+    )
+    .unwrap();
+    let project = result.project().unwrap();
+    assert!(project.get("overrides").is_none());
+    assert!(project.get("patchedDependencies").is_none());
+}
+
+#[test]
 fn unmaterialized_releases_use_their_locked_peer_instances() {
     let mut data = lock(1, 1, false).project().unwrap().clone();
     data["importers"]["."]["dependencies"]["lib"]["version"] = json!("1.0.0");

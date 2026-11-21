@@ -141,7 +141,7 @@ pub(crate) fn check_configuration(
     if !manifest::same_overrides(doc, metadata) {
         return Err(mismatch("overrides"));
     }
-    if doc.get("patchedDependencies") != metadata.get("patchedDependencies") {
+    if manifest::rule_map(doc, "patchedDependencies") != metadata.get("patchedDependencies") {
         return Err(mismatch("patchedDependencies"));
     }
     let ext = cfg
@@ -162,8 +162,8 @@ pub(crate) fn check_configuration(
     ) {
         return Err(mismatch("pnpmfileChecksum"));
     }
-    if cfg.resolution.ignored_optional_dependencies.as_ref()
-        != doc.get("ignoredOptionalDependencies")
+    if cfg.resolution.ignored_optional_dependencies
+        != crate::config::ignored_optional_dependencies(doc)?
     {
         return Err(mismatch("ignoredOptionalDependencies"));
     }

@@ -63,6 +63,53 @@ fn run(text: &str, range: &str, parent: Option<&Lockfile>) -> Result<String, Loc
 }
 
 #[test]
+fn repair_accepts_equivalent_pnpm_settings_and_rejects_changed_rules() {
+    let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+    let ignored = lock.replace(
+        "importers:",
+        "ignoredOptionalDependencies:\n  - a\n  - z\n\nimporters:",
+    );
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    let explicit = lock.replace(
+        "importers:",
+        "overrides: {}\npatchedDependencies: {}\n\nimporters:",
+    );
+    for (source, raw, compatible) in [
+        (&explicit[..], json!({}), true),
+        (lock, json!({"overrides": {}}), true),
+        (lock, json!({"patchedDependencies": {}}), true),
+        (lock, json!({"ignoredOptionalDependencies": []}), true),
+        (
+            &ignored,
+            json!({"ignoredOptionalDependencies": ["z", "a"]}),
+            true,
+        ),
+        (&ignored, json!({"ignoredOptionalDependencies": []}), false),
+        (lock, json!({"overrides": {"a": "1.0.0"}}), false),
+    ] {
+        let configuration = WorkspaceConfig::from_pnpm(&raw).unwrap();
+        let result = repair(
+            source,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &configuration,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        );
+        if compatible {
+            assert_eq!(result.unwrap().to_yaml().unwrap(), source, "{raw}");
+        } else {
+            assert!(
+                matches!(result, Err(LockfileError::ResolutionRequired { .. })),
+                "{raw}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_valid_catalog_range_can_have_two_different_locked_versions() {
     let source = LOCK
         .replace(

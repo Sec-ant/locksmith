@@ -5,9 +5,16 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
+/// pnpm omits rule maps with no entries when writing the lockfile.
+pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
+    document
+        .get(field)
+        .filter(|value| !value.as_object().is_some_and(|rules| rules.is_empty()))
+}
+
 pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
     let config = WorkspaceConfig::default();
-    left.get("overrides") == right.get("overrides")
+    rule_map(left, "overrides") == rule_map(right, "overrides")
         && Overrides::new(left, &config).same_rules(&Overrides::new(right, &config))
 }
 
