@@ -1,3 +1,9 @@
+## 0.3.4 (2026-11-21)
+
+### Features
+
+- Expose lockfile merging, convergence, repair, and inspection to Node.js and distribute the Locksmith CLI through the `es-locksmith` npm package.
+
 ## 0.3.3 (2026-11-21)
 
 ### Fixes
