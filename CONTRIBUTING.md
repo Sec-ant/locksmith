@@ -30,4 +30,6 @@ With Node.js 22+, npm, Git and Rust installed, run `npm --prefix npm run build` 
 
 GNU/Linux builds also require cargo-zigbuild, Zig and GNU binutils. The pack step targets glibc 2.28 and checks the symbol requirements of both binaries. Prereleases of all npm packages use the `next` dist-tag.
 
-The Knope release workflow publishes the eight platform packages before the main npm package. For the initial publish, configure a short-lived npm granular token with package-creation and publish access and 2FA bypass as the `NPM_BOOTSTRAP_TOKEN` secret in the GitHub `npm` environment. After the packages exist, authorize `Sec-ant/locksmith`, workflow `release.yml`, environment `npm`, for direct publishing on each of the nine packages. Remove the bootstrap secret and revoke the token. Subsequent releases authenticate with OIDC. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
+The release workflow uses npm trusted publishing (OIDC). It publishes the eight platform packages before the main package. Before the first release, a signed-in npm maintainer can use `npm stage publish` to register new names. npm creates a public `0.0.0-stage` placeholder for each. [npm staged publishing](https://docs.npmjs.com/staged-publishing/)
+
+When the release is ready, run `npm trust github <package> --repo Sec-ant/locksmith --file release.yml --env npm --allow-publish` for each of the nine packages. The workflow must publish each package within 48 hours to validate its new trust configuration. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)

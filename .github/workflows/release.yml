@@ -197,5 +197,4 @@ jobs:
       - name: Publish platform packages, then es-locksmith
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
         run: node npm/scripts/publish.mjs dist/npm "$TAG"
