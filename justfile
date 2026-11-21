@@ -1,5 +1,16 @@
 set default-list
 
+# Enable commit message checks for this clone and its linked worktrees.
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tools_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)/locksmith-tools"
+    export PATH="$tools_dir:$PATH"
+    if ! command -v prek >/dev/null; then
+        curl -fsSL https://github.com/j178/prek/releases/download/v0.5.11/prek-installer.sh | PREK_UNMANAGED_INSTALL="$tools_dir" sh
+    fi
+    prek install --install-hooks --allow-missing-config
+
 # Format the Rust workspace.
 fmt:
     cargo fmt --all
