@@ -17,6 +17,18 @@ assert.equal(await lock.document('environment'), null);
 await validate(lock);
 assert.deepEqual(await dependencyClosure(lock, '.'), { importers: ['.'], packages: [], snapshots: [] });
 assert.deepEqual(await inspectPeers(yaml), []);
+assert.deepEqual((await api.inspect(lock)).summary, { workspaces: 1, packages: 0, snapshots: 0, reachableSnapshots: 0 });
+const linked = JSON.stringify({
+  lockfileVersion: '9.0',
+  importers: { '.': { dependencies: { plugin: { specifier: '1', version: '1.0.0' } } } },
+  packages: { 'plugin@1.0.0': { resolution: {}, peerDependencies: { host: '^1' } } },
+  snapshots: { 'plugin@1.0.0': { dependencies: { host: 'link:../shared' } } },
+});
+const external = await api.inspect(linked);
+assert.deepEqual(external.externalLinks, [{ sourceKind: 'snapshot', from: 'plugin@1.0.0', dependency: 'host', target: '../shared' }]);
+assert.equal(external.peers[0].reason, 'providerVersion');
+assert.deepEqual((await api.inspect(linked, { manifests: { '../shared': { name: 'host', version: '1.4.0' } } })).peers, []);
+assert.equal(require('es-locksmith').inspect, api.inspect);
 assert.equal(await merge(lock, yaml, lock), yaml);
 const context = { target: 'ours', manifests: { '.': {} }, configurations: [{}, {}, {}], configuration: {} };
 assert.equal(await merge(yaml, yaml, yaml, context), yaml);
@@ -24,6 +36,7 @@ assert.equal(await converge(yaml, lock, []), yaml);
 assert.equal(await repair(yaml, context), yaml);
 await assert.rejects(parse("lockfileVersion: '6.0'"), { code: 'UNSUPPORTED_VERSION', details: { version: '6.0' } });
 const broken = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      foo: {specifier: ^1, version: 1.0.0}\n";
+await assert.rejects(api.inspect(broken), { code: 'INVALID_GRAPH' });
 await assert.rejects(validate(broken), e => e.code === 'INVALID_GRAPH' && e.details.issues.some(i => i.path.includes('foo')));
 
 const manifests = { '.': { dependencies: { widget: '^1' } } };
@@ -63,6 +76,7 @@ writeFileSync(join(source, 'pnpm-lock.yaml'), yaml);
 git('add', '.');
 git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture');
 git('worktree', 'add', '--detach', repo, 'HEAD');
+assert.deepEqual((await api.inspectWorkspace({ cwd: repo })).peers, []);
 assert.equal(await api.convergeWorkspace('HEAD', { cwd: repo }), yaml);
 assert.equal(await api.repairWorkspace('HEAD', { cwd: repo }), yaml);
 await assert.rejects(api.convergeWorkspace('missing-ref', {cwd: repo}), { code: 'CLI_FAILED' });

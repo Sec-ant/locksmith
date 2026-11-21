@@ -98,6 +98,14 @@ fn main() -> io::Result<ExitCode> {
     for command in ["merge", "converge", "repair"] {
         regressed |= compare(command, [base, head])?;
     }
+    if Command::new(base)
+        .args(["help", "inspect"])
+        .output()?
+        .status
+        .success()
+    {
+        regressed |= compare("inspect", [base, head])?;
+    }
     Ok(if regressed {
         ExitCode::FAILURE
     } else {

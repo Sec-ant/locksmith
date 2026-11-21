@@ -106,9 +106,15 @@ git diff --no-index pnpm-lock.yaml repaired.yaml
 
 A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
 
+## Inspect peer bindings and package instances
+
+Run `pnpm locksmith inspect` from the workspace, or pass a lockfile path. Add `--json` for each requester's declared range, locked bindings, matching versions already in the lock, direct and reachable workspaces, and a shortest example path. The report also lists packages with multiple releases or instances and links outside the recorded graph.
+
+Inspection reads the lockfile and adjacent workspace settings offline. The CLI reads linked provider manifests inside the selected workspace. In-memory callers can also supply manifests for external links. For a standalone lock, `--pnpm-version 10.33.2` selects the resolver policy explicitly. Unknown findings identify the missing evidence. Exemptions name the matching project rule. Paths follow edges recorded in the lock, including optional dependencies and each starting workspace's dev dependencies.
+
 ## Scripting contract
 
-- On success, the standalone commands write YAML to stdout.
+- On success, `merge`, `converge`, and `repair` write YAML to stdout. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
 - Diagnostics go to stderr.
 - Exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
 - The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
@@ -131,13 +137,13 @@ const yaml = await convergeWorkspace('origin/main', { cwd: process.cwd() })
 
 For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual merge or repair to allow duplicate-key recovery.
 
-Use `parse(yaml)` to reuse a parsed lockfile across calls. `validate`, `dependencyClosure`, and `inspectPeers` check references, trace an importer, and report peer issues. In-memory errors expose a `code` and `details`, including conflict paths and requests for missing registry metadata. Both ESM and CommonJS are supported. [TypeScript API](npm/index.d.ts)
+Use `inspect(lock, options)` for the structured report or `inspectWorkspace({ cwd })` to read the on-disk workspace. Use `parse(yaml)` to reuse a parsed lockfile across calls. `validate`, `dependencyClosure`, and `inspectPeers` check references, trace an importer, and report peer issues. In-memory errors expose a `code` and `details`, including conflict paths and requests for missing registry metadata. Both ESM and CommonJS are supported. [TypeScript API](npm/index.d.ts)
 
 ## Rust API
 
 Add the library with `cargo add es-locksmith` and import it as `locksmith`. The package is available on [crates.io](https://crates.io/crates/es-locksmith).
 
-Rust applications can call `merge`, `converge`, and `repair` with in-memory inputs, and apply peer policy with `inspect_peers`. The library performs no filesystem, network, Git, or package-manager operations; callers supply manifests, workspace configuration, and optional registry metadata.
+Rust applications can call `merge`, `converge`, and `repair` with in-memory inputs, and call `inspect` for the diagnostic report or `inspect_peers` for individual peer issues. The library performs no filesystem, network, Git, or package-manager operations; callers supply manifests, workspace configuration, and optional registry metadata.
 
 ```rust
 use locksmith::{Lockfile, LockfileError, merge};

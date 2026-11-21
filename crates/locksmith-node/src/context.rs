@@ -260,22 +260,33 @@ pub(super) struct PeerOptions {
 }
 
 impl PeerOptions {
-    pub(super) fn inspect(self, lock: &Lockfile) -> Result<Vec<Value>> {
-        let raw = self.configuration.unwrap_or_else(|| json!({}));
-        let config = configuration(&raw, self.manifests.as_ref().and_then(|ms| ms.get(".")))?;
-        let matching = if config
-            .pnpm_version
-            .is_some_and(|v| (9..12).contains(&v.major))
-        {
-            PeerVersionMatching::ReleaseCompatible
-        } else {
-            PeerVersionMatching::Semver
-        };
-        let rules = PeerRules::from_pnpm(&raw, matching)?;
+    fn rules(&self, lock: &Lockfile, fallback: PeerVersionMatching) -> Result<PeerRules> {
+        let empty = json!({});
+        let raw = self.configuration.as_ref().unwrap_or(&empty);
+        let config = configuration(raw, self.manifests.as_ref().and_then(|ms| ms.get(".")))?;
+        let version = config.pnpm_version.or_else(|| lock.recorded_pnpm_version());
+        let matching = version
+            .as_ref()
+            .map_or(fallback, |v| PeerVersionMatching::for_pnpm(Some(v)));
+        PeerRules::from_pnpm(raw, matching)
+    }
+
+    pub(super) fn peers(self, lock: &Lockfile) -> Result<Vec<Value>> {
+        lock.validate()?;
+        let rules = self.rules(lock, PeerVersionMatching::Semver)?;
         Ok(super::diagnostic::peers(locksmith::inspect_peers(
             lock,
             &rules,
             self.manifests.as_ref(),
         )))
+    }
+
+    pub(super) fn report(self, lock: &Lockfile) -> Result<BTreeMap<String, Value>> {
+        let rules = self.rules(lock, PeerVersionMatching::Unspecified)?;
+        let report = locksmith::inspect(lock, &rules, self.manifests.as_ref())?;
+        let Value::Object(report) = json!(report) else {
+            unreachable!("inspection serializes as an object")
+        };
+        Ok(report.into_iter().collect())
     }
 }

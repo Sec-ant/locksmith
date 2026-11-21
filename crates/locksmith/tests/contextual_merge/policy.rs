@@ -126,7 +126,7 @@ fn strict_peer_policy_uses_pnpm_prerelease_matching() {
     let patches = BTreeMap::new();
     for (range, accepted) in [
         ("^1", true),
-        ("1.0.0-rc.1", true),
+        ("1.0.0-rc.1", false),
         ("<1.0.0", true),
         ("^2", false),
     ] {

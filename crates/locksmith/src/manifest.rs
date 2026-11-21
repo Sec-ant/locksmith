@@ -280,7 +280,7 @@ pub(crate) fn matches_version(range: &str, version: Option<&str>) -> bool {
     matches!((range, version), (Ok(range), Some(version)) if version.satisfies(&range))
 }
 
-fn selector(value: &str) -> (&str, Option<&str>) {
+pub(crate) fn selector(value: &str) -> (&str, Option<&str>) {
     value
         .char_indices()
         .skip(1)
