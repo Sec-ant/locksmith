@@ -1,3 +1,14 @@
+## 0.3.3 (2026-11-21)
+
+### Fixes
+
+- Accept catalog dependencies linked to matching local workspace packages.
+- Reject repairs and convergence when the lockfile records incompatible workspace injection, peer suffix length, or missing peer types settings.
+- Preserve hook-derived dependencies by refusing ambiguous importer repairs and selecting pnpm’s active default hook.
+- Read BOM-prefixed JSON, JSON5, and YAML package manifests in pnpm’s search order.
+- Fetch missing workspace manifests in batches when reading a partial Git clone.
+- Keep pnpm workspace members matched by normalized paths and brace patterns.
+
 ## 0.3.2 (2026-11-21)
 
 ### Fixes
