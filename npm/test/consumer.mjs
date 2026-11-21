@@ -66,8 +66,14 @@ git('worktree', 'add', '--detach', repo, 'HEAD');
 assert.equal(await api.convergeWorkspace('HEAD', { cwd: repo }), yaml);
 assert.equal(await api.repairWorkspace('HEAD', { cwd: repo }), yaml);
 await assert.rejects(api.convergeWorkspace('missing-ref', {cwd: repo}), { code: 'CLI_FAILED' });
-const launcher = join(process.cwd(), 'node_modules', 'es-locksmith', 'cli.cjs');
-const launched = spawnSync(process.execPath, [launcher, '--version'], {encoding: 'utf8'});
+// Exercise the executable shim installed by the consumer's package manager.
+function launch(flag) {
+  if (process.platform === 'win32') {
+    return spawnSync('cmd.exe', ['/d', '/c', 'node_modules\\.bin\\locksmith.cmd', flag], { encoding: 'utf8' });
+  }
+  return spawnSync('node_modules/.bin/locksmith', [flag], { encoding: 'utf8' });
+}
+const launched = launch('--version');
 assert.equal(launched.status, 0, launched.stderr);
 assert.equal(launched.stdout.trim(), 'locksmith ' + process.env.LOCKSMITH_VERSION);
-assert.equal(spawnSync(process.execPath, [launcher, '--invalid-option']).status, 2);
+assert.equal(launch('--invalid-option').status, 2);

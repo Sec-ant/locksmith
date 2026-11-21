@@ -5,10 +5,12 @@ import { createServer } from 'node:http';
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 
-const [directory, manager = 'npm'] = process.argv.slice(2);
-const dir = resolve(directory);
+const [manager = 'npm'] = process.argv.slice(2);
+process.chdir(fileURLToPath(new URL('../../', import.meta.url)));
+const dir = resolve('target/npm');
 const fixtures = resolve('crates/locksmith/tests/fixtures');
 const consumer = mkdtempSync(join(tmpdir(), 'locksmith-npm-'));
 const packages = new Map();
@@ -49,20 +51,17 @@ async function run(command, args) {
 try {
   writeFileSync(join(consumer, '.npmrc'), `registry=${registry}/\n`);
   writeFileSync(join(consumer, 'pnpm-workspace.yaml'), `registry: "${registry}/"\nminimumReleaseAge: 0\n`);
-  copyFileSync('scripts/node/consumer.mjs', join(consumer, 'consumer.mjs'));
+  copyFileSync('npm/test/consumer.mjs', join(consumer, 'consumer.mjs'));
   writeFileSync(join(consumer, 'package.json'), JSON.stringify({ private: true, dependencies: { 'es-locksmith': root.version } }));
   if (manager === 'npm') {
-    // Invoke npm's JS entry directly on Windows, where npm.cmd needs a shell.
-    const args = ['install', '--ignore-scripts', '--no-audit', '--no-fund'];
-    if (process.platform === 'win32') await run(process.execPath, [join(process.execPath, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...args]);
-    else await run('npm', args);
+    await run(process.execPath, [process.env.npm_execpath, 'install', '--ignore-scripts', '--no-audit', '--no-fund']);
   } else if (manager === 'pnpm') {
     await run('pnpm', ['install', '--ignore-scripts', '--store-dir', join(consumer, 'store')]);
   } else throw new Error(`Unknown package manager ${manager}`);
   await run(process.execPath, ['consumer.mjs']);
   if (process.env.LOCKSMITH_TSC) {
     for (const extension of ['mts', 'cts']) {
-      copyFileSync('scripts/node/consumer.ts', join(consumer, 'consumer.' + extension));
+      copyFileSync('npm/test/types.ts', join(consumer, 'consumer.' + extension));
     }
     await run(process.execPath, [process.env.LOCKSMITH_TSC, '--noEmit', '--strict',
       '--module', 'NodeNext', '--target', 'es2022', 'consumer.mts', 'consumer.cts']);

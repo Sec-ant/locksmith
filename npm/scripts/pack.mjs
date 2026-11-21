@@ -1,13 +1,33 @@
-// Stage the two directories for npm pack from a native Cargo build.
+// Build the host addon and CLI and pack the same tarballs used for testing and publishing.
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { targets, platformName } from './platforms.mjs';
+const targets = {
+  'aarch64-apple-darwin': ['darwin', 'arm64'],
+  'x86_64-apple-darwin': ['darwin', 'x64'],
+  'aarch64-pc-windows-msvc': ['win32', 'arm64', 'msvc'],
+  'x86_64-pc-windows-msvc': ['win32', 'x64', 'msvc'],
+  'aarch64-unknown-linux-gnu': ['linux', 'arm64', 'gnu'],
+  'x86_64-unknown-linux-gnu': ['linux', 'x64', 'gnu'],
+  'aarch64-unknown-linux-musl': ['linux', 'arm64', 'musl'],
+  'x86_64-unknown-linux-musl': ['linux', 'x64', 'musl'],
+};
+const platformName = parts => 'es-locksmith-' + parts.join('-');
 
-const [target, binaries, output] = process.argv.slice(2);
+const repository = fileURLToPath(new URL('../../', import.meta.url));
+process.chdir(repository);
+const rustInfo = execFileSync('rustc', ['-vV'], { encoding: 'utf8' });
+const target = /^host: (.+)$/m.exec(rustInfo)[1].trim();
+const binaries = join(repository, 'target', target, 'release');
+const output = join(repository, 'target', 'npm');
 const parts = targets[target];
 if (!parts) throw new Error(`Unknown target: ${target}`);
 const [os, cpu, abi] = parts;
+if (process.env.LOCKSMITH_PLATFORM && process.env.LOCKSMITH_PLATFORM !== parts.join('-')) {
+  throw new Error(`Expected ${process.env.LOCKSMITH_PLATFORM} but Rust is targeting ${target}`);
+}
+execFileSync('cargo', ['build', '--release', '--locked', '--target', target, '-p', 'locksmith-node', '-p', 'locksmith-cli'], { stdio: 'inherit' });
 const root = join(output, 'root');
 const native = join(output, 'native');
 for (const dir of [root, native]) {
@@ -15,7 +35,7 @@ for (const dir of [root, native]) {
   copyFileSync('LICENSE', join(dir, 'LICENSE'));
   copyFileSync('crates/locksmith/src/source/yaml/LICENSE', join(dir, 'LICENSE.yaml'));
 }
-const pkg = JSON.parse(readFileSync('npm/package.json', 'utf8'));
+const { scripts, ...pkg } = JSON.parse(readFileSync('npm/package.json', 'utf8'));
 const gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const version = execFileSync(join(binaries, os === 'win32' ? 'locksmith.exe' : 'locksmith'), ['--version'], { encoding: 'utf8' }).trim();
 if (version !== `locksmith ${pkg.version}`) throw new Error(`npm version ${pkg.version} does not match ${version}`);
@@ -37,3 +57,7 @@ const library = { win32: 'locksmith_node.dll', darwin: 'liblocksmith_node.dylib'
 const cli = os === 'win32' ? 'locksmith.exe' : 'locksmith';
 copyFileSync(join(binaries, library), join(native, 'locksmith.node'));
 copyFileSync(join(binaries, cli), join(native, cli));
+
+execFileSync(process.execPath, [
+  process.env.npm_execpath, 'pack', root, native, '--ignore-scripts', '--pack-destination', output, '--silent',
+], { stdio: 'inherit' });

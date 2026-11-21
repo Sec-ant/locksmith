@@ -29,6 +29,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CARGO_PROFILE_RELEASE_STRIP: symbols
+      LOCKSMITH_PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,22 +46,25 @@ jobs:
       - name: Build and install the npm packages
         if: ${{ !endsWith(matrix.platform, '-musl') }}
         shell: bash
-        run: sh scripts/node/check-package.sh
+        run: |
+          npm --prefix npm run build
+          npm --prefix npm test
       - name: Build and install on Alpine
         if: endsWith(matrix.platform, '-musl')
         run: |
-          docker run --rm -v "$PWD:/src" -w /src -e CARGO_PROFILE_RELEASE_STRIP \
+          docker run --rm -v "$PWD:/src" -w /src -e CARGO_PROFILE_RELEASE_STRIP -e LOCKSMITH_PLATFORM \
             rust:1.89.0-alpine3.22@sha256:4b800f2e72e04be908e5f634c504c741bd943b763d1d8ad7b096cc340e1b5b46 sh -ec '
               apk add --no-cache build-base git nodejs npm perl
               git config --global --add safe.directory /src
               export RUSTFLAGS="-C target-feature=-crt-static"
-              sh scripts/node/check-package.sh'
+              npm --prefix npm run build
+              npm --prefix npm test'
       - name: Verify installation with pnpm
         if: matrix.platform == 'linux-x64-gnu'
         run: |
           npm install --global pnpm@10.34.9
           npm install --prefix "$RUNNER_TEMP/typecheck" typescript@5.9.3
-          LOCKSMITH_TSC="$RUNNER_TEMP/typecheck/node_modules/typescript/bin/tsc" node scripts/node/test-install.mjs target/npm pnpm
+          LOCKSMITH_TSC="$RUNNER_TEMP/typecheck/node_modules/typescript/bin/tsc" npm --prefix npm test -- pnpm
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: inputs.commit
         with:

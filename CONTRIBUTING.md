@@ -26,6 +26,6 @@ Run `just check-changesets` to check the format and `knope --dry-run prepare-rel
 
 ## Node packages
 
-Run `sh scripts/node/check-package.sh` with Node.js 22+, npm, Git and Rust on your platform. It builds the addon and CLI, packs them, and installs the tarballs by name from a temporary local registry. Build outputs are under `target/npm/`.
+With Node.js 22+, npm, Git and Rust installed, run `npm --prefix npm run build` to build the addon and CLI and pack them under `target/npm/`. Run `npm --prefix npm test` to install the tarballs by name from a temporary registry and test the installed package.
 
 The Knope release workflow publishes the eight platform packages before the main npm package. For the initial publish, configure a short-lived npm granular token with package-creation and publish access and 2FA bypass as the `NPM_BOOTSTRAP_TOKEN` secret in the GitHub `npm` environment. After the packages exist, authorize `Sec-ant/locksmith`, workflow `release.yml`, environment `npm`, for direct publishing on each of the nine packages. Remove the bootstrap secret and revoke the token. Subsequent releases authenticate with OIDC. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)

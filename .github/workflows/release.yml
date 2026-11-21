@@ -204,7 +204,7 @@ jobs:
       commit: ${{ needs.prepare.outputs.commit }}
 
   publish-npm:
-    needs: [prepare, node-packages]
+    needs: [prepare, node-packages, publish]
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -231,4 +231,4 @@ jobs:
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
-        run: node scripts/node/publish.mjs dist/npm "$TAG"
+        run: node npm/scripts/publish.mjs dist/npm "$TAG"
