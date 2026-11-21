@@ -124,6 +124,47 @@ impl RepairInput {
     }
 }
 
+pub(crate) fn check_recorded_settings(
+    doc: &Value,
+    cfg: &WorkspaceConfig,
+) -> Result<(), LockfileError> {
+    let settings = &doc["settings"];
+    let major = cfg.pnpm_version.as_ref().map(|v| v.major);
+    let parameters = &cfg.resolution.parameters;
+    let default_suffix = Value::from(1000);
+    let disabled = Value::Bool(false);
+    for (key, expected, default, supported) in [
+        (
+            "peersSuffixMaxLength",
+            parameters
+                .get("peersSuffixMaxLength")
+                .unwrap_or(&default_suffix),
+            &default_suffix,
+            true,
+        ),
+        (
+            "injectWorkspacePackages",
+            &Value::Bool(cfg.resolution.inject_workspace_packages),
+            &disabled,
+            major.is_none_or(|m| m >= 10),
+        ),
+        (
+            "addMissingPeerTypes",
+            parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
+            &disabled,
+            major.is_none_or(|m| m >= 12),
+        ),
+    ] {
+        if supported && settings.get(key).unwrap_or(default) != expected {
+            return Err(missing(
+                &["settings", key],
+                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn check_configuration(
     doc: &Value,
     metadata: &Value,
@@ -138,6 +179,7 @@ pub(crate) fn check_configuration(
     if crate::LockSettings::from_document(doc) != crate::LockSettings::from_document(metadata) {
         return Err(mismatch("settings"));
     }
+    check_recorded_settings(doc, cfg)?;
     if !manifest::same_overrides(doc, metadata) {
         return Err(mismatch("overrides"));
     }

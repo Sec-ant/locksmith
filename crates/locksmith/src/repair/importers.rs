@@ -18,11 +18,21 @@ pub(super) fn repair<'a>(
     let links =
         crate::workspace_links::WorkspaceLinks::new(context.manifests, context.configuration);
     let overrides = manifest::Overrides::new(metadata, context.configuration);
+    let allow_importer_edit = |id: &str| {
+        if context.configuration.resolution.pnpmfile_checksum.is_some() {
+            return Err(missing(
+                &["importers", id],
+                "pnpmfile may transform this manifest; repairing its importer requires the effective declarations",
+            ));
+        }
+        Ok(())
+    };
     for id in graph::section(doc, "importers")
         .into_iter()
         .flat_map(|m| m.keys())
     {
         if !context.manifests.contains_key(id) {
+            allow_importer_edit(id)?;
             result.to_mut()["importers"]
                 .as_object_mut()
                 .expect("importers")
@@ -98,7 +108,7 @@ pub(super) fn repair<'a>(
                 if let Some((link, _)) = &workspace_link {
                     return link == v;
                 }
-                if spec.starts_with("workspace:") && v.starts_with("link:") {
+                if (spec.starts_with("workspace:") || catalog.is_some()) && v.starts_with("link:") {
                     return false;
                 }
                 fits(
@@ -212,6 +222,7 @@ pub(super) fn repair<'a>(
             }
         }
         if record.is_none() || matches!(next, Cow::Owned(_)) {
+            allow_importer_edit(id)?;
             result.to_mut()["importers"][id] = next.into_owned();
         }
     }
@@ -248,10 +259,7 @@ pub(super) fn repair<'a>(
 }
 
 fn catalog_fits(spec: &str, entry: &Value) -> bool {
-    entry["specifier"] == *spec
-        && entry["version"]
-            .as_str()
-            .is_some_and(|pin| reconcile::metadata::catalog_version_fits(spec, pin, Some(spec)))
+    reconcile::metadata::catalog_entry_version(spec, entry).is_some()
 }
 
 fn fits(name: &str, range: &str, version: &str, same_spec: bool, doc: &Value) -> bool {

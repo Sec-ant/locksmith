@@ -241,6 +241,7 @@ impl WorkspaceConfig {
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
                 parameters: [
                     "peersSuffixMaxLength",
+                    "addMissingPeerTypes",
                     "linkWorkspacePackages",
                     "preferWorkspacePackages",
                 ]

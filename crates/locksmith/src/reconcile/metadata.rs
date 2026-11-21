@@ -13,6 +13,12 @@ pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Opt
     }
 }
 
+pub(crate) fn catalog_entry_version<'a>(specifier: &str, entry: &'a Value) -> Option<&'a str> {
+    let version = entry["version"].as_str()?;
+    (entry["specifier"] == specifier && catalog_version_fits(specifier, version, Some(specifier)))
+        .then_some(version)
+}
+
 /// pnpm can retain distinct catalog and importer pins within the declared range.
 pub(crate) fn catalog_consumer_fits(
     name: &str,
@@ -21,12 +27,9 @@ pub(crate) fn catalog_consumer_fits(
     entry: Option<&Value>,
 ) -> bool {
     if let Some(entry) = entry {
-        let Some(version) = entry["version"].as_str() else {
+        let Some(version) = catalog_entry_version(spec, entry) else {
             return false;
         };
-        if entry["specifier"] != spec || !catalog_version_fits(spec, version, Some(spec)) {
-            return false;
-        }
         if super::catalog_pin_matches(name, Some(spec), version, reference) {
             return true;
         }

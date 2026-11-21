@@ -98,7 +98,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             .as_ref()
             .is_some_and(|text| crate::parallel_parse(text.len() as u64));
         let baseline = scope.spawn(move || Lockfile::try_from(baseline_text));
-        let manifests = || workspace_manifests(&project, blobs, tree, prefix);
+        let manifests = || workspace_manifests(&project, &working, blobs, tree, prefix);
         let candidate = || candidate_text.map(Lockfile::try_from).transpose();
         let (manifests, candidate) = if parallel {
             let worker = scope.spawn(candidate);
@@ -147,32 +147,17 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
 
 fn workspace_manifests(
     project: &Project,
+    working: &Project,
     mut blobs: Blobs,
     tree: &str,
     prefix: &str,
 ) -> Result<[BTreeMap<String, Value>; 2]> {
-    let members = Members::new(project)?;
-    let mut importers = BTreeSet::from([".".to_owned()]);
-    if project.workspace {
-        importers.extend(members.directories(&git::workspace_paths(tree, prefix)?, prefix)?);
-        importers.extend(members.working_directories(prefix)?);
-    }
-    let mut before = BTreeMap::new();
-    let mut after = BTreeMap::new();
-    for id in &importers {
-        let path = if id == "." {
-            "package.json".into()
-        } else {
-            format!("{id}/package.json")
-        };
-        for (text, manifests) in [
-            (blobs.read(tree, &format!("{prefix}{path}"))?, &mut before),
-            (working_file(&path)?, &mut after),
-        ] {
-            if let Some(text) = text {
-                let manifest: Value =
-                    serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-                manifests.insert(id.clone(), manifest);
+    let before = workspace::manifests(project, &mut blobs, tree, prefix)?;
+    let mut after = BTreeMap::from([(".".into(), working.root.clone())]);
+    if working.workspace {
+        for id in Members::new(working)?.working_directories(prefix)? {
+            if let Some(manifest) = workspace::read_manifest(&id, working_file)? {
+                after.insert(id, manifest);
             }
         }
     }

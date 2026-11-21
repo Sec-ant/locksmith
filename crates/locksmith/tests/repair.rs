@@ -403,3 +403,48 @@ fn repairs_a_required_extension_in_each_consumers_peer_scope() {
         matches!(run(&doc),Err(LockfileError::ResolutionRequired { path, .. }) if path==["snapshots","host@1.0.0(ui@1.0.0)","plugin"])
     );
 }
+
+#[test]
+fn frozen_settings_follow_the_package_manager_version_and_defaults() {
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    for (manager, setting, value, checked) in [
+        ("9.15.9", "peersSuffixMaxLength", json!(32), true),
+        ("9.15.9", "injectWorkspacePackages", json!(true), false),
+        ("10.34.9", "injectWorkspacePackages", json!(true), true),
+        ("11.28.12", "addMissingPeerTypes", json!(true), false),
+        ("12.21.0", "addMissingPeerTypes", json!(true), true),
+    ] {
+        for (recorded, configured) in [(false, true), (true, false), (true, true)] {
+            let settings = if configured {
+                json!({setting: value})
+            } else {
+                json!({})
+            };
+            let configuration =
+                WorkspaceConfig::from_pnpm_version(&settings, &manager.parse().unwrap()).unwrap();
+            let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+            if recorded {
+                lock["settings"] = json!({setting: value});
+            }
+            let source = lock.to_string();
+            let result = repair(
+                &source,
+                &RepairContext {
+                    manifests: &manifests,
+                    configuration: &configuration,
+                    patches: &BTreeMap::new(),
+                    parents: &[],
+                    registry: None,
+                },
+            );
+            if checked && recorded != configured {
+                assert!(
+                    matches!(result, Err(LockfileError::ResolutionRequired { .. })),
+                    "{manager} {setting}"
+                );
+            } else {
+                assert_eq!(result.unwrap().to_yaml().unwrap(), source);
+            }
+        }
+    }
+}

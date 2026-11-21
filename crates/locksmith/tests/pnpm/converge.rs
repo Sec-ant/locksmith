@@ -314,6 +314,9 @@ fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
             serde_saphyr::to_string(&cfg).unwrap(),
         )
         .unwrap();
+        if super::pnpm_version().major == 9 {
+            fs::write(d.join(".npmrc"), "peers-suffix-max-length=4\n").unwrap();
+        }
         let mut manifests = vec![];
         for (id, provider) in [("a", "catalog:toolchain"), ("b", "6.0.0")] {
             let path = format!("apps/{id}");
