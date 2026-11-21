@@ -26,11 +26,8 @@ Install the Node.js API and CLI as a project dependency. The package provides pr
 
 ```sh
 pnpm add -D es-locksmith
-export PATH="$PWD/node_modules/.bin:$PATH"
-locksmith --help
+./node_modules/.bin/locksmith --help
 ```
-
-Run the `export` from the project root in each shell where you use the local CLI. A previous `pnpm exec` adds the directory to `PATH` only for that invocation.
 
 You can also install the CLI on macOS or Linux with Homebrew.
 
@@ -40,6 +37,8 @@ brew install sec-ant/locksmith/locksmith
 ```
 
 To install from a checkout with Rust 1.89 or later, run `cargo install --locked --path crates/locksmith-cli` from the repository root.
+
+The examples below run the project-local CLI from the workspace root. With Homebrew or Cargo, use `locksmith` in place of `./node_modules/.bin/locksmith`.
 
 Locksmith supports `lockfileVersion: '9.0'`, the default in pnpm 9–12.
 
@@ -54,7 +53,7 @@ Try asking “Resolve the `pnpm-lock.yaml` conflict in this rebase.” The skill
 Pass the common ancestor, your lockfile, and the other branch's lockfile in that order. This command works outside a Git repository.
 
 ```sh
-locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
+./node_modules/.bin/locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 ```
 
 If both branches changed the same dependency, the final workspace manifests decide which version to keep. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`; see [Merge context](docs/design.md#merge-context). Without context, Locksmith performs a three-way comparison and reports a conflict when a reachable record disagrees.
@@ -67,13 +66,11 @@ Add this line to the repository's `.gitattributes`.
 /pnpm-lock.yaml merge=locksmith
 ```
 
-Register the driver once per clone with Git 2.38 or later. Git runs it from the worktree root, so it can use the project-local executable even when launched from an editor.
+Register the driver once per clone with Git 2.38 or later. Git runs it from the worktree root and does not inherit `PATH` changes from a previous `pnpm exec`.
 
 ```sh
 git config merge.locksmith.driver './node_modules/.bin/locksmith merge --git-driver %O %A %B %P'
 ```
-
-For a Homebrew or Cargo install, use `locksmith` in the driver command and make sure its directory is on Git's `PATH`.
 
 Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
 
@@ -90,7 +87,7 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 After editing dependencies or upgrading pnpm, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
 
 ```sh
-locksmith converge origin/main > converged.yaml
+./node_modules/.bin/locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
@@ -103,7 +100,7 @@ Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 A clean Git merge can still leave a duplicate record, a stale importer declaration, or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
 
 ```sh
-locksmith repair HEAD > repaired.yaml
+./node_modules/.bin/locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
