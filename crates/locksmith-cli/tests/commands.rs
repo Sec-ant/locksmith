@@ -988,3 +988,44 @@ fn check_partial_clone(multiple_remotes: bool) {
         );
     }
 }
+
+#[test]
+fn inspect_reads_the_lockfiles_own_workspace_without_git_or_writes() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let dir = sandbox.path().join("nested");
+    fs::create_dir_all(dir.join("packages/host")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"pnpm@10.34.9"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("packages/host/package.json"),
+        r#"{"name":"host","version":"2.0.0"}"#,
+    )
+    .unwrap();
+    let input = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1","version":"1.0.0"}}},"packages/host":{}},"packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1"}}},"snapshots":{"plugin@1.0.0":{"dependencies":{"host":"link:packages/host"}}}}).to_string();
+    let path = dir.join("pnpm-lock.yaml");
+    fs::write(&path, &input).unwrap();
+    let inspect = || {
+        Command::new(CLI)
+            .current_dir(sandbox.path())
+            .args(["inspect", "--json", "nested/pnpm-lock.yaml"])
+            .output()
+            .unwrap()
+    };
+    let ok = inspect();
+    assert!(ok.status.success(), "{}", report(&ok));
+    let result: Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(result["peerPolicy"], "pnpm10");
+    let finding = &result["peers"][0];
+    assert_eq!(finding["resolvedVersion"], "2.0.0");
+    assert_eq!(finding["status"], "outOfRange");
+    assert_eq!(finding["examplePath"], json!([".", "plugin@1.0.0"]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), input);
+    fs::write(&path, "lockfileVersion: '9.0'\nsnapshots: []\n").unwrap();
+    let invalid = inspect();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("snapshots"));
+}

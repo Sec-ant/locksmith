@@ -8,12 +8,7 @@ pub struct Policy(Option<node_semver::Version>);
 
 impl Policy {
     pub fn from_manifest(manifest: &Value) -> Self {
-        Self(
-            manifest["packageManager"]
-                .as_str()
-                .and_then(|name| name.strip_prefix("pnpm@"))
-                .and_then(|version| version.parse().ok()),
-        )
+        Self(crate::workspace::pnpm_version(manifest))
     }
 
     pub fn configuration(&self, raw: &Value) -> Result<WorkspaceConfig, LockfileError> {
@@ -21,6 +16,10 @@ impl Policy {
             Some(v) => WorkspaceConfig::from_pnpm_version(raw, v),
             None => WorkspaceConfig::from_pnpm(raw),
         }
+    }
+
+    fn peer_rules(&self, raw: &Value) -> Result<PeerRules, LockfileError> {
+        PeerRules::from_pnpm(raw, PeerVersionMatching::for_pnpm(self.0.as_ref()))
     }
 
     pub fn check_peers(
@@ -35,12 +34,7 @@ impl Policy {
                 .as_bool()
                 .ok_or("strictPeerDependencies must be a boolean")?,
         };
-        let matching = if self.0.as_ref().is_some_and(|v| (9..12).contains(&v.major)) {
-            PeerVersionMatching::ReleaseCompatible
-        } else {
-            PeerVersionMatching::Semver
-        };
-        let rules = PeerRules::from_pnpm(raw, matching)?;
+        let rules = self.peer_rules(raw)?;
         let issues = locksmith::inspect_peers(result, &rules, Some(manifests));
         if strict && !issues.is_empty() {
             return Err(LockfileError::UnmetPeers(issues).into());

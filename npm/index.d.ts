@@ -81,6 +81,29 @@ export type LockfileError = Error & (
 export function parse(yaml: string): Promise<Lockfile>
 export function validate(lock: LockInput): Promise<void>
 export function dependencyClosure(lock: LockInput, importer: string): Promise<DependencyClosure>
+export interface Inspection {
+  summary: { workspaces: number; packages: number; snapshots: number; reachableSnapshots: number }
+  peerPolicy: 'semver' | 'pnpm9' | 'pnpm10' | 'pnpm11' | 'pnpm12' | 'unspecified'
+  peers: Array<{
+    status: 'missing' | 'outOfRange' | 'unknown' | 'allowed'
+    requester: string
+    peer: string
+    wanted: string
+    provider: string
+    resolvedVersion: string | null
+    disposition: 'accepted' | 'rejected' | 'unknown'
+    reason: 'providerVersion' | 'opaqueSpecifier' | 'packageManager' | null
+    exception: string | null
+    bindings: Array<{ snapshot: string; reference: string | null }>
+    matchingVersionsInLock: string[]
+    directWorkspaces: string[]
+    reachableWorkspaces: string[]
+    examplePath: string[] | null
+  }>
+  multiplicity: Array<{ name: string; releases: Array<{ id: string; version: string | null; snapshots: number }> }>
+  externalLinks: Array<{ from: string; dependency: string; target: string }>
+}
+export function inspect(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<Inspection>
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>
 export function merge(base: LockInput, ours: LockInput, theirs: LockInput, context?: MergeContext): Promise<string>
 export function converge(baseline: LockInput, candidate: LockInput, changes: ManifestChange[], options?: ConvergeOptions): Promise<string>
@@ -93,5 +116,6 @@ export interface WorkspaceOptions {
 }
 /** Absolute path to the bundled Rust CLI, suitable for spawn() or a Git driver. */
 export function getCliPath(): string
+export function inspectWorkspace(options?: Pick<WorkspaceOptions, 'cwd' | 'signal'>): Promise<Inspection>
 export function convergeWorkspace(ref: string, options?: WorkspaceOptions): Promise<string>
 export function repairWorkspace(ref?: string, options?: WorkspaceOptions): Promise<string>

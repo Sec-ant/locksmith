@@ -1,4 +1,4 @@
-use super::{Merger, explicit_bindings, patch, satisfies_peer};
+use super::{Merger, explicit_bindings, patch};
 use crate::{
     Value, WorkspaceConfig,
     graph::{self, dependency, transitive},
@@ -53,8 +53,18 @@ impl Merger<'_> {
                 let fits = declared
                     .and_then(|d| d.get(peer_name))
                     .and_then(Value::as_str)
-                    .zip(graph::package_key(pin).parse::<node_semver::Version>().ok())
-                    .is_some_and(|(range, v)| satisfies_peer(&v, range));
+                    .zip(
+                        graph::package_key(pin)
+                            .parse::<nodejs_semver::Version>()
+                            .ok(),
+                    )
+                    .is_some_and(|(range, v)| {
+                        crate::diagnostics::PeerRange::new(
+                            range,
+                            crate::PeerVersionMatching::for_pnpm(config.pnpm_version.as_ref()),
+                        )
+                        .accepts(&v)
+                    });
                 if !fits || !same_binding(token, pin, config.resolution.lock.dedupe_peers) {
                     return false;
                 }

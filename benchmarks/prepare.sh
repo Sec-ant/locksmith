@@ -62,6 +62,9 @@ add_root_react() {
 add_root_react ../base.yaml > ../theirs.yaml
 add_root_react ../ours.yaml > ../merged.yaml
 
+# Give the installed graph a real peer mismatch across the replicated sites.
+sed "s/immer: '>=9\.0[^']*'/immer: '^11.0.0'/" pnpm-lock.yaml > ../inspect.yaml
+
 export LOCKSMITH_BENCH_DIR
 LOCKSMITH_BENCH_DIR=$(cd .. && pwd)
 export LOCKSMITH_OUTPUT="$LOCKSMITH_BENCH_DIR/actual.yaml"
@@ -71,3 +74,4 @@ cmp ../merged.yaml ../actual.yaml
 cmp ../ours.yaml ../actual.yaml
 "$bench/cli" repair
 cmp ../base.yaml ../actual.yaml
+"$bench/cli" inspect

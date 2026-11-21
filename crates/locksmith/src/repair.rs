@@ -253,7 +253,7 @@ fn enqueue(
 ) -> Result<(), LockfileError> {
     let mut issues = Vec::new();
     let snapshots = graph::section(doc, "snapshots");
-    for (name, version) in graph::references(
+    for (_, name, version) in graph::references(
         record,
         DocumentKind::Project,
         section,

@@ -1345,40 +1345,6 @@ pub(crate) fn same_releases(a: &Value, b: &Value) -> bool {
             })
 }
 
-// pnpm checks peers with Yarn's satisfiesWithPrereleases: first allow
-// prereleases within comparator bounds, then compare release cores of both
-// the version and comparator endpoints. Ordinary dependency ranges stay strict.
-pub(crate) fn satisfies_peer(version: &node_semver::Version, wanted: &str) -> bool {
-    let wanted = wanted.strip_prefix("workspace:").unwrap_or(wanted);
-    let Ok(range) = wanted.parse::<node_semver::Range>() else {
-        return false;
-    };
-    if version.satisfies(&range) {
-        return true;
-    }
-    if version.is_prerelease()
-        && version
-            .to_string()
-            .parse::<node_semver::Range>()
-            .is_ok_and(|exact| range.allows_any(&exact))
-    {
-        return true;
-    }
-    let normalized = range.to_string();
-    if !version.is_prerelease() && !normalized.contains('-') {
-        return false;
-    }
-    let release_range = normalized
-        .split_whitespace()
-        .map(|part| part.split_once('-').map_or(part, |(release, _)| release))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let release = node_semver::Version::new(version.major, version.minor, version.patch);
-    release_range
-        .parse::<node_semver::Range>()
-        .is_ok_and(|range| release.satisfies(&range))
-}
-
 pub(crate) fn importer_providers(
     importers: &Value,
     id: &str,

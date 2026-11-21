@@ -5,3 +5,5 @@ benchmarks:
     exec: benchmarks/cli converge
   - name: Repair a missing snapshot from Git history
     exec: benchmarks/cli repair
+  - name: Inspect peer bindings and workspace reachability
+    exec: benchmarks/cli inspect

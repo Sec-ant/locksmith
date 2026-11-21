@@ -5,7 +5,7 @@ use bpaf::Bpaf;
 
 const MERGE_USAGE: &str = "Usage: locksmith merge BASE OURS THEIRS [--context FILE [--allow-network]]\n       locksmith merge --git-driver %O %A %B %P [--allow-network]";
 
-/// Merge, repair and converge pnpm lockfiles.
+/// Merge, repair, converge and inspect pnpm lockfiles.
 #[derive(Bpaf, Clone, Debug)]
 #[bpaf(options, generate(parser), fallback_to_usage)]
 pub enum Command {
@@ -39,9 +39,26 @@ pub enum Command {
         reference: String,
     },
 
+    /// Inspect peer bindings and package instances in one project lockfile.
+    #[bpaf(command)]
+    Inspect {
+        /// Print a machine-readable report with bindings and workspace paths
+        #[bpaf(long)]
+        json: bool,
+        /// Use this exact pnpm version for peer policy
+        #[bpaf(long, argument("VERSION"), optional)]
+        pnpm_version: Option<node_semver::Version>,
+        /// Lockfile to inspect (default: pnpm-lock.yaml)
+        #[bpaf(
+            positional("FILE"),
+            fallback(std::path::PathBuf::from("pnpm-lock.yaml"))
+        )]
+        file: std::path::PathBuf,
+    },
+
     #[bpaf(command, hide)]
     Help {
-        #[bpaf(positional::<String>("COMMAND"), guard(|name| matches!(name.as_str(), "merge" | "converge" | "repair"), "expected merge, converge or repair"), optional)]
+        #[bpaf(positional::<String>("COMMAND"), guard(|name| matches!(name.as_str(), "merge" | "converge" | "repair" | "inspect"), "expected merge, converge, repair or inspect"), optional)]
         topic: Option<String>,
     },
 }

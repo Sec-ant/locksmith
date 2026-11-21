@@ -101,7 +101,7 @@ pub(crate) fn references<'a>(
     key: &str,
     include_dev: bool,
     issues: &mut Vec<ValidationIssue>,
-) -> Vec<(&'a str, &'a str)> {
+) -> Vec<(&'static str, &'a str, &'a str)> {
     let mut result = Vec::new();
     if !value.is_object() {
         issues.push(issue(kind, &[section, key], "expected a mapping"));
@@ -143,7 +143,9 @@ pub(crate) fn references<'a>(
                 dependency.as_str()
             };
             match reference {
-                Some(reference) if !reference.is_empty() => result.push((name.as_str(), reference)),
+                Some(reference) if !reference.is_empty() => {
+                    result.push((group, name.as_str(), reference))
+                }
                 _ => issues.push(issue(
                     kind,
                     &[section, key, group, name],
@@ -260,7 +262,7 @@ fn closure_with_snapshots(
 ) -> Result<DependencyClosure, LockfileError> {
     let mut reached = DependencyClosure::default();
     let mut issues = Vec::new();
-    let mut importers: VecDeque<_> = roots.iter().map(|key| (key.clone(), true)).collect();
+    let mut importers: VecDeque<_> = roots.iter().cloned().collect();
     let mut queued_importers = roots.clone();
     let mut traversal = Traversal {
         snapshots: section(document, "snapshots"),
@@ -269,37 +271,39 @@ fn closure_with_snapshots(
     for key in snapshot_roots {
         traversal.push("", key, kind, "snapshots", key, &mut issues);
     }
-    while let Some((key, include_dev)) = importers.pop_front() {
-        if !reached.importers.insert(key.clone()) {
-            continue;
-        }
-        let Some(importer) = importer_records.and_then(|map| map.get(&key)) else {
-            issues.push(issue(kind, &["importers", &key], "missing importer"));
-            continue;
+    loop {
+        let importer_id = importers.pop_front();
+        let (source, key, record, include_dev, link_base) = if let Some(key) = &importer_id {
+            reached.importers.insert(key.clone());
+            let Some(record) = importer_records.and_then(|map| map.get(key)) else {
+                issues.push(issue(kind, &["importers", key], "missing importer"));
+                continue;
+            };
+            (
+                "importers",
+                key.as_str(),
+                record,
+                roots.contains(key),
+                key.as_str(),
+            )
+        } else if let Some((key, snapshot)) = traversal.pending.pop() {
+            reached.packages.insert(package_key(key).to_owned());
+            check_package(document, kind, key, &mut issues);
+            ("snapshots", key, snapshot, false, ".")
+        } else {
+            break;
         };
-        for (name, reference) in
-            references(importer, kind, "importers", &key, include_dev, &mut issues)
+        for (_, name, reference) in references(record, kind, source, key, include_dev, &mut issues)
         {
             if let Some(target) = reference.strip_prefix("link:") {
-                let target = linked_project(importer_records, &key, target);
+                let target = linked_project(importer_records, link_base, target);
                 if importer_records.and_then(|map| map.get(&target)).is_some()
                     && queued_importers.insert(target.clone())
                 {
-                    let include_dev = roots.contains(&target);
-                    importers.push_back((target, include_dev));
+                    importers.push_back(target);
                 }
             } else {
-                traversal.push(name, reference, kind, "importers", &key, &mut issues);
-            }
-        }
-    }
-    while let Some((key, snapshot)) = traversal.pending.pop() {
-        let package = package_key(key);
-        reached.packages.insert(package.to_owned());
-        check_package(document, kind, key, &mut issues);
-        for (name, reference) in references(snapshot, kind, "snapshots", key, false, &mut issues) {
-            if !reference.starts_with("link:") {
-                traversal.push(name, reference, kind, "snapshots", key, &mut issues);
+                traversal.push(name, reference, kind, source, key, &mut issues);
             }
         }
     }
@@ -348,6 +352,63 @@ impl Traversal<'_> {
                 &[section, from, name],
                 format!("missing snapshot {}", self.named),
             )),
+        }
+    }
+}
+
+/// Peer declarations are input data. Silently skipping an ill-shaped entry
+/// would turn a corrupt declaration into a successful empty inspection.
+pub(crate) fn check_peer_declarations(
+    kind: DocumentKind,
+    packages: &Map<String, Value>,
+) -> Result<(), LockfileError> {
+    let mut issues = Vec::new();
+    for (key, package) in packages {
+        check_package_peers(kind, key, package, &mut issues);
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(LockfileError::InvalidGraph(issues))
+    }
+}
+
+fn check_package_peers(
+    kind: DocumentKind,
+    key: &str,
+    package: &Value,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for field in ["peerDependencies", "peerDependenciesMeta"] {
+        let Some(value) = package.get(field) else {
+            continue;
+        };
+        let Some(entries) = value.as_object() else {
+            issues.push(issue(kind, &["packages", key, field], "expected a mapping"));
+            continue;
+        };
+        for (name, value) in entries {
+            if field == "peerDependencies" && !value.is_string() {
+                issues.push(issue(
+                    kind,
+                    &["packages", key, field, name],
+                    "expected a version range string",
+                ));
+            } else if field == "peerDependenciesMeta" {
+                if !value.is_object() {
+                    issues.push(issue(
+                        kind,
+                        &["packages", key, field, name],
+                        "expected a mapping",
+                    ));
+                } else if value.get("optional").is_some_and(|v| !v.is_boolean()) {
+                    issues.push(issue(
+                        kind,
+                        &["packages", key, field, name, "optional"],
+                        "expected a boolean",
+                    ));
+                }
+            }
         }
     }
 }
@@ -520,8 +581,14 @@ pub(crate) fn validate_with_config(
         check_package(document, kind, key, &mut issues);
         check_references(document, snapshot, kind, "snapshots", key, &mut issues);
     }
-    for key in keys(document, "packages") {
-        check_package(document, kind, &key, &mut issues);
+    for name in ["importers", "snapshots", "packages"] {
+        if document.get(name).is_some_and(|value| !value.is_object()) {
+            issues.push(issue(kind, &[name], "expected a mapping"));
+        }
+    }
+    for (key, package) in section(document, "packages").into_iter().flatten() {
+        check_package(document, kind, key, &mut issues);
+        check_package_peers(kind, key, package, &mut issues);
     }
     issues.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.message.cmp(&b.message)));
     issues.dedup();
@@ -537,7 +604,7 @@ fn check_references(
     issues: &mut Vec<ValidationIssue>,
 ) {
     let snapshots = section(document, "snapshots");
-    for (name, reference) in references(record, kind, source, key, true, issues) {
+    for (_, name, reference) in references(record, kind, source, key, true, issues) {
         if reference.starts_with("link:") {
             continue;
         }

@@ -85,41 +85,8 @@ impl Project {
 
     pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-        let mut config = match root.get("pnpm") {
-            Some(v) if v.is_object() => v.clone(),
-            Some(_) => {
-                return Err("package.json: expected pnpm to be an object".into());
-            }
-            None => json!({}),
-        };
-        let version = root["packageManager"]
-            .as_str()
-            .and_then(|v| v.strip_prefix("pnpm@"))
-            .and_then(|v| v.parse::<node_semver::Version>().ok());
-        if version.as_ref().is_none_or(|v| v.major < 11)
-            && let Some(text) = read(".npmrc")?
-        {
-            legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
-        }
-        let workspace = read("pnpm-workspace.yaml")?;
-        if let Some(text) = &workspace {
-            let settings: Option<serde_json::Map<String, Value>> =
-                serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
-            if let Some(mut settings) = settings {
-                if version.as_ref().is_some_and(|v| v.major == 9) {
-                    // pnpm 9 takes these resolver settings from .npmrc.
-                    for key in [
-                        "peersSuffixMaxLength",
-                        "injectWorkspacePackages",
-                        "autoInstallPeers",
-                        "addMissingPeerTypes",
-                    ] {
-                        settings.remove(key);
-                    }
-                }
-                config.as_object_mut().unwrap().extend(settings);
-            }
-        }
+        let version = pnpm_version(&root);
+        let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
@@ -137,9 +104,56 @@ impl Project {
         Ok(Self {
             root,
             config,
-            workspace: workspace.is_some(),
+            workspace,
         })
     }
+}
+
+pub fn pnpm_version(root: &Value) -> Option<node_semver::Version> {
+    root["packageManager"]
+        .as_str()
+        .and_then(|v| v.strip_prefix("pnpm@"))
+        .and_then(|v| v.parse::<node_semver::Version>().ok())
+}
+
+/// Read the package-manager settings shared by workspace operations and inspection.
+pub fn settings(
+    root: &Value,
+    version: Option<&node_semver::Version>,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<(Value, bool)> {
+    let mut config = match root.get("pnpm") {
+        Some(v) if v.is_object() => v.clone(),
+        Some(_) => {
+            return Err("package.json: expected pnpm to be an object".into());
+        }
+        None => json!({}),
+    };
+    if version.as_ref().is_none_or(|v| v.major < 11)
+        && let Some(text) = read(".npmrc")?
+    {
+        legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
+    }
+    let workspace = read("pnpm-workspace.yaml")?;
+    if let Some(text) = &workspace {
+        let settings: Option<serde_json::Map<String, Value>> =
+            serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
+        if let Some(mut settings) = settings {
+            if version.as_ref().is_some_and(|v| v.major == 9) {
+                // pnpm 9 takes these resolver settings from .npmrc.
+                for key in [
+                    "peersSuffixMaxLength",
+                    "injectWorkspacePackages",
+                    "autoInstallPeers",
+                    "addMissingPeerTypes",
+                ] {
+                    settings.remove(key);
+                }
+            }
+            config.as_object_mut().unwrap().extend(settings);
+        }
+    }
+    Ok((config, workspace.is_some()))
 }
 
 pub fn manifests(

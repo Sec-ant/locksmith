@@ -1,15 +1,41 @@
 //! Pure peer diagnostics, separate from graph construction and acceptance.
 
-use crate::{Lockfile, LockfileError, Value, graph, manifest, peer};
-use std::collections::{BTreeMap, BTreeSet};
+mod range;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+use crate::{Lockfile, LockfileError, Value, graph, manifest};
+use nodejs_semver::{Range, Version};
+pub(crate) use range::PeerRange;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PeerVersionMatching {
     /// Standard npm semver, including its prerelease filtering.
     #[default]
     Semver,
-    /// Compare prereleases and release cores, as used by pnpm 9–11 peers.
+    /// Yarn-compatible peer comparison used by the pnpm 10 resolver.
+    #[serde(rename = "pnpm10")]
     ReleaseCompatible,
+    /// pnpm 9 applies configured exceptions to displayed warnings only.
+    Pnpm9,
+    /// JS resolver with scheme ranges.
+    Pnpm11,
+    /// Native resolver and install-time peer check.
+    Pnpm12,
+    /// Report a definite result when all supported resolvers agree.
+    Unspecified,
+}
+impl PeerVersionMatching {
+    pub fn for_pnpm(version: Option<&node_semver::Version>) -> Self {
+        match version.map(|v| v.major) {
+            Some(9) => Self::Pnpm9,
+            Some(10) => Self::ReleaseCompatible,
+            Some(11) => Self::Pnpm11,
+            Some(12) => Self::Pnpm12,
+            _ => Self::Unspecified,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,108 +92,201 @@ pub fn inspect_peers(
     rules: &PeerRules,
     workspace_manifests: Option<&BTreeMap<String, Value>>,
 ) -> Vec<PeerIssue> {
-    let Some(document) = lockfile.project() else {
+    let mut issues: Vec<_> = scan(lockfile, rules, workspace_manifests)
+        .into_iter()
+        .filter(|record| record.disposition != Disposition::Accepted)
+        .map(|record| record.issue)
+        .collect();
+    issues.sort();
+    issues
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerStatus {
+    Missing,
+    OutOfRange,
+    Unknown,
+    Allowed,
+}
+
+/// Whether the selected peer policy accepts this binding. Unknown evidence
+/// (for example, an external link without its manifest) stays explicit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Disposition {
+    Accepted,
+    Rejected,
+    Unknown,
+}
+
+/// Evidence missing for a definitive version comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnknownReason {
+    ProviderVersion,
+    OpaqueSpecifier,
+    PackageManager,
+}
+
+pub(crate) struct Record {
+    pub issue: PeerIssue,
+    pub status: PeerStatus,
+    pub reason: Option<UnknownReason>,
+    pub disposition: Disposition,
+    pub provider: String,
+    pub version: Option<String>,
+    pub exception: Option<String>,
+}
+
+pub(crate) fn package_identity<'a>(key: &'a str, record: &'a Value) -> (&'a str, Option<&'a str>) {
+    let (name, locator) = manifest::selector(key);
+    (
+        record["name"].as_str().unwrap_or(name),
+        record["version"].as_str().or(locator),
+    )
+}
+
+pub(crate) fn scan(
+    lock: &Lockfile,
+    rules: &PeerRules,
+    manifests: Option<&BTreeMap<String, Value>>,
+) -> Vec<Record> {
+    let Some(doc) = lock.project() else {
         return Vec::new();
     };
-    let mut issues = BTreeSet::new();
-    for (key, body) in graph::section(document, "snapshots").into_iter().flatten() {
-        let package = document
-            .get("packages")
-            .and_then(|v| v.get(graph::package_key(key)));
-        for (name, range) in package
-            .and_then(|p| p.get("peerDependencies"))
-            .and_then(Value::as_object)
+    let packages = graph::section(doc, "packages");
+    let snapshots = graph::section(doc, "snapshots");
+    let mut ranges = BTreeMap::new();
+    let mut records = Vec::new();
+    for (key, body) in snapshots.into_iter().flatten() {
+        let Some(package) = packages.and_then(|p| p.get(graph::package_key(key))) else {
+            continue;
+        };
+        for (name, declaration) in graph::section(package, "peerDependencies")
             .into_iter()
             .flatten()
         {
-            let Some(wanted) = range.as_str() else {
-                continue;
-            };
-            let resolved = ["dependencies", "optionalDependencies"]
-                .into_iter()
-                .find_map(|g| body.get(g)?.get(name)?.as_str());
-            let optional = package
-                .and_then(|p| p.get("peerDependenciesMeta"))
-                .and_then(|v| v.get(name))
-                .and_then(|v| v.get("optional"))
-                .and_then(Value::as_bool)
-                == Some(true);
-            if resolved.is_none() && optional {
+            let wanted = declaration.as_str().expect("validated peer declaration");
+            let binding = graph::dependency(body, name).map(|(_, r)| r);
+            if binding.is_none() && package["peerDependenciesMeta"][name]["optional"] == true {
                 continue;
             }
-            let resolved_version = resolved.and_then(|r| {
-                if let Some(path) = r.strip_prefix("link:") {
-                    workspace_manifests?
-                        .get(&graph::linked_project(document.get("importers"), ".", path))?
-                        .get("version")?
-                        .as_str()
-                } else {
-                    Some(graph::package_key(peer::canonical_binding(name, r).1))
+            let (provider, version) = match binding {
+                Some(pin) if pin.starts_with("link:") => {
+                    let id = graph::linked_project(doc.get("importers"), ".", &pin[5..]);
+                    let target = manifests.and_then(|m| m.get(&id));
+                    (
+                        target.and_then(|m| m["name"].as_str()).unwrap_or(name),
+                        target.and_then(|m| m["version"].as_str()),
+                    )
                 }
-            });
-            let satisfied = resolved_version
-                .and_then(|v| v.parse::<node_semver::Version>().ok())
-                .is_some_and(|v| {
-                    if rules.version_matching == PeerVersionMatching::ReleaseCompatible {
-                        peer::satisfies_peer(&v, wanted)
-                    } else {
-                        wanted
-                            .strip_prefix("workspace:")
-                            .unwrap_or(wanted)
-                            .parse::<node_semver::Range>()
-                            .is_ok_and(|r| v.satisfies(&r))
+                Some(pin) => {
+                    let target = graph::snapshot_key(name, pin, snapshots);
+                    packages
+                        .and_then(|p| p.get_key_value(graph::package_key(&target)))
+                        .map(|(id, record)| package_identity(id, record))
+                        .unwrap_or((name, None))
+                }
+                None => (name.as_str(), None),
+            };
+            let parsed = version.and_then(|v| Version::parse(v).ok());
+            let (mut status, mut disposition, reason) = if binding.is_none() {
+                (PeerStatus::Missing, Disposition::Rejected, None)
+            } else if let Some(v) = &parsed {
+                let range = ranges
+                    .entry(wanted)
+                    .or_insert_with(|| PeerRange::new(wanted, rules.version_matching));
+                let Some(outcome) = range.check(v) else {
+                    continue;
+                };
+                outcome
+            } else {
+                (
+                    PeerStatus::Unknown,
+                    Disposition::Unknown,
+                    Some(UnknownReason::ProviderVersion),
+                )
+            };
+            let exception = allowed_peer(
+                rules,
+                package_identity(graph::package_key(key), package),
+                name,
+                binding,
+                parsed.as_ref(),
+            );
+            if exception.is_some() {
+                status = PeerStatus::Allowed;
+                disposition = match rules.version_matching {
+                    PeerVersionMatching::Pnpm9 => disposition,
+                    PeerVersionMatching::Unspecified if disposition != Disposition::Accepted => {
+                        Disposition::Unknown
                     }
-                });
-            if !satisfied && !allowed_peer(rules, key, name, resolved_version.or(resolved)) {
-                issues.insert(PeerIssue {
+                    _ => Disposition::Accepted,
+                };
+            }
+            records.push(Record {
+                issue: PeerIssue {
                     snapshot: key.clone(),
                     peer: name.clone(),
                     wanted: wanted.into(),
-                    resolved: resolved.map(str::to_owned),
-                });
+                    resolved: binding.map(str::to_owned),
+                },
+                status,
+                disposition,
+                reason,
+                provider: provider.to_owned(),
+                version: parsed.map(|v| v.to_string()),
+                exception,
+            });
+        }
+    }
+    records
+}
+
+fn allowed_peer(
+    rules: &PeerRules,
+    (parent, parent_version): (&str, Option<&str>),
+    name: &str,
+    binding: Option<&str>,
+    version: Option<&Version>,
+) -> Option<String> {
+    if binding.is_none() {
+        return matches_patterns(&rules.ignore_missing, name).then(|| "ignoreMissing".into());
+    }
+    if matches_patterns(&rules.allow_any, name) {
+        return Some("allowAny".into());
+    }
+    let version = version?;
+    let parent_version = parent_version.and_then(|v| Version::parse(v).ok());
+    let mut global = None;
+    let mut scoped = None;
+    for (rule, range) in &rules.allowed_versions {
+        let (selector, peer, _) = manifest::override_selector(rule);
+        if peer != name {
+            continue;
+        }
+        match selector {
+            None => global = Some((rule, range)),
+            Some(s) => {
+                let (name, wanted) = manifest::selector(s);
+                if name == parent
+                    && wanted.is_none_or(|r| {
+                        parent_version
+                            .as_ref()
+                            .is_some_and(|v| Range::parse(r).is_ok_and(|r| r.satisfies(v)))
+                    })
+                {
+                    scoped = Some((rule, range));
+                }
             }
         }
     }
-    issues.into_iter().collect()
-}
-
-fn allowed_peer(rules: &PeerRules, key: &str, name: &str, resolved: Option<&str>) -> bool {
-    let Some(resolved) = resolved else {
-        return matches_patterns(&rules.ignore_missing, name);
-    };
-    if matches_patterns(&rules.allow_any, name) {
-        return true;
-    }
-    let bare = graph::package_key(resolved);
-    let version = bare.rsplit_once('@').map_or(bare, |(_, v)| v);
-    let Ok(version) = version.parse::<node_semver::Version>() else {
-        return false;
-    };
-    let Some((parent, parent_version)) = graph::package_key(key).rsplit_once('@') else {
-        return false;
-    };
-    let accepts = |range: &String| {
-        range
-            .parse::<node_semver::Range>()
-            .is_ok_and(|range| version.satisfies(&range))
-    };
-    let global = rules.allowed_versions.iter().rev().find(|(rule, _)| {
-        let (selector, peer, _) = manifest::override_selector(rule);
-        selector.is_none() && peer == name
-    });
-    if global.is_some_and(|(_, range)| accepts(range)) {
-        return true;
-    }
-    rules
-        .allowed_versions
-        .iter()
-        .rev()
-        .find(|(rule, _)| {
-            let (selector, peer, _) = manifest::override_selector(rule);
-            peer == name
-                && selector.is_some_and(|s| manifest::parent_matches(s, parent, parent_version))
-        })
-        .is_some_and(|(_, range)| accepts(range))
+    [global, scoped]
+        .into_iter()
+        .flatten()
+        .find(|(_, r)| Range::parse(r).is_ok_and(|r| r.satisfies(version)))
+        .map(|(rule, _)| format!("allowedVersions/{rule}"))
 }
 
 // pnpm's matcher treats only `*` as a wildcard and applies negations in order.
