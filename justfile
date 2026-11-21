@@ -38,6 +38,10 @@ bench:
 change:
     knope change
 
+# Check how pending changesets will appear in the changelog.
+check-changesets:
+    sh scripts/check-changesets.sh
+
 # Apply pending changesets to the workspace versions and changelog.
 prepare-release:
     knope prepare-release
@@ -47,8 +51,8 @@ test:
     cargo test --workspace --all-targets --locked
     cargo test --workspace --doc --locked
 
-# Run the same Rust checks as CI.
-check: fmt-check lint test
+# Run the same changeset and Rust checks as CI.
+check: check-changesets fmt-check lint test
 
 # Run the native pnpm integration tests with pnpm on PATH or the given PNPM_BIN.
 test-pnpm:
