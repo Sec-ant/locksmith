@@ -1,3 +1,14 @@
+## 0.3.2 (2026-11-21)
+
+### Fixes
+
+- Reject an invalid baseline in `converge` even when dependency declarations are unchanged.
+- Allow `converge` when a workspace member changes its own `packageManager` declaration.
+- Drop publication times for versions that are no longer direct dependencies after `converge`.
+- Accept valid lockfiles in `repair` when pnpm rules are empty or `ignoredOptionalDependencies` is reordered.
+- Omit empty `overrides` and `patchedDependencies` maps from `merge --context` output.
+- Preserve pnpm 9 and 10 publication times for direct dependencies retained by `merge --context`.
+
 ## 0.3.1 (2026-11-20)
 
 ### Fixes
