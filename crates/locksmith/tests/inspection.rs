@@ -233,7 +233,7 @@ fn rejects_malformed_peer_declarations_with_their_location() {
 }
 
 #[test]
-fn an_empty_comparator_intersection_and_an_open_wildcard_match_no_release() {
+fn comparator_intersections_wildcards_and_prerelease_bounds_hold_in_every_policy() {
     for policy in [
         PeerVersionMatching::Pnpm9,
         PeerVersionMatching::ReleaseCompatible,
@@ -246,6 +246,8 @@ fn an_empty_comparator_intersection_and_an_open_wildcard_match_no_release() {
             ..PeerRules::default()
         };
         for (wanted, version, satisfies) in [
+            ("^4.0.0-rc.7", "4.0.0-rc.6", false),
+            ("^4.0.0-rc.7", "4.0.0-rc.7", true),
             (">1.0.0-rc.1", "1.0.0-rc.1", false),
             (">1.0.0-rc.1", "1.0.0-alpha.1", false),
             (">1.0.0-rc.1", "1.0.0-rc.2", true),
