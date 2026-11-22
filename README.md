@@ -1,15 +1,6 @@
 # locksmith
 
-Locksmith merges and repairs pnpm lockfiles, keeps unrelated dependency changes out of diffs, and traces peer dependency issues to the workspaces they affect.
-
-**Example. Add `immer@10.1.1` to `apps/editor`.**
-
-| After | Peer bindings changed | Lockfile diff |
-| --- | ---: | ---: |
-| `pnpm install` | 13 workspaces | `+47 / −26` |
-| `locksmith converge HEAD` | 1 workspace | `+11 / −2` |
-
-Both results are compared with the lockfile before the edit. The editor's `zustand` gains an `immer` binding, and the other 12 workspaces keep their original bindings after convergence. [Reproduce the example](examples/converge.sh).
+Locksmith merges pnpm lockfiles, keeps unrelated dependency changes out of your diff, and traces peer dependency issues to the workspaces they affect.
 
 When `pnpm-lock.yaml` conflicts during a merge or rebase, regenerating it can change unrelated versions and peer bindings. Even with the original lockfile in place, a dependency edit can change how pnpm resolves peers in other workspace projects.
 
@@ -97,15 +88,6 @@ The baseline lockfile and the installed lockfile must each match the manifests a
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 
-<details>
-<summary>View the full lockfile diffs from the example</summary>
-
-| `pnpm install` | `locksmith converge HEAD` |
-| :---: | :---: |
-| [<img src="docs/diagrams/converge-install-diff.webp" width="280" height="872" alt="Lockfile diff after pnpm install, 47 additions and 26 deletions">](examples/converge/installed/pnpm-lock.yaml) | [<img src="docs/diagrams/converge-result-diff.webp" width="280" height="872" alt="Converged lockfile diff, 11 additions and 2 deletions">](examples/converge/converged/pnpm-lock.yaml) |
-
-</details>
-
 ## Repair an already merged lockfile
 
 A clean Git merge can still leave a duplicate record, a stale importer declaration, or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
@@ -180,7 +162,7 @@ Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full AP
 
 ## Performance
 
-Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the README example. The fixture repeats one site's dependency graph 300 times. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
+Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 
