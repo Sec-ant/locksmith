@@ -1,14 +1,15 @@
 # locksmith
 
-<div align="center">
+Locksmith merges and repairs pnpm lockfiles, keeps unrelated dependency changes out of diffs, and traces peer dependency issues to the workspaces they affect.
 
-|                                                                                          `pnpm install`                                                                                           |                                                                               `locksmith converge HEAD`                                                                                |
-| :-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
-| [<img src="docs/diagrams/converge-install-diff.webp" width="280" height="872" alt="Lockfile diff after pnpm install, 47 additions and 26 deletions">](examples/converge/installed/pnpm-lock.yaml) | [<img src="docs/diagrams/converge-result-diff.webp" width="280" height="872" alt="Converged lockfile diff, 11 additions and 2 deletions">](examples/converge/converged/pnpm-lock.yaml) |
+**Example. Add `immer@10.1.1` to `apps/editor`.**
 
-</div>
+| After | Peer bindings changed | Lockfile diff |
+| --- | ---: | ---: |
+| `pnpm install` | 13 workspaces | `+47 / −26` |
+| `locksmith converge HEAD` | 1 workspace | `+11 / −2` |
 
-Locksmith merges pnpm lockfiles, keeps unrelated dependency changes out of your diff, and traces peer dependency issues to the workspaces they affect.
+Both results are compared with the lockfile before the edit. The editor's `zustand` gains an `immer` binding, and the other 12 workspaces keep their original bindings after convergence. [Reproduce the example](examples/converge.sh).
 
 When `pnpm-lock.yaml` conflicts during a merge or rebase, regenerating it can change unrelated versions and peer bindings. Even with the original lockfile in place, a dependency edit can change how pnpm resolves peers in other workspace projects.
 
@@ -95,6 +96,15 @@ git diff --no-index pnpm-lock.yaml converged.yaml
 The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
+
+<details>
+<summary>View the full lockfile diffs from the example</summary>
+
+| `pnpm install` | `locksmith converge HEAD` |
+| :---: | :---: |
+| [<img src="docs/diagrams/converge-install-diff.webp" width="280" height="872" alt="Lockfile diff after pnpm install, 47 additions and 26 deletions">](examples/converge/installed/pnpm-lock.yaml) | [<img src="docs/diagrams/converge-result-diff.webp" width="280" height="872" alt="Converged lockfile diff, 11 additions and 2 deletions">](examples/converge/converged/pnpm-lock.yaml) |
+
+</details>
 
 ## Repair an already merged lockfile
 
