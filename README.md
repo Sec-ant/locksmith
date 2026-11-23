@@ -82,8 +82,6 @@ From the workspace root, run `locksmith generate` after editing a manifest. It r
 
 Generation preserves the dependencies of unchanged projects and keeps existing releases and peer bindings wherever the edit allows. It reuses releases from the lockfile when resolving new dependencies. When an edit introduces duplicate releases, it can compare alternatives on the affected paths. Use `converge` to deduplicate the rest of the graph. A workspace with `strictPeerDependencies` still requires peer compatibility.
 
-For a release audit, `locksmith generate --exhaustive --stdout --allow-network` compares eligible assignments of registry releases in the resolver's model. It reads the manifests of alternative releases and prunes a branch when its unavoidable costs already match or exceed the best valid graph. Large version ranges and coupled peer requirements can make an exhaustive run much longer. The Node API accepts the same choice as `exhaustive: true`.
-
 ```sh
 locksmith generate --allow-network
 locksmith generate --stdout > preview.yaml
@@ -91,7 +89,7 @@ locksmith generate --stdout > preview.yaml
 
 Ordinary registry dependencies need only package metadata. `--allow-network` lets Locksmith fetch missing metadata and resolve remote Git or tarball sources. Offline runs use the previous lock and the local metadata cache. Generation runs without a pnpm executable, lifecycle scripts or `node_modules`.
 
-Set the target pnpm version with the root manifest's `packageManager` field or `--pnpm-version VERSION`. The default lock format is v9 for pnpm 9–12. The generator also reads and writes pnpm 12's explicit `lockfile.format: v13`.
+Set the target pnpm version with the root manifest's `packageManager` field or `--pnpm-version VERSION`. Generation writes the v9 lock format that pnpm 9–12 use by default.
 
 Workspaces with an active pnpmfile can select a JavaScript host for `readPackage`, `updateConfig`, `preResolution` and `afterAllResolved`. The selected pnpm version determines which pre-resolution hooks run and the lockfile shape they receive. Like pnpm, generation keeps a lockfile that already matches the workspace. Once a project, catalog, override or patch changes, `readPackage` runs for every release again, because a hook can read files its checksum does not cover. Generation ranks graphs before running `afterAllResolved`, then validates the transformed lockfile.
 
@@ -206,7 +204,7 @@ Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project
 
 ## Compatibility and limits
 
-- Supports `lockfileVersion: '9.0'`, the default in pnpm 9–12. Generation also supports pnpm 12 workspaces configured with `lockfile.format: v13`.
+- Supports `lockfileVersion: '9.0'`, the default in pnpm 9–12.
 - Locksmith never installs packages. Run `pnpm install` for that.
 - The library performs no I/O. The CLI reads project files, Git, and the registry.
 - Registry access is opt-in with `--allow-network`.

@@ -281,7 +281,7 @@ version = "0.3.4"
 dependencies = [
  "base64",
  "http",
- "json5",
+ "indexmap",
  "md-5",
  "nodejs-semver",
  "petgraph",

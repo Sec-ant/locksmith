@@ -382,14 +382,12 @@ fn an_upstream_release_requiring_an_absent_workspace_member_can_be_replaced() {
     registry.add("tool", "1.0.0", json!({}));
     let manifests = workspace(&[(".", json!({"dependencies":{"tool":"^1"}}))]);
     let config = json!({});
-    for exhaustive in [false, true] {
-        let input = GenerateContext::new(&manifests, &config).with_exhaustive(exhaustive);
-        let lock = generate(&empty_workspace_lock(), &input, &mut registry).unwrap();
-        assert_eq!(
-            lock.dependency_closure(".").unwrap().packages,
-            BTreeSet::from(["tool@1.0.0".into()])
-        );
-    }
+    let input = GenerateContext::new(&manifests, &config);
+    let lock = generate(&empty_workspace_lock(), &input, &mut registry).unwrap();
+    assert_eq!(
+        lock.dependency_closure(".").unwrap().packages,
+        BTreeSet::from(["tool@1.0.0".into()])
+    );
 }
 
 #[test]
@@ -486,37 +484,6 @@ fn optional_peer_introduced_in_one_consumer_splits_the_transitive_snapshot() {
             .unwrap(),
         yaml
     );
-    let v13 = lock.to_pnpm_v13().unwrap();
-    assert_eq!(
-        Lockfile::parse_generation_input(v13).unwrap().project(),
-        lock.project()
-    );
-}
-
-#[test]
-fn the_v13_format_keeps_an_ordinary_edge_for_an_unbound_peer() {
-    // The plugin installs its own `child` and also declares it as a peer that
-    // the app does not supply.
-    let mut registry = Registry::default();
-    registry.add(
-        "plugin",
-        "1.0.0",
-        json!({"dependencies":{"child":"1"},"peerDependencies":{"child":"1"}}),
-    );
-    registry.add("child", "1.0.0", json!({}));
-    let inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
-    let lock = run(
-        &empty_workspace_lock(),
-        &inputs,
-        json!({"autoInstallPeers":false}),
-        &mut registry,
-    )
-    .unwrap();
-    let v13 = lock.to_pnpm_v13().unwrap();
-    assert_eq!(
-        Lockfile::parse_generation_input(v13).unwrap().project(),
-        lock.project()
-    );
 }
 #[test]
 fn strict_peers_can_change_the_declaring_release_with_or_without_an_incumbent() {
@@ -560,25 +527,22 @@ fn a_workspace_can_change_a_grandparent_to_share_a_transitive_release() {
     }
     registry.add("right", "1.0.0", json!({"dependencies":{"leaf":"1.0.0"}}));
     let manifests = workspace(&[(".", json!({"dependencies":{"left":"*","right":"1.0.0"}}))]);
-    for exhaustive in [false, true] {
-        let lock = generate(
-            &empty_workspace_lock(),
-            &GenerateContext::new(&manifests, &json!({}))
-                .with_pnpm_version(&node_semver::Version::from((10, 34, 9)))
-                .with_exhaustive(exhaustive),
-            &mut registry,
-        )
-        .unwrap();
-        assert_eq!(
-            lock.dependency_closure(".").unwrap().packages,
-            BTreeSet::from([
-                "left@1.0.0".into(),
-                "right@1.0.0".into(),
-                "bridge@1.0.0".into(),
-                "leaf@1.0.0".into()
-            ])
-        );
-    }
+    let lock = generate(
+        &empty_workspace_lock(),
+        &GenerateContext::new(&manifests, &json!({}))
+            .with_pnpm_version(&node_semver::Version::from((10, 34, 9))),
+        &mut registry,
+    )
+    .unwrap();
+    assert_eq!(
+        lock.dependency_closure(".").unwrap().packages,
+        BTreeSet::from([
+            "left@1.0.0".into(),
+            "right@1.0.0".into(),
+            "bridge@1.0.0".into(),
+            "leaf@1.0.0".into()
+        ])
+    );
 }
 
 #[test]
@@ -720,8 +684,8 @@ fn removing_a_peer_in_a_hook_collapses_instances_and_keeping_it_preserves_the_pr
         &mut registry,
     )
     .unwrap();
-    for (exhaustive, keep_peer) in [(false, false), (false, true), (true, false), (true, true)] {
-        let input = GenerateContext::new(&manifests, &cfg).with_exhaustive(exhaustive);
+    for keep_peer in [false, true] {
+        let input = GenerateContext::new(&manifests, &cfg);
         let lock =
             generate_with_hooks(&old, &input, &mut registry, &mut MovePeer { keep_peer }).unwrap();
         let doc = lock.project().unwrap();

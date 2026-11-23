@@ -23,5 +23,5 @@ export function inWorktree(cwd: URL) {
 }
 
 export function fromManifests(cwd: URL, hookRuntime: HookRuntime): Promise<string> {
-  return generateWorkspace({ cwd, hookRuntime, pnpmVersion: '10.34.9', exhaustive: true });
+  return generateWorkspace({ cwd, hookRuntime, pnpmVersion: '10.34.9' });
 }

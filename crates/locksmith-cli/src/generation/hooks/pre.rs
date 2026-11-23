@@ -21,7 +21,7 @@ pub(super) fn context(previous: &Value, input: &GenerateContext<'_>) -> Result<V
         .join("lock.yaml");
     // Like pnpm, warn and continue without an unreadable installed-state lockfile.
     let current = match fs::read_to_string(&current_path) {
-        Ok(raw) => match Lockfile::parse_generation_input(raw) {
+        Ok(raw) => match Lockfile::try_from(raw) {
             Ok(lock) => Some(lock),
             Err(e) => {
                 eprintln!("warning: ignoring {}: {e}", current_path.display());

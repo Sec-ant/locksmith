@@ -23,9 +23,6 @@ pub enum Command {
         /// Fetch missing package metadata from the configured registry
         #[bpaf(long)]
         allow_network: bool,
-        /// Search all eligible registry release assignments. Large workspaces can take substantially longer.
-        #[bpaf(long)]
-        exhaustive: bool,
         /// Print the resulting lockfile instead of writing pnpm-lock.yaml
         #[bpaf(long)]
         stdout: bool,

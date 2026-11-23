@@ -2,6 +2,8 @@
 //! peers. A new importer can also reuse an instance witnessed in the old graph.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use indexmap::IndexMap;
+
 use super::graph::Draft;
 use crate::{Value, WorkspaceConfig, graph, manifest, reconcile};
 
@@ -40,94 +42,105 @@ pub(super) fn observes_override(record: &Value, body: &Value, changed: &BTreeSet
     })
 }
 
-/// Fixed reverse edges and broken references in the input lockfile.
-struct Predecessors {
-    parents: Vec<Vec<usize>>,
-    broken: Vec<bool>,
+pub(super) struct HistoricalSnapshot<'a> {
+    pub body: &'a Value,
+    pub package: &'a str,
+    pub record: Option<&'a Value>,
+    pub children: Vec<usize>,
+    parents: Vec<(usize, bool)>,
+    broken: bool,
 }
 
-fn predecessors(old: &Value) -> Predecessors {
-    let snapshots = graph::section(old, "snapshots");
-    let indices: std::collections::HashMap<_, _> = snapshots
-        .into_iter()
-        .flat_map(|map| map.keys())
-        .enumerate()
-        .map(|(id, key)| (key.as_str(), id))
-        .collect();
-    let mut parents = vec![Vec::new(); indices.len()];
-    let mut broken = vec![false; indices.len()];
-    for (id, (key, body)) in snapshots.into_iter().flatten().enumerate() {
-        broken[id] = old["packages"].get(graph::package_key(key)).is_none();
-        for group in ["dependencies", "optionalDependencies"] {
-            for (name, value) in graph::section(body, group).into_iter().flatten() {
+/// The previous lock's ordinary and peer edges share an index. A missing
+/// child is a rebuild seed, and never participates in reachability.
+pub(super) struct History<'a> {
+    pub snapshots: IndexMap<&'a str, HistoricalSnapshot<'a>>,
+}
+
+impl<'a> History<'a> {
+    fn new(old: &'a Value) -> Self {
+        let snapshots = graph::section(old, "snapshots");
+        let mut nodes: IndexMap<_, _> = snapshots
+            .into_iter()
+            .flatten()
+            .map(|(key, body)| {
+                let package = graph::package_key(key);
+                let record = old["packages"].get(package);
+                (
+                    key.as_str(),
+                    HistoricalSnapshot {
+                        body,
+                        package,
+                        record,
+                        children: Vec::new(),
+                        parents: Vec::new(),
+                        broken: record.is_none(),
+                    },
+                )
+            })
+            .collect();
+        for id in 0..nodes.len() {
+            let body = nodes[id].body;
+            let peers = nodes[id]
+                .record
+                .and_then(|record| record.get("peerDependencies"));
+            for (_, name, value) in graph::snapshot_dependencies(body) {
                 let Some(pin) = value.as_str().filter(|p| !p.starts_with("link:")) else {
                     continue;
                 };
                 let child = graph::snapshot_key(name, pin, snapshots);
-                if let Some(&child) = indices.get(child.as_str()) {
-                    parents[child].push(id);
+                if let Some(child) = nodes.get_index_of(child.as_str()) {
+                    nodes[id].children.push(child);
+                    nodes[child]
+                        .parents
+                        .push((id, peers.is_none_or(|p| p.get(name).is_none())));
                 } else {
-                    broken[id] = true;
+                    nodes[id].broken = true;
                 }
             }
         }
+        Self { snapshots: nodes }
     }
-    Predecessors { parents, broken }
-}
 
-/// Include requirements missing from the old suffix, such as an optional peer
-/// newly supplied to an ancestor of a locked package. Normal children shadow
-/// providers in the outer scope.
-fn requirements(old: &Value) -> BTreeMap<String, BTreeSet<String>> {
-    let mut names = BTreeMap::new();
-    let mut parents = BTreeMap::<String, Vec<&str>>::new();
-    let mut work = VecDeque::new();
-    let snapshots = graph::section(old, "snapshots");
-    for (key, body) in snapshots.into_iter().flatten() {
-        let own = reconcile::peer_names(old, key);
-        if !own.is_empty() {
-            work.push_back(key.as_str());
-        }
-        names.insert(key.to_owned(), own);
-        let declared = &old["packages"][graph::package_key(key)]["peerDependencies"];
-        for group in ["dependencies", "optionalDependencies"] {
-            for (name, pin) in graph::section(body, group).into_iter().flatten() {
-                if declared.get(name).is_none()
-                    && let Some(pin) = pin.as_str().filter(|p| !p.starts_with("link:"))
-                {
-                    parents
-                        .entry(graph::snapshot_key(name, pin, snapshots))
-                        .or_default()
-                        .push(key);
+    /// Include peers inherited through ordinary children. A dependency already
+    /// supplied by the parent shadows the provider in its outer scope.
+    fn requirements(&self, old: &Value) -> BTreeMap<String, BTreeSet<String>> {
+        let mut names: Vec<_> = self
+            .snapshots
+            .iter()
+            .map(|(key, _)| reconcile::peer_names(old, key))
+            .collect();
+        let mut queued: Vec<_> = names.iter().map(|set| !set.is_empty()).collect();
+        let mut work: VecDeque<_> = (0..names.len()).filter(|&id| queued[id]).collect();
+        while let Some(child) = work.pop_front() {
+            queued[child] = false;
+            for &(parent, ordinary) in &self.snapshots[child].parents {
+                if !ordinary {
+                    continue;
+                }
+                let node = &self.snapshots[parent];
+                let missing: Vec<_> = names[child]
+                    .difference(&names[parent])
+                    .filter(|n| {
+                        graph::dependency(node.body, n).is_none()
+                            && manifest::selector(node.package).0 != n.as_str()
+                    })
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    names[parent].extend(missing);
+                    if !std::mem::replace(&mut queued[parent], true) {
+                        work.push_back(parent);
+                    }
                 }
             }
         }
+        self.snapshots
+            .iter()
+            .zip(names)
+            .map(|((key, _), names)| ((*key).to_owned(), names))
+            .collect()
     }
-    let mut queued: BTreeSet<_> = work.iter().copied().collect();
-    while let Some(child) = work.pop_front() {
-        queued.remove(child);
-        for &parent in parents.get(child).into_iter().flatten() {
-            let body = &old["snapshots"][parent];
-            let missing: Vec<_> = names[child]
-                .difference(&names[parent])
-                .filter(|n| {
-                    graph::dependency(body, n).is_none()
-                        && manifest::selector(graph::package_key(parent)).0 != n.as_str()
-                })
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                names
-                    .get_mut(parent)
-                    .expect("parent snapshot")
-                    .extend(missing);
-                if queued.insert(parent) {
-                    work.push_back(parent);
-                }
-            }
-        }
-    }
-    names
 }
 
 fn scoped<'a>(scope: &'a Scope, root: &'a Scope, name: &str, inherit: bool) -> Option<&'a String> {
@@ -140,7 +153,7 @@ pub(super) struct Partition<'a> {
     old: &'a Value,
     config: &'a WorkspaceConfig,
     scopes: std::cell::OnceCell<BTreeMap<String, Scope>>,
-    predecessors: std::cell::OnceCell<Predecessors>,
+    history: std::cell::OnceCell<History<'a>>,
     sensitive: std::cell::OnceCell<BTreeMap<String, BTreeSet<String>>>,
 }
 impl<'a> Partition<'a> {
@@ -149,36 +162,36 @@ impl<'a> Partition<'a> {
             old,
             config,
             scopes: Default::default(),
-            predecessors: Default::default(),
+            history: Default::default(),
             sensitive: Default::default(),
         }
     }
+    pub fn history(&self) -> &History<'a> {
+        self.history.get_or_init(|| History::new(self.old))
+    }
+
     /// Recheck the ancestors of every changed or broken historical snapshot.
     pub fn incomplete(&self, mut dirty: impl FnMut(&str, &Value) -> bool) -> BTreeSet<String> {
-        let index = self.predecessors.get_or_init(|| predecessors(self.old));
-        let snapshots = graph::section(self.old, "snapshots");
-        let mut missing = index.broken.clone();
-        let mut pending = Vec::new();
-        for (id, (key, body)) in snapshots.into_iter().flatten().enumerate() {
-            if missing[id] || dirty(key, body) {
-                missing[id] = true;
-                pending.push(id);
-            }
-        }
+        let history = self.history();
+        let mut missing: Vec<_> = history
+            .snapshots
+            .iter()
+            .map(|(key, node)| node.broken || dirty(key, node.body))
+            .collect();
+        let mut pending: Vec<_> = (0..missing.len()).filter(|&id| missing[id]).collect();
         while let Some(id) = pending.pop() {
-            for &parent in &index.parents[id] {
-                if !missing[parent] {
-                    missing[parent] = true;
+            for &(parent, _) in &history.snapshots[id].parents {
+                if !std::mem::replace(&mut missing[parent], true) {
                     pending.push(parent);
                 }
             }
         }
-        snapshots
-            .into_iter()
-            .flat_map(|map| map.keys())
+        history
+            .snapshots
+            .iter()
             .zip(missing)
             .filter(|(_, dirty)| *dirty)
-            .map(|(key, _)| key.clone())
+            .map(|((key, _), _)| (*key).to_owned())
             .collect()
     }
     pub fn scopes(&self) -> &BTreeMap<String, Scope> {
@@ -219,7 +232,8 @@ impl<'a> Partition<'a> {
         })
     }
     pub fn sensitive(&self) -> &BTreeMap<String, BTreeSet<String>> {
-        self.sensitive.get_or_init(|| requirements(self.old))
+        self.sensitive
+            .get_or_init(|| self.history().requirements(self.old))
     }
     pub fn apply(&self, draft: &mut Draft, incomplete: &BTreeSet<String>) -> bool {
         let old = self.old;

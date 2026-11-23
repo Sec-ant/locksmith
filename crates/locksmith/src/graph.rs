@@ -48,6 +48,19 @@ pub(crate) fn dependency<'a>(body: &'a Value, name: &str) -> Option<(&'static st
         .find_map(|group| Some((group, body[group].get(name)?.as_str()?)))
 }
 
+pub(crate) fn snapshot_dependencies(
+    body: &Value,
+) -> impl Iterator<Item = (&'static str, &String, &Value)> {
+    ["dependencies", "optionalDependencies"]
+        .into_iter()
+        .flat_map(|group| {
+            section(body, group)
+                .into_iter()
+                .flatten()
+                .map(move |(n, v)| (group, n, v))
+        })
+}
+
 pub(crate) fn transitive(body: &Value) -> impl Iterator<Item = &str> {
     body["transitivePeerDependencies"]
         .as_array()

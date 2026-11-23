@@ -8,8 +8,7 @@
 //! Call [`inspect`] for peer bindings, workspace reachability and package instances.
 //!
 //! Supports the default `lockfileVersion: '9.0'` format written by pnpm 9–12,
-//! including pnpm 11/12's separate environment document. Generation also supports
-//! pnpm 12's v13 project format through [`Lockfile::parse_generation_input`] and [`Lockfile::to_pnpm_v13`].
+//! including pnpm 11/12's separate environment document.
 //! The library performs no filesystem, network, Git, or package-manager operations.
 //!
 //! ```

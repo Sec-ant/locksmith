@@ -27,10 +27,9 @@ function revisionArgs(ref, options) {
   return options?.allowNetwork ? ['--allow-network', '--', ref] : ['--', ref];
 }
 
-function generateWorkspace({ cwd, signal, allowNetwork = false, pnpmVersion, hookRuntime = 'node', exhaustive = false } = {}) {
+function generateWorkspace({ cwd, signal, allowNetwork = false, pnpmVersion, hookRuntime = 'node' } = {}) {
   const args = ['--stdout', '--hook-runtime', hookRuntime];
   if (allowNetwork) args.push('--allow-network');
-  if (exhaustive) args.push('--exhaustive');
   if (pnpmVersion) args.push('--pnpm-version', pnpmVersion);
   // Hooks run in a separate process of this Node executable, in the workspace directory.
   return runWorkspace('generate', args, { cwd, signal, env: { ...process.env, LOCKSMITH_NODE: process.execPath } });

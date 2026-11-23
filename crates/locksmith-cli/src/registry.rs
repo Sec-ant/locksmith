@@ -1,5 +1,6 @@
 //! Metadata transport and registry selection. Constructed only after a local miss.
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::ErrorKind,
@@ -56,11 +57,15 @@ struct Packument<Release = Box<serde_json::value::RawValue>> {
     downgrades: std::cell::OnceCell<BTreeSet<String>>,
 }
 
+type ScopeRoutes = BTreeMap<String, (String, bool)>;
+
 struct Registry {
     agent: Agent,
     network_concurrency: usize,
     rc: BTreeMap<String, String>,
     config: Value,
+    scopes: OnceCell<ScopeRoutes>,
+    registry_env: Option<String>,
     packages: BTreeMap<(String, String), Packument>,
     pinned: BTreeMap<(String, String), Packument<u8>>,
     failed: BTreeMap<(String, String), String>,
@@ -355,6 +360,8 @@ impl Registry {
             network_concurrency,
             config,
             rc,
+            scopes: OnceCell::new(),
+            registry_env: env_config("pnpm", "registry").or_else(|| env_config("npm", "registry")),
             packages: BTreeMap::new(),
             pinned: BTreeMap::new(),
             failed: BTreeMap::new(),
@@ -367,6 +374,44 @@ impl Registry {
         })
     }
 
+    fn configured_scope_routes(&self) -> Result<&ScopeRoutes> {
+        if self.scopes.get().is_none() {
+            let mut routes = BTreeMap::new();
+            if let Some(registries) = self.config.get("registries") {
+                for (key, entry) in registries
+                    .as_object()
+                    .ok_or("registries must be a mapping")?
+                {
+                    if let Some(url) = entry.as_str() {
+                        routes.insert(key.clone(), (url.to_owned(), false));
+                    } else {
+                        let scopes = entry
+                            .get("scopes")
+                            .map(|v| v.as_array().ok_or("registry scopes must be a list"))
+                            .transpose()?;
+                        for route in scopes.into_iter().flatten() {
+                            let route = route.as_str().ok_or("invalid registry scope")?;
+                            let route = if route == "@" { "default" } else { route };
+                            if routes
+                                .insert(
+                                    route.to_owned(),
+                                    (key.clone(), entry.get("prefix").is_some()),
+                                )
+                                .is_some()
+                            {
+                                return Err(
+                                    format!("multiple registries configured for {route}").into()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = self.scopes.set(routes);
+        }
+        Ok(self.scopes.get().expect("configured scope routes"))
+    }
+
     fn registry(&self, name: &str) -> Result<String> {
         let scope = name.split_once('/').map(|(scope, _)| scope);
         if let Some(routes) = self.config.get("registriesByScope") {
@@ -377,42 +422,17 @@ impl Registry {
                 .ok_or("registriesByScope must contain registry URLs")?;
             return Self::validated_base(base);
         }
-        let mut routes = BTreeMap::new();
-        if let Some(registries) = self.config.get("registries") {
-            for (key, entry) in registries
-                .as_object()
-                .ok_or("registries must be a mapping")?
-            {
-                if let Some(url) = entry.as_str() {
-                    routes.insert(key.as_str(), (url, false));
-                } else {
-                    let scopes = entry
-                        .get("scopes")
-                        .map(|v| v.as_array().ok_or("registry scopes must be a list"))
-                        .transpose()?;
-                    for route in scopes.into_iter().flatten() {
-                        let route = route.as_str().ok_or("invalid registry scope")?;
-                        let route = if route == "@" { "default" } else { route };
-                        if routes
-                            .insert(route, (key, entry.get("prefix").is_some()))
-                            .is_some()
-                        {
-                            return Err(
-                                format!("multiple registries configured for {route}").into()
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let routes = self.configured_scope_routes()?;
         let scoped = scope.and_then(|scope| {
-            routes.get(scope).copied().or_else(|| {
-                self.rc
-                    .get(&format!("{scope}:registry"))
-                    .map(|url| (url.as_str(), false))
-            })
+            routes
+                .get(scope)
+                .map(|(url, qualified)| (url.as_str(), *qualified))
+                .or_else(|| {
+                    self.rc
+                        .get(&format!("{scope}:registry"))
+                        .map(|url| (url.as_str(), false))
+                })
         });
-        let registry_env = env_config("pnpm", "registry").or_else(|| env_config("npm", "registry"));
         let environment_route = scope
             .and_then(|scope| self.env_auth_routes.get(scope))
             .or_else(|| self.env_auth_routes.get("default"));
@@ -424,8 +444,12 @@ impl Registry {
                     .and_then(|s| self.global_auth_routes.get(s))
                     .map(|v| (v.as_str(), false))
             })
-            .or_else(|| registry_env.as_deref().map(|v| (v, false)))
-            .or_else(|| routes.get("default").copied())
+            .or_else(|| self.registry_env.as_deref().map(|v| (v, false)))
+            .or_else(|| {
+                routes
+                    .get("default")
+                    .map(|(url, qualified)| (url.as_str(), *qualified))
+            })
             .or_else(|| self.config["registry"].as_str().map(|v| (v, false)))
             .or_else(|| self.rc.get("registry").map(|v| (v.as_str(), false)))
             .or_else(|| {
@@ -559,22 +583,12 @@ pub(crate) fn hook_registries(config: &Value, major: u64) -> Result<Value> {
             .chain(registry.global_auth_routes.keys())
             .map(String::as_str),
     );
-    for (key, entry) in registry.config["registries"]
-        .as_object()
-        .into_iter()
-        .flatten()
-    {
-        if entry.is_string() {
-            scopes.insert(key);
-        }
-        scopes.extend(
-            entry["scopes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str),
-        );
-    }
+    scopes.extend(
+        registry
+            .configured_scope_routes()?
+            .keys()
+            .map(String::as_str),
+    );
     let mut routes = serde_json::json!({"default":registry.registry("")?, "@jsr":JSR_REGISTRY});
     for scope in scopes
         .into_iter()

@@ -18,7 +18,7 @@ type Names = BTreeSet<String>;
 /// of its children. A retained child's concrete suffix tells us which of
 /// those providers it actually used. Propagate that information back through
 /// the active occurrences, including cycles, before printing their keys.
-pub(super) fn bound_peers(instances: &Instances<'_>) -> Option<Vec<Names>> {
+pub(super) fn bound_peers(instances: &Instances<'_, '_>) -> Option<Vec<Names>> {
     if !instances.nodes.iter().any(|n| {
         n.children
             .values()
@@ -99,16 +99,16 @@ pub(super) struct Context {
     pub changed: Rc<Names>,
 }
 
-pub(super) struct History<'a> {
-    old: &'a Value,
-    partition: &'a Partition<'a>,
-    verified: HashSet<&'a str>,
+pub(super) struct History<'a, 'b> {
+    old: &'b Value,
+    partition: &'a Partition<'b>,
+    verified: HashSet<&'b str>,
     implicit: Names,
 }
 
-impl<'a> History<'a> {
+impl<'a, 'b> History<'a, 'b> {
     pub fn new(
-        build: &Build<'a, '_>,
+        build: &Build<'a, 'b, '_>,
         document: &Value,
         free: &BTreeMap<String, Requirements>,
     ) -> Option<Self> {

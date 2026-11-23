@@ -10,21 +10,7 @@ use super::{
     Result,
     graph::{Build, Dependencies, Dependency, Draft},
 };
-use crate::{Value, WorkspaceConfig, graph, manifest, reconcile};
-
-// These pnpm releases started recording a declared peer even when only its
-// ordinary dependency supplied it in the resolved graph (pnpm issue #17056).
-pub(super) fn records_fallback_peers(config: &WorkspaceConfig) -> bool {
-    use node_semver::Version;
-    config
-        .pnpm_version
-        .as_ref()
-        .is_none_or(|v| match v.major() {
-            11 => v >= &Version::from((11, 28, 7)),
-            12 => v >= &Version::from((12, 15, 0)),
-            major => major > 12,
-        })
-}
+use crate::{Value, graph, manifest, reconcile};
 
 type Requirements = BTreeMap<String, Vec<usize>>;
 
@@ -123,15 +109,15 @@ struct Instance {
     changed: ScopeChanges,
 }
 
-struct Instances<'a> {
+struct Instances<'a, 'b> {
     draft: &'a Draft,
     free: &'a BTreeMap<String, Requirements>,
     nodes: Vec<Instance>,
     memo: BTreeMap<(String, Scope, ScopeChanges), usize>,
-    history: Option<lineage::History<'a>>,
+    history: Option<lineage::History<'a, 'b>>,
 }
 
-impl Instances<'_> {
+impl Instances<'_, '_> {
     fn slots<'a>(
         &mut self,
         deps: impl Iterator<Item = (&'a String, &'a Dependency)>,
@@ -261,7 +247,7 @@ impl Instances<'_> {
     }
 }
 
-pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Value> {
+pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Result<Value> {
     let mut auto = BTreeMap::<String, Dependencies>::new();
     let mut filled_optional = false;
     let free = loop {
@@ -516,7 +502,7 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Va
             && !emitted.contains_key(key)
             && let Some(prior) = build.old["snapshots"].get(key)
             && doc["snapshots"].get(key).is_some()
-            && (!rechecked_hook || node.matches_history(build.old, key, prior, build.config, true))
+            && (!rechecked_hook || node.matches_history(build.old, key, prior, build.config))
             && occurrence.scope.iter().all(|(name, provider)| {
                 node.record["peerDependencies"].get(name).is_none()
                     || graph::dependency(prior, name).is_some_and(|(_, pin)| {
@@ -629,10 +615,6 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Va
             &["snapshots", key],
             "different dependency bodies have the same peer identity",
         );
-        build.empty_domain = true;
-        if build.exhaustive {
-            return Err(error);
-        }
         let equalities = common_children((left, prior), (right, &body), ordinary, &build.demands);
         if equalities.is_empty() {
             build.blocked_parent = Some(graph::package_key(key).into());
@@ -644,7 +626,7 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Va
     if let Some(error) = conflict {
         return Err(error);
     }
-    if !records_fallback_peers(build.config) {
+    if !reconcile::published::records_fallback_peers(build.config) {
         let mut supplied = BTreeSet::new();
         for (id, occurrence) in instances.nodes.iter().enumerate() {
             if id == occurrence.canonical {
@@ -712,35 +694,23 @@ fn shares_children(doc: &Value, key: &str, prior: &Value, incoming: &Value) -> b
         {
             return false;
         }
-        for group in ["dependencies", "optionalDependencies"] {
-            for (name, target) in graph::section(b, group).into_iter().flatten() {
-                let Some((x, y)) = a[group][name].as_str().zip(target.as_str()) else {
-                    return false;
-                };
-                if x != y {
-                    if x.starts_with("link:") || y.starts_with("link:") {
-                        return false;
-                    }
-                    next.push((
-                        graph::snapshot_key(name, x, snapshots),
-                        graph::snapshot_key(name, y, snapshots),
-                    ));
-                }
-            }
-            if graph::section(a, group)
-                .into_iter()
-                .flatten()
-                .any(|(name, _)| {
-                    b[group].get(name).is_none()
-                        && doc["packages"][package]["peerDependencies"]
-                            .get(name)
-                            .is_none()
-                })
-            {
+        for (group, name, target) in graph::snapshot_dependencies(b) {
+            let Some((x, y)) = a[group][name].as_str().zip(target.as_str()) else {
                 return false;
+            };
+            if x != y {
+                if x.starts_with("link:") || y.starts_with("link:") {
+                    return false;
+                }
+                next.push((
+                    graph::snapshot_key(name, x, snapshots),
+                    graph::snapshot_key(name, y, snapshots),
+                ));
             }
         }
-        true
+        let peers = &doc["packages"][package]["peerDependencies"];
+        graph::snapshot_dependencies(a)
+            .all(|(group, name, _)| b[group].get(name).is_some() || peers.get(name).is_some())
     };
     if !compare(graph::package_key(key), prior, incoming, &mut next) {
         return false;
@@ -788,73 +758,71 @@ fn common_children(
 ) -> Vec<(Vec<super::choices::Edge>, Vec<String>)> {
     use super::{RegistryPackage, choices::Owner};
     let mut equalities = Vec::new();
-    for group in ["dependencies", "optionalDependencies"] {
-        for (alias, old) in graph::section(left.1, group).into_iter().flatten() {
-            if !ordinary.contains_key(alias) {
-                continue;
-            }
-            let Some((a, b)) = old.as_str().zip(right.1[group][alias].as_str()) else {
-                continue;
-            };
-            if a == b {
-                continue;
-            }
-            let key = |pin: &str| {
-                if RegistryPackage::from_key(pin).is_some() {
-                    pin.to_owned()
-                } else {
-                    graph::snapshot_key(alias, pin, None)
-                }
-            };
-            let a = key(a);
-            let b = key(b);
-            let Some(((p, v), (q, w))) =
-                RegistryPackage::from_key(&a).zip(RegistryPackage::from_key(&b))
-            else {
-                continue;
-            };
-            if p != q || v == w {
-                continue;
-            }
-            let mut edges = Vec::new();
-            let mut domains = Vec::new();
-            for (owner, version) in [(left.0, v), (right.0, w)] {
-                let edge = (Owner::Snapshot(owner.to_owned()), alias.clone());
-                if let Some(d) = demands
-                    .get(&edge)
-                    .filter(|d| d.package == p && d.selected == version)
-                {
-                    domains.push(
-                        d.versions
-                            .iter()
-                            .map(String::as_str)
-                            .chain([version])
-                            .collect::<BTreeSet<_>>(),
-                    );
-                    edges.push(edge);
-                } else {
-                    domains.push(BTreeSet::from([version]));
-                }
-            }
-            if edges.is_empty() {
-                continue;
-            }
-            let mut versions: Vec<_> = domains[0]
-                .intersection(&domains[1])
-                .map(|v| v.to_string())
-                .collect();
-            // Try the two already witnessed resolutions before other eligible releases.
-            versions.sort_by_key(|x| {
-                if x == v {
-                    2
-                } else if x == w {
-                    1
-                } else {
-                    0
-                }
-            });
-            equalities.push((edges, versions));
+    for (group, alias, old) in graph::snapshot_dependencies(left.1) {
+        if !ordinary.contains_key(alias) {
+            continue;
         }
+        let Some((a, b)) = old.as_str().zip(right.1[group][alias].as_str()) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        let key = |pin: &str| {
+            if RegistryPackage::from_key(pin).is_some() {
+                pin.to_owned()
+            } else {
+                graph::snapshot_key(alias, pin, None)
+            }
+        };
+        let a = key(a);
+        let b = key(b);
+        let Some(((p, v), (q, w))) =
+            RegistryPackage::from_key(&a).zip(RegistryPackage::from_key(&b))
+        else {
+            continue;
+        };
+        if p != q || v == w {
+            continue;
+        }
+        let mut edges = Vec::new();
+        let mut domains = Vec::new();
+        for (owner, version) in [(left.0, v), (right.0, w)] {
+            let edge = (Owner::Snapshot(owner.to_owned()), alias.clone());
+            if let Some(d) = demands
+                .get(&edge)
+                .filter(|d| d.package == p && d.selected == version)
+            {
+                domains.push(
+                    d.versions
+                        .iter()
+                        .map(String::as_str)
+                        .chain([version])
+                        .collect::<BTreeSet<_>>(),
+                );
+                edges.push(edge);
+            } else {
+                domains.push(BTreeSet::from([version]));
+            }
+        }
+        if edges.is_empty() {
+            continue;
+        }
+        let mut versions: Vec<_> = domains[0]
+            .intersection(&domains[1])
+            .map(|v| v.to_string())
+            .collect();
+        // Try the two already witnessed resolutions before other eligible releases.
+        versions.sort_by_key(|x| {
+            if x == v {
+                2
+            } else if x == w {
+                1
+            } else {
+                0
+            }
+        });
+        equalities.push((edges, versions));
     }
     equalities
 }

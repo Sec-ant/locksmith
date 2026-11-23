@@ -18,11 +18,10 @@ pub fn run(
     stdout: bool,
     explicit: Option<Version>,
     runtime: hooks::Runtime,
-    exhaustive: bool,
 ) -> Result<()> {
     let previous = working_file("pnpm-lock.yaml")?
         .ok_or("generate requires an existing pnpm-lock.yaml in the workspace root")?;
-    let old = Lockfile::parse_generation_input(previous.clone())?;
+    let old = Lockfile::try_from(previous.clone())?;
     let root =
         workspace::read_manifest(".", working_file)?.ok_or("missing root package manifest")?;
     let declared = workspace::pnpm_version(&root);
@@ -58,9 +57,7 @@ pub fn run(
     let patches = workspace::patches(&config, "", working_file)?;
     let manifests =
         Members::for_generation(&project, version.as_ref())?.filesystem_manifests(&project.root)?;
-    let mut input = GenerateContext::new(&manifests, &project.config)
-        .with_patches(&patches)
-        .with_exhaustive(exhaustive);
+    let mut input = GenerateContext::new(&manifests, &project.config).with_patches(&patches);
     if let Some(version) = &version {
         input = input.with_pnpm_version(version);
     }
@@ -76,34 +73,30 @@ pub fn run(
     };
     let text = match project.config["lockfile"]["format"].as_str() {
         None | Some("v9") => result.to_yaml()?,
-        Some("v13") if version.as_ref().is_some_and(|v| v.major() == 12) => result.to_pnpm_v13()?,
         Some(format) => {
-            return Err(format!(
-                "lockfile.format {format} requires a supported pnpm version and format"
-            )
-            .into());
+            return Err(format!("lockfile.format {format} is not supported").into());
         }
     };
     if stdout {
         io::stdout().lock().write_all(text.as_bytes())?;
     } else {
         let path = Path::new("pnpm-lock.yaml");
-        // Hooks and registry requests can take long enough for another writer
-        // to replace the lockfile. Refuse to overwrite a lock this run did not read.
-        let current = working_file("pnpm-lock.yaml")?;
-        if current.as_deref() != Some(previous.as_str()) {
-            return Err("pnpm-lock.yaml changed during generation; run generate again".into());
-        }
-        if previous != text {
-            // The private temporary file takes the lockfile's mode only after
-            // its contents are written.
+        let replacement = if previous != text {
+            // Preserve the lockfile mode without exposing the partial contents.
             let mut file = tempfile::NamedTempFile::new_in(".")?;
             file.write_all(text.as_bytes())?;
             file.as_file()
                 .set_permissions(path.metadata()?.permissions())?;
-            if working_file("pnpm-lock.yaml")?.as_deref() != Some(previous.as_str()) {
-                return Err("pnpm-lock.yaml changed during generation; run generate again".into());
-            }
+            Some(file)
+        } else {
+            None
+        };
+        // Hooks and registry requests can take long enough for another writer
+        // to replace the lockfile. Refuse to overwrite a lock this run did not read.
+        if working_file("pnpm-lock.yaml")?.as_deref() != Some(previous.as_str()) {
+            return Err("pnpm-lock.yaml changed during generation; run generate again".into());
+        }
+        if let Some(file) = replacement {
             file.persist(path)?;
         }
     }

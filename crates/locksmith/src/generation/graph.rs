@@ -1,5 +1,5 @@
 use std::{
-    borrow::Cow,
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
@@ -26,88 +26,9 @@ fn inject_workspace_dependency(
     !specifier.starts_with("link:") && crate::workspace_links::injected(name, manifest, config)
 }
 
-fn published_declarations<'a>(
-    raw: &'a Value,
-    key: &str,
-    dir: &str,
-    rules: &'a manifest::Overrides<'_>,
-    config: &WorkspaceConfig,
-) -> Result<Vec<(&'static str, &'a str, Cow<'a, str>)>> {
-    let bundle = raw
-        .get("bundledDependencies")
-        .or_else(|| raw.get("bundleDependencies"));
-    // pnpm 9.15.1 removed a package's own name from its peer requirements.
-    let exclude_self = config
-        .pnpm_version
-        .as_ref()
-        .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
-    let own_name = raw["name"].as_str();
-    let ignored = config
-        .resolution
-        .ignored_optional_dependencies
-        .as_ref()
-        .and_then(Value::as_array);
-    let mut declarations = Vec::new();
-    for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
-        let Some(entries) = raw.get(group) else {
-            continue;
-        };
-        for (name, value) in entries
-            .as_object()
-            .ok_or_else(|| reconcile::missing(&[key, group], "expected a dependency mapping"))?
-        {
-            let value = value.as_str().ok_or_else(|| {
-                reconcile::missing(&[key, group, name], "expected a dependency selector")
-            })?;
-            let replacement = rules.select(raw, name, value)?;
-            let spec = match replacement {
-                Some(value) => rules.resolve(dir, name, value)?,
-                None => Some(Cow::Borrowed(value)),
-            };
-            let Some(spec) = spec else {
-                continue;
-            };
-            if group == "peerDependencies"
-                && (replacement.is_none() || manifest::valid_peer_range(&spec))
-            {
-                if !exclude_self || own_name != Some(name) {
-                    declarations.push((group, name.as_str(), spec));
-                }
-                continue;
-            }
-            if (group == "dependencies" && raw["optionalDependencies"].get(name).is_some())
-                || (group == "optionalDependencies"
-                    && ignored.is_some_and(|a| a.iter().any(|v| v == name)))
-                || bundle.is_some_and(|v| {
-                    v == true || v.as_array().is_some_and(|a| a.iter().any(|v| v == name))
-                })
-            {
-                continue;
-            }
-            let group = if group == "peerDependencies" {
-                "dependencies"
-            } else {
-                group
-            };
-            declarations.push((group, name.as_str(), spec));
-        }
-    }
-    // Optional metadata alone can declare a peer without a selector.
-    let fallback = super::peers::records_fallback_peers(config);
-    for (name, meta) in graph::section(raw, "peerDependenciesMeta")
-        .into_iter()
-        .flatten()
-    {
-        if meta["optional"] == true
-            && raw["peerDependencies"].get(name).is_none()
-            && (!exclude_self || own_name != Some(name))
-            && raw["optionalDependencies"].get(name).is_none()
-            && (fallback || raw["dependencies"].get(name).is_none())
-        {
-            declarations.push(("peerDependencies", name, Cow::Borrowed("*")));
-        }
-    }
-    Ok(declarations)
+struct Publication {
+    source: Rc<SourceManifest>,
+    declarations: Rc<reconcile::published::PublishedDeclarations>,
 }
 
 pub(super) struct Sources<'a> {
@@ -255,35 +176,34 @@ impl<'a> Sources<'a> {
             }
             Ok(())
         };
-        if !self.releases.contains_key(key) {
+        if let Some(release) = self.releases.get(key) {
+            verify(release)?;
+        } else {
             let (name, locator) = manifest::selector(key);
             let locator = locator.expect("locked source locator");
             let release = self.source.locked_source(name, locator, resolution)?;
-            if release.key != key {
-                return Err(reconcile::missing(
-                    &[key],
-                    format!("source manifest identifies {}", release.key),
-                ));
-            }
             verify(&release)?;
-            self.insert_release(release)?;
-        } else {
-            verify(&self.releases[key])?;
+            self.insert_requested_release(key, release)?;
         }
         Ok(&self.releases[key])
     }
+
+    fn insert_requested_release(&mut self, key: &str, release: SourceManifest) -> Result<()> {
+        if release.key != key {
+            return Err(reconcile::missing(
+                &[key],
+                format!("source manifest identifies {}", release.key),
+            ));
+        }
+        self.insert_release(release)
+    }
+
     pub(super) fn release(&mut self, key: &str) -> Result<&Rc<SourceManifest>> {
         if !self.releases.contains_key(key) {
             let (package, version) = RegistryPackage::from_key(key)
                 .ok_or_else(|| reconcile::missing(&[key], "source manifest required"))?;
             let release = self.source.release(&package, version)?;
-            if release.key != key {
-                return Err(reconcile::missing(
-                    &[key],
-                    "publication has a different source identity",
-                ));
-            }
-            self.insert_release(release)?;
+            self.insert_requested_release(key, release)?;
         }
         Ok(&self.releases[key])
     }
@@ -313,7 +233,6 @@ pub(super) struct Node {
     pub body: Value,
     pub patch: Option<String>,
     pub reused: bool,
-    historical_edges_match: std::cell::OnceCell<bool>,
 }
 
 pub(super) struct Draft {
@@ -339,6 +258,8 @@ struct Expansions {
 /// Workspace and incumbent indices are immutable across alternative release assignments.
 pub(super) struct Baseline<'a> {
     manifests: &'a BTreeMap<String, Value>,
+    declarations: BTreeMap<&'a str, manifest::Declarations<'a>>,
+    publications: RefCell<BTreeMap<(String, String), Publication>>,
     config: &'a WorkspaceConfig,
     header: &'a Value,
     old: &'a Value,
@@ -349,12 +270,14 @@ pub(super) struct Baseline<'a> {
     // Keep the incumbent instance when consumers of the same release had different children.
     locked: BTreeMap<RegistryPackage, BTreeMap<String, Vec<String>>>,
     matching: std::cell::RefCell<BTreeMap<(RegistryPackage, String), Vec<String>>>,
-    incomplete: std::cell::RefCell<Option<(u64, BTreeSet<String>)>>,
     expansions: std::cell::RefCell<Expansions>,
     partition: super::incremental::Partition<'a>,
+    history_validation: RefCell<Option<history::Validation<'a>>>,
     // Locked releases whose recorded declarations may disagree with the
     // compatibility database under the current setting.
     compat_candidates: BTreeSet<&'a str>,
+    // Settings that rewrite published declarations without appearing in their records.
+    declaration_inputs_changed: bool,
 }
 
 impl<'a> Baseline<'a> {
@@ -364,7 +287,7 @@ impl<'a> Baseline<'a> {
         header: &'a Value,
         old: &'a Value,
         cache: &Sources<'_>,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut locked = BTreeMap::<RegistryPackage, BTreeMap<String, Vec<String>>>::new();
         for snapshot in graph::section(old, "snapshots")
             .into_iter()
@@ -389,11 +312,13 @@ impl<'a> Baseline<'a> {
                         &package.name,
                         version,
                         record,
-                        snapshots
+                        locked
+                            .get(&package)
+                            .and_then(|releases| releases.get(version))
                             .into_iter()
                             .flatten()
-                            .filter(|(snapshot, _)| graph::package_key(snapshot) == *key)
-                            .map(|(_, body)| body),
+                            .filter(|snapshot| graph::package_key(snapshot) == *key)
+                            .filter_map(|snapshot| snapshots?.get(snapshot)),
                     )
                 })
             })
@@ -401,22 +326,99 @@ impl<'a> Baseline<'a> {
             .collect();
         let rules = manifest::Overrides::new(header, config);
         let same_override_rules = manifest::Overrides::new(old, config).same_rules(&rules);
-        Self {
+        let declarations = manifests
+            .iter()
+            .map(|(id, raw)| Ok((id.as_str(), manifest::declarations(raw, &rules, id)?)))
+            .collect::<Result<_>>()?;
+        Ok(Self {
             manifests,
+            declarations,
+            publications: Default::default(),
             config,
             header,
             old,
             locked,
             matching: Default::default(),
             expansions: Default::default(),
-            incomplete: Default::default(),
             rules,
             same_override_rules,
             links: WorkspaceLinks::new(manifests, config),
             changed_overrides: super::incremental::changed_overrides(old, header),
             partition: super::incremental::Partition::new(old, config),
+            history_validation: Default::default(),
             compat_candidates,
+            declaration_inputs_changed: [
+                "packageExtensionsChecksum",
+                "ignoredOptionalDependencies",
+                "pnpmfileChecksum",
+            ]
+            .iter()
+            .any(|f| old.get(*f) != header.get(*f))
+                || old["settings"].get("addMissingPeerTypes")
+                    != header["settings"].get("addMissingPeerTypes"),
+        })
+    }
+    /// Prepare publication evidence in one batch for the locked releases that
+    /// importers with unchanged declarations still reach.
+    pub fn prepare_importer_pins(&self, cache: &mut Sources<'_>) -> Result<()> {
+        let snapshots = graph::section(self.old, "snapshots");
+        let history = self.partition.history();
+        let mut pending = Vec::new();
+        for (&id, declarations) in &self.declarations {
+            for (&name, (_, spec)) in declarations {
+                if let Some(old) = importer_pin(self.old, id, name)
+                    && old["specifier"] == spec.as_ref()
+                    && let Some(pin) = old["version"].as_str()
+                    && let Some(root) = history
+                        .snapshots
+                        .get_index_of(graph::snapshot_key(name, pin, snapshots).as_str())
+                {
+                    pending.push(root);
+                }
+            }
         }
+        let mut seen = vec![false; history.snapshots.len()];
+        let mut packages = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if std::mem::replace(&mut seen[id], true) {
+                continue;
+            }
+            let node = &history.snapshots[id];
+            if let Some((package, _)) = RegistryPackage::from_key(node.package) {
+                packages.insert(package);
+            }
+            pending.extend(&node.children);
+        }
+        cache.source.prepare_pins(&packages)
+    }
+    fn publication(
+        &self,
+        dir: &str,
+        release: &Rc<SourceManifest>,
+    ) -> Result<Rc<reconcile::published::PublishedDeclarations>> {
+        // Overrides may resolve paths relative to the package's directory.
+        let key = (release.key.clone(), dir.to_owned());
+        let mut publications = self.publications.borrow_mut();
+        if let Some(cached) = publications.get(&key)
+            && Rc::ptr_eq(&cached.source, release)
+        {
+            return Ok(Rc::clone(&cached.declarations));
+        }
+        let declarations = Rc::new(reconcile::published::published_declarations(
+            &release.manifest,
+            &release.key,
+            dir,
+            &self.rules,
+            self.config,
+        )?);
+        publications.insert(
+            key,
+            Publication {
+                source: Rc::clone(release),
+                declarations: Rc::clone(&declarations),
+            },
+        );
+        Ok(declarations)
     }
     fn matching(&self, package: &RegistryPackage, selector: &str) -> Vec<String> {
         let Some(locked) = self.locked.get(package) else {
@@ -442,13 +444,19 @@ impl<'a> Baseline<'a> {
     }
 }
 
-pub(super) struct Build<'a, 's> {
+fn importer_pin<'a>(old: &'a Value, id: &str, name: &str) -> Option<&'a Value> {
+    manifest::GROUPS
+        .iter()
+        .find_map(|group| old["importers"][id][group].get(name))
+}
+
+pub(super) struct Build<'a, 'b, 's> {
     cache: &'a mut Sources<'s>,
-    pub manifests: &'a BTreeMap<String, Value>,
-    pub config: &'a WorkspaceConfig,
-    header: &'a Value,
-    pub(super) old: &'a Value,
-    base: &'a Baseline<'a>,
+    pub manifests: &'b BTreeMap<String, Value>,
+    pub config: &'b WorkspaceConfig,
+    header: &'b Value,
+    pub(super) old: &'b Value,
+    base: &'a Baseline<'b>,
     pins: &'a Choices,
     pinned_snapshots: BTreeSet<&'a str>,
     pub demands: Demands,
@@ -458,20 +466,18 @@ pub(super) struct Build<'a, 's> {
     reopened: BTreeSet<String>,
     pub used_interior_history: bool,
     pub project_interiors: bool,
-    pub exhaustive: bool,
     pub prefer_historical_peers: bool,
     pub(super) seeded_history: bool,
     /// pnpm reads every manifest again once the lockfile is out of date.
     rereads_manifests: bool,
     pub allow_optional_peers: bool,
     pub optional_peer_collision: bool,
-    pub empty_domain: bool,
     local_dirs: BTreeMap<String, String>,
     pending: BTreeSet<String>,
 }
 
-impl<'a, 's> Build<'a, 's> {
-    pub fn new(cache: &'a mut Sources<'s>, base: &'a Baseline<'a>, pins: &'a Choices) -> Self {
+impl<'a, 'b, 's> Build<'a, 'b, 's> {
+    pub fn new(cache: &'a mut Sources<'s>, base: &'a Baseline<'b>, pins: &'a Choices) -> Self {
         Self {
             cache,
             base,
@@ -496,13 +502,11 @@ impl<'a, 's> Build<'a, 's> {
             reopened: BTreeSet::new(),
             used_interior_history: false,
             project_interiors: false,
-            exhaustive: false,
             prefer_historical_peers: false,
             seeded_history: false,
             rereads_manifests: true,
             allow_optional_peers: true,
             optional_peer_collision: false,
-            empty_domain: false,
         }
     }
     pub fn resolve(&mut self) -> Result<Draft> {
@@ -523,11 +527,9 @@ impl<'a, 's> Build<'a, 's> {
                 }
             }
             let mut deps = Dependencies::new();
-            for (name, (group, spec)) in manifest::declarations(raw, &self.base.rules, id)? {
-                let old = manifest::GROUPS
-                    .iter()
-                    .find_map(|g| self.old["importers"][id][g].get(name));
-                let target = self.select(Owner::Importer(id.clone()), id, raw, name, &spec, old)?;
+            for (&name, &(group, ref spec)) in &self.base.declarations[id.as_str()] {
+                let old = importer_pin(self.old, id, name);
+                let target = self.select(Owner::Importer(id.clone()), id, raw, name, spec, old)?;
                 importer[group][name] = json!({"specifier":spec,"version":""});
                 if let Some(catalog) = spec.strip_prefix("catalog:") {
                     let catalog = if catalog.is_empty() {
@@ -543,7 +545,7 @@ impl<'a, 's> Build<'a, 's> {
                         (true, _) => Some(
                             self.base
                                 .links
-                                .resolve_for_generation(name, &spec, id, raw, true)?
+                                .resolve_for_generation(name, spec, id, raw, true)?
                                 .and_then(|(_, member)| member?.get("version")?.as_str())
                                 .unwrap_or(declared),
                         ),
@@ -624,7 +626,6 @@ impl<'a, 's> Build<'a, 's> {
         self.demands.clear();
         self.equalities.clear();
         self.blocked_parent = None;
-        self.empty_domain = false;
         true
     }
 
@@ -664,19 +665,7 @@ impl<'a, 's> Build<'a, 's> {
         let inject =
             local.is_some() && inject_workspace_dependency(name, parent, spec, self.config);
         if let Some((target, member)) = &local {
-            let path = target.strip_prefix("link:").expect("workspace link");
-            let already_local = if inject {
-                old_key
-                    .and_then(|key| manifest::selector(graph::package_key(key)).1)
-                    .and_then(|locator| locator.strip_prefix("file:"))
-                    == Some(path)
-            } else {
-                old_ref
-                    .and_then(|pin| pin.strip_prefix("link:"))
-                    .is_some_and(|old| {
-                        workspace_links::member_target(dir, old, self.config) == path
-                    })
-            };
+            let already_local = self.links_to(dir, target, inject, old_ref, old_key);
             if already_local
                 || spec.starts_with("workspace:")
                 || spec.starts_with("link:")
@@ -686,7 +675,6 @@ impl<'a, 's> Build<'a, 's> {
             }
         }
         if spec.starts_with("workspace:") {
-            self.empty_domain = true;
             if let Owner::Snapshot(parent) = &owner {
                 self.blocked_parent = Some(graph::package_key(parent).to_owned());
             }
@@ -758,7 +746,7 @@ impl<'a, 's> Build<'a, 's> {
             locked.push(v.into());
         }
         let incumbent = incumbent.filter(|v| locked.iter().any(|s| s == v));
-        let versions = if locked.is_empty() || self.exhaustive {
+        let versions = if locked.is_empty() {
             let mut eligible = match self.cache.versions(&package, selector, direct) {
                 Ok(versions) => versions.to_vec(),
                 // pnpm falls back to a matching workspace package when registry lookup fails.
@@ -790,7 +778,6 @@ impl<'a, 's> Build<'a, 's> {
             return self.workspace_target(target, Some(member), inject, old_key);
         }
         if versions.is_empty() {
-            self.empty_domain = true;
             if let Owner::Snapshot(parent) = &edge.0 {
                 self.blocked_parent = Some(graph::package_key(parent).to_owned());
             }
@@ -814,13 +801,11 @@ impl<'a, 's> Build<'a, 's> {
             .is_none_or(|previous| previous.natural.as_deref() == Some(natural))
             .then(|| natural.to_owned());
         if !versions.contains(&choice)
-            && (self.exhaustive
-                || !self
-                    .cache
-                    .versions(&package, selector, direct)?
-                    .contains(&choice))
+            && !self
+                .cache
+                .versions(&package, selector, direct)?
+                .contains(&choice)
         {
-            self.empty_domain = true;
             return Err(reconcile::missing(
                 &[&package.name],
                 format!("{choice} is ineligible for {selector}"),
@@ -848,6 +833,87 @@ impl<'a, 's> Build<'a, 's> {
         );
         self.pending.insert(key.clone());
         Ok(key)
+    }
+
+    /// Whether a recorded pin names the workspace member at `target`, as its
+    /// linked directory or as its injected copy.
+    fn links_to(
+        &self,
+        dir: &str,
+        target: &str,
+        inject: bool,
+        pin: Option<&str>,
+        key: Option<&str>,
+    ) -> bool {
+        let path = target.strip_prefix("link:").expect("workspace link");
+        if inject {
+            key.and_then(|key| manifest::selector(graph::package_key(key)).1)
+                .and_then(|locator| locator.strip_prefix("file:"))
+                == Some(path)
+        } else {
+            pin.and_then(|pin| pin.strip_prefix("link:"))
+                .is_some_and(|old| workspace_links::member_target(dir, old, self.config) == path)
+        }
+    }
+
+    /// Whether a published release's recorded child still satisfies its
+    /// declaration, under the rules `select` uses to keep an incumbent.
+    pub(super) fn keeps_pin(
+        &mut self,
+        parent: &Value,
+        name: &str,
+        spec: &str,
+        pin: &str,
+    ) -> Result<bool> {
+        let key = graph::snapshot_key(name, pin, graph::section(self.old, "snapshots"));
+        if spec.starts_with("workspace:") {
+            let Some((target, _)) = self
+                .base
+                .links
+                .resolve_for_generation(name, spec, ".", parent, false)?
+            else {
+                return Ok(false);
+            };
+            let inject = inject_workspace_dependency(name, parent, spec, self.config);
+            return Ok(self.links_to(".", &target, inject, Some(pin), Some(&key)));
+        }
+        if let Some((package, selector)) = self.cache.registry_selector(name, spec)? {
+            let Some((_, version)) =
+                RegistryPackage::from_key(&key).filter(|(locked, _)| *locked == package)
+            else {
+                return Ok(false);
+            };
+            return Ok(match selector.parse::<node_semver::Range>() {
+                // The resolver keeps any locked release for `*`, prereleases included.
+                _ if selector == "*" => true,
+                Ok(range) => version
+                    .parse::<node_semver::Version>()
+                    .is_ok_and(|v| v.satisfies(&range)),
+                // A dist-tag keeps the release the registry currently selects.
+                Err(_) => self
+                    .cache
+                    .versions(&package, &selector, false)?
+                    .first()
+                    .is_some_and(|tagged| tagged == version),
+            });
+        }
+        let locator = if pin.starts_with("link:") {
+            pin
+        } else {
+            manifest::selector(graph::package_key(&key))
+                .1
+                .unwrap_or_default()
+        };
+        Ok(spec == locator
+            || ["file:", "link:"].into_iter().any(|protocol| {
+                spec.strip_prefix(protocol)
+                    .zip(locator.strip_prefix(protocol))
+                    .is_some_and(|(path, locked)| {
+                        !path.starts_with('/')
+                            && path.as_bytes().get(1) != Some(&b':')
+                            && graph::linked_importer(".", path) == locked
+                    })
+            }))
     }
 
     fn workspace_target(
@@ -1052,7 +1118,7 @@ impl<'a, 's> Build<'a, 's> {
     pub fn expand(&mut self, draft: &mut Draft) -> Result<()> {
         while !self.pending.is_empty() {
             let frontier = std::mem::take(&mut self.pending);
-            if self.cache.reads_packages() || self.exhaustive {
+            if self.cache.reads_packages() {
                 let releases = frontier
                     .iter()
                     .filter(|key| {
@@ -1073,7 +1139,7 @@ impl<'a, 's> Build<'a, 's> {
     pub fn reads_packages(&self) -> bool {
         self.cache.reads_packages()
     }
-    pub fn partition(&self) -> &'a super::incremental::Partition<'a> {
+    pub fn partition(&self) -> &'a super::incremental::Partition<'b> {
         &self.base.partition
     }
 
@@ -1090,8 +1156,7 @@ impl<'a, 's> Build<'a, 's> {
                 continue;
             }
             let base = graph::package_key(&key);
-            let natural = !self.exhaustive
-                && !self.pinned_snapshots.contains(key.as_str())
+            let natural = !self.pinned_snapshots.contains(key.as_str())
                 && !self.local_dirs.contains_key(base);
             if natural && let Some(prior) = expansions.natural.get(&key) {
                 self.demands.extend(prior.demands.iter().cloned());
@@ -1103,11 +1168,13 @@ impl<'a, 's> Build<'a, 's> {
             let original = &self.old["snapshots"][&key];
             let mut edges = Dependencies::new();
             let mut body = json!({});
-            let locator = manifest::selector(base).1.unwrap_or_default();
-            let local = locator.strip_prefix("file:");
+            let (package_name, locator) = manifest::selector(base);
+            let local = locator.and_then(|locator| locator.strip_prefix("file:"));
             if let Some(path) = local {
                 if !self.cache.releases.contains_key(base) {
-                    let key = self.cache.other(".", manifest::selector(base).0, locator)?;
+                    let key =
+                        self.cache
+                            .other(".", package_name, locator.expect("file locator"))?;
                     if key != base {
                         return Err(reconcile::missing(
                             &[base],
@@ -1121,103 +1188,89 @@ impl<'a, 's> Build<'a, 's> {
                     self.local_dirs.insert(base.to_owned(), path.to_owned());
                 }
             }
-            let needs_expansion = self.exhaustive
-                || self.cache.reads_packages()
+            let needs_expansion = self.cache.reads_packages()
                 || original.is_null()
                 || !record.is_object()
                 || local.is_some()
                 || (self.rereads_manifests && self.base.compat_candidates.contains(base));
-            let can_reuse = !needs_expansion
+            let mut can_reuse = !needs_expansion
+                && !self.base.declaration_inputs_changed
                 && (self.base.same_override_rules
                     || self.base.changed_overrides.as_ref().is_some_and(|changed| {
                         !super::incremental::observes_override(&record, original, changed)
-                    }))
-                && [
-                    "packageExtensionsChecksum",
-                    "ignoredOptionalDependencies",
-                    "pnpmfileChecksum",
-                ]
-                .iter()
-                .all(|f| self.old.get(*f) == self.header.get(*f));
-            let mut can_reuse = can_reuse;
-            can_reuse &= self.old["settings"].get("addMissingPeerTypes")
-                == self.header["settings"].get("addMissingPeerTypes");
+                    }));
+            let snapshots = graph::section(self.old, "snapshots");
             if can_reuse {
-                for group in ["dependencies", "optionalDependencies"] {
-                    for (name, pin) in graph::section(original, group).into_iter().flatten() {
-                        if let Some(pin) = pin.as_str()
-                            && let Some((package, version)) =
-                                RegistryPackage::from_key(&graph::snapshot_key(
-                                    name,
-                                    pin,
-                                    graph::section(self.old, "snapshots"),
-                                ))
-                            && !self.cache.accepts_pin(&package, version, false)?
-                        {
-                            can_reuse = false;
-                            break;
+                let providers = record.get("peerDependencies").and_then(|_| {
+                    reconcile::published::records_fallback_peers(self.config)
+                        .then(|| crate::peer::explicit_bindings(&key))
+                        .flatten()
+                });
+                for (group, name, value) in graph::snapshot_dependencies(original) {
+                    let target = value.as_str().map(|pin| {
+                        if pin.starts_with("link:") {
+                            pin.to_owned()
+                        } else {
+                            graph::snapshot_key(name, pin, snapshots)
                         }
-                    }
-                    if !can_reuse {
+                    });
+                    if let Some((package, version)) =
+                        target.as_deref().and_then(RegistryPackage::from_key)
+                        && !self.cache.accepts_pin(&package, version, false)?
+                    {
+                        edges.clear();
+                        can_reuse = false;
                         break;
                     }
+                    if record["peerDependencies"].get(name).is_some()
+                        && (package_name == name
+                            || providers
+                                .as_ref()
+                                .is_none_or(|p| p.contains_key(name.as_str())))
+                    {
+                        continue;
+                    }
+                    let target = target.ok_or_else(|| {
+                        reconcile::missing(&[&key, group, name], "expected a resolved reference")
+                    })?;
+                    edges.insert(
+                        name.clone(),
+                        Dependency {
+                            group,
+                            target,
+                            locked: false,
+                        },
+                    );
                 }
             }
             if can_reuse {
+                self.pending.extend(
+                    edges
+                        .values()
+                        .filter(|edge| !edge.target.starts_with("link:"))
+                        .map(|edge| edge.target.clone()),
+                );
                 body = original.clone();
-                for f in [
+                let fields = body.as_object_mut().expect("snapshot mapping");
+                for field in [
                     "dependencies",
                     "optionalDependencies",
                     "transitivePeerDependencies",
                     "optional",
                 ] {
-                    body.as_object_mut().expect("snapshot mapping").remove(f);
-                }
-                for group in ["dependencies", "optionalDependencies"] {
-                    for (name, v) in graph::section(original, group).into_iter().flatten() {
-                        if record["peerDependencies"].get(name).is_some() {
-                            let supplied_by_package =
-                                super::peers::records_fallback_peers(self.config)
-                                    && manifest::selector(base).0 != name
-                                    && crate::peer::explicit_bindings(&key).is_some_and(
-                                        |bindings| !bindings.contains_key(name.as_str()),
-                                    );
-                            if !supplied_by_package {
-                                continue;
-                            }
-                        }
-                        let pin = v.as_str().ok_or_else(|| {
-                            reconcile::missing(
-                                &[&key, group, name],
-                                "expected a resolved reference",
-                            )
-                        })?;
-                        let target = if pin.starts_with("link:") {
-                            pin.to_owned()
-                        } else {
-                            graph::snapshot_key(name, pin, graph::section(self.old, "snapshots"))
-                        };
-                        if !target.starts_with("link:") {
-                            self.pending.insert(target.clone());
-                        }
-                        edges.insert(
-                            name.clone(),
-                            Dependency {
-                                group,
-                                target,
-                                locked: false,
-                            },
-                        );
-                    }
+                    fields.remove(field);
                 }
             } else {
-                if local.is_none()
-                    && RegistryPackage::from_key(base).is_none()
-                    && manifest::selector(base).1.is_some()
-                {
-                    self.cache.locked_source(base, &record["resolution"])?;
-                }
-                let release = Rc::clone(self.cache.release(base)?);
+                let release = Rc::clone(
+                    if local.is_none()
+                        && locator.is_some()
+                        && RegistryPackage::from_key(base).is_none()
+                    {
+                        self.cache.locked_source(base, &record["resolution"])?
+                    } else {
+                        self.cache.release(base)?
+                    },
+                );
                 let mut resolution = std::borrow::Cow::Borrowed(&release.resolution);
                 if local.is_none()
                     && let Some(hash) = record["resolution"].get("integrity")
@@ -1254,23 +1307,21 @@ impl<'a, 's> Build<'a, 's> {
                     .get(base)
                     .cloned()
                     .unwrap_or_else(|| ".".into());
-                for (group, name, spec) in
-                    published_declarations(raw, base, &dir, &self.base.rules, self.config)?
-                {
-                    if group == "peerDependencies" {
-                        record[group][name] = spec.as_ref().into();
-                        if raw["peerDependenciesMeta"][name]["optional"] == true {
-                            record["peerDependenciesMeta"][name] = json!({"optional":true});
-                        }
-                        continue;
+                let declarations = self.base.publication(&dir, &release)?;
+                for (name, (spec, optional)) in &declarations.peers {
+                    record["peerDependencies"][name] = spec.as_str().into();
+                    if *optional {
+                        record["peerDependenciesMeta"][name] = json!({"optional":true});
                     }
+                }
+                for (name, &(group, ref spec)) in &declarations.ordinary {
                     let old = graph::dependency(original, name).map(|(_, v)| json!({"version":v}));
                     let target = self.select(
                         Owner::Snapshot(key.clone()),
                         &dir,
                         raw,
                         name,
-                        &spec,
+                        spec,
                         old.as_ref(),
                     )?;
                     edges.insert(
@@ -1282,7 +1333,7 @@ impl<'a, 's> Build<'a, 's> {
                         },
                     );
                 }
-                let fallback = super::peers::records_fallback_peers(self.config);
+                let fallback = reconcile::published::records_fallback_peers(self.config);
                 // Before pnpm recorded fallback peers, a release's own dependency
                 // served a peer unless pnpm first reached the release under a
                 // provider. The previous record shows that outcome for a release
@@ -1347,7 +1398,6 @@ impl<'a, 's> Build<'a, 's> {
                 body,
                 patch,
                 reused: can_reuse,
-                historical_edges_match: Default::default(),
             });
             let children = std::mem::take(&mut self.pending);
             if natural

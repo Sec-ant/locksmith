@@ -117,8 +117,6 @@ export interface WorkspaceOptions {
 export type HookRuntime = 'node' | 'embedded' | 'off'
 export interface GenerateWorkspaceOptions extends WorkspaceOptions {
   pnpmVersion?: string
-  /** Search every eligible assignment of registry releases. */
-  exhaustive?: boolean
   /** Node runs hooks in a separate process of this Node executable. Embedded requires a feature-enabled CLI. */
   hookRuntime?: HookRuntime
 }

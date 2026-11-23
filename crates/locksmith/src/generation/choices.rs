@@ -59,27 +59,6 @@ enum Frame {
 }
 
 impl Agenda {
-    /// Partition extensions on one active undecided edge. Trying the selected
-    /// version as well as its alternatives covers cases where later decisions
-    /// change the subtree. Root decisions precede time-dependent transitive ones.
-    pub fn split(&mut self, pins: &Choices, demands: &Demands) {
-        let edge = demands
-            .iter()
-            .filter(|(e, d)| !pins.contains_key(*e) && d.versions.len() > 1)
-            .min_by_key(|(e, d)| (matches!(e.0, Owner::Snapshot(_)), d.versions.len()));
-        if let Some((edge, demand)) = edge {
-            let mut versions: Vec<_> = demand
-                .versions
-                .iter()
-                .rev()
-                .filter(|v| **v != demand.selected)
-                .cloned()
-                .collect();
-            versions.push(demand.selected.clone());
-            self.alternatives(pins, vec![(edge.clone(), versions)]);
-        }
-    }
-
     pub fn candidate(&mut self, pins: Choices) {
         self.0.push(Frame::Candidate(pins));
     }
@@ -294,13 +273,9 @@ pub(super) fn score(doc: &Value, old: &Value, issues: &[PeerIssue], impact: &Imp
     let touched = impact.count(doc, &unchanged);
     for (key, snapshot) in graph::section(old, "snapshots").into_iter().flatten() {
         let next = &doc["snapshots"][key];
-        for group in ["dependencies", "optionalDependencies"] {
-            edits += graph::section(snapshot, group)
-                .into_iter()
-                .flatten()
-                .filter(|(name, value)| next[group].get(*name) != Some(*value))
-                .count();
-        }
+        edits += graph::snapshot_dependencies(snapshot)
+            .filter(|(group, name, value)| next[group].get(*name) != Some(*value))
+            .count();
     }
     let packages = graph::section(doc, "packages");
     let count = packages.map_or(0, |p| p.len());
@@ -350,36 +325,22 @@ pub(super) fn ancestors(
 /// Unconditional costs for every compatible graph. Root declarations are
 /// active in every solution. Dependencies of a selectable upstream release
 /// cannot contribute a global lower bound until that release is forced.
-pub(super) fn lower_bound(
-    doc: &Value,
-    old: &Value,
-    demands: &Demands,
-    pins: &Choices,
-    complete_root_domains: bool,
-) -> Score {
-    let mut root_domains = BTreeMap::<&super::RegistryPackage, BTreeSet<&[String]>>::new();
+pub(super) fn lower_bound(doc: &Value, old: &Value, demands: &Demands) -> Score {
+    // With an old lock the fast path can see only reusable pins, and other
+    // published releases might cover more selectors together. Only exact
+    // root versions force a release.
+    let mut forced = BTreeMap::<&str, BTreeSet<(&super::RegistryPackage, &str)>>::new();
     for (edge, d) in demands {
-        if !matches!(edge.0, Owner::Importer(_)) {
-            continue;
+        if matches!(edge.0, Owner::Importer(_))
+            && d.selector.parse::<node_semver::Version>().is_ok()
+        {
+            forced
+                .entry(&d.package.name)
+                .or_default()
+                .insert((&d.package, &d.selected));
         }
-        let domain =
-            if pins.contains_key(edge) || d.selector.parse::<node_semver::Version>().is_ok() {
-                std::slice::from_ref(&d.selected)
-            } else if complete_root_domains {
-                d.versions.as_slice()
-            } else {
-                // With an old lock the fast path can see only reusable pins.
-                // Other published releases might cover more selectors together.
-                continue;
-            };
-        root_domains.entry(&d.package).or_default().insert(domain);
     }
-    let mut forced = BTreeMap::<&str, usize>::new();
-    for (source, domains) in root_domains {
-        *forced.entry(&source.name).or_default() +=
-            cover::minimum(&domains.into_iter().collect::<Vec<_>>()).len();
-    }
-    let duplicates = forced.values().map(|count| count - 1).sum();
+    let duplicates = forced.values().map(|releases| releases.len() - 1).sum();
     let mut edits = 0;
     for (id, importer) in graph::section(old, "importers").into_iter().flatten() {
         let Some(current) = doc["importers"].get(id) else {
@@ -401,7 +362,6 @@ pub(super) fn lower_bound(
                 let edge = (Owner::Importer(id.clone()), alias.clone());
                 if let Some(d) = demands.get(&edge)
                     && (pkg != d.package
-                        || pins.get(&edge).is_some_and(|v| v != version)
                         // The resolver keeps any locked release for `*`, prereleases included.
                         || d.selector != "*"
                             && d.selector.parse::<node_semver::Range>().is_ok()

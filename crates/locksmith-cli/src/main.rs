@@ -51,19 +51,10 @@ fn run(command: Command) -> Result<()> {
         }) => return driver::run(inputs.files(), &path, allow_network),
         Command::Generate {
             allow_network,
-            exhaustive,
             stdout,
             pnpm_version,
             hook_runtime,
-        } => {
-            return generation::run(
-                allow_network,
-                stdout,
-                pnpm_version,
-                hook_runtime,
-                exhaustive,
-            );
-        }
+        } => return generation::run(allow_network, stdout, pnpm_version, hook_runtime),
         Command::Converge {
             reference,
             allow_network,

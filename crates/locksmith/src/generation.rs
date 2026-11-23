@@ -246,23 +246,19 @@ pub struct GenerateContext<'a> {
     pub configuration: &'a Value,
     pub pnpm_version: Option<&'a node_semver::Version>,
     pub patches: &'a BTreeMap<String, String>,
-    /// Compare every eligible registry release assignment, including changes
-    /// to upstream releases that introduce different transitive constraints.
-    pub exhaustive: bool,
 }
 
 static NO_PATCHES: BTreeMap<String, String> = BTreeMap::new();
 
 impl<'a> GenerateContext<'a> {
     /// Workspace manifests by importer id and the effective pnpm settings,
-    /// with no target pnpm version, no patches and the incremental search.
+    /// with no target pnpm version and no patches.
     pub fn new(manifests: &'a BTreeMap<String, Value>, configuration: &'a Value) -> Self {
         Self {
             manifests,
             configuration,
             pnpm_version: None,
             patches: &NO_PATCHES,
-            exhaustive: false,
         }
     }
     /// The pnpm release whose lockfile shape and resolver rules to follow.
@@ -275,9 +271,6 @@ impl<'a> GenerateContext<'a> {
     /// Patch file contents by the path that `patchedDependencies` names.
     pub fn with_patches(self, patches: &'a BTreeMap<String, String>) -> Self {
         Self { patches, ..self }
-    }
-    pub fn with_exhaustive(self, exhaustive: bool) -> Self {
-        Self { exhaustive, ..self }
     }
 }
 
@@ -452,12 +445,6 @@ fn generate_inner<'s>(
         ));
     }
     let base = pre_resolved.as_ref().unwrap_or(original);
-    let pinned = crate::graph::section(base, "packages")
-        .into_iter()
-        .flat_map(|p| p.keys())
-        .filter_map(|key| RegistryPackage::from_key(key).map(|(pkg, _)| pkg))
-        .collect();
-    source.prepare_pins(&pinned)?;
     let mut cache = graph::Sources::new(source, hooks, extensions);
     let rules = PeerRules::from_pnpm(
         input.configuration,
@@ -473,7 +460,6 @@ fn generate_inner<'s>(
             rules: &rules,
             strict: crate::config::decode(input.configuration, "strictPeerDependencies")?
                 .unwrap_or(false),
-            exhaustive: input.exhaustive,
         },
     )?;
     format::mark_git_archives(&mut document, input.pnpm_version);
@@ -558,7 +544,6 @@ fn environment(
         Search {
             rules: &PeerRules::default(),
             strict: false,
-            exhaustive: input.exhaustive,
         },
     )?;
     let deps = std::mem::take(&mut env["importers"]["."]["dependencies"]);
@@ -592,7 +577,6 @@ fn environment(
 struct Search<'a> {
     rules: &'a PeerRules,
     strict: bool,
-    exhaustive: bool,
 }
 
 // pnpm persists publication dates only for the direct references it can look
@@ -610,11 +594,7 @@ fn solve(
     config: &WorkspaceConfig,
     header: &Value,
     old: &Value,
-    Search {
-        rules,
-        strict,
-        exhaustive,
-    }: Search<'_>,
+    Search { rules, strict }: Search<'_>,
 ) -> Result<Value> {
     // Peer suffixes rename every instance above a changed provider. An issue
     // is new only if the same release did not already report the same peer
@@ -646,7 +626,8 @@ fn solve(
         }
     };
     let impact = choices::Impact::new(old);
-    let base = graph::Baseline::new(manifests, config, header, old, cache);
+    let base = graph::Baseline::new(manifests, config, header, old, cache)?;
+    base.prepare_importer_pins(cache)?;
     let mut decisions = choices::Agenda::default();
     decisions.candidate(choices::Choices::default());
     let mut visited = BTreeSet::new();
@@ -654,9 +635,7 @@ fn solve(
     let mut best: Option<(choices::Score, Value)> = None;
     let mut failure = None;
     'search: while let Some(pins) = decisions.next() {
-        // Exact branches partition on one previously undecided edge. Their
-        // assignments are disjoint, so depth-first traversal needs no history.
-        if !exhaustive && !visited.insert(pins.clone()) {
+        if !visited.insert(pins.clone()) {
             continue;
         }
         if let Some(trace) = &best_trace
@@ -666,34 +645,23 @@ fn solve(
             continue;
         }
         let mut build = graph::Build::new(cache, &base, &pins);
-        build.exhaustive = exhaustive;
-        build.prefer_historical_peers = !strict && !exhaustive;
+        build.prefer_historical_peers = !strict;
         let mut draft;
         let attempt = loop {
             draft = match build.resolve() {
                 Ok(draft) => draft,
                 Err(e) => {
-                    if exhaustive {
-                        if !build.empty_domain {
-                            return Err(e);
-                        }
-                        decisions.split(&pins, &build.demands);
-                    }
                     failure = Some(e);
                     continue 'search;
                 }
             };
-            let retained = if strict || exhaustive {
+            let retained = if strict {
                 None
             } else {
                 build.retain_graph(&mut draft)?
             };
             let retained = if retained.is_none() {
                 match build.expand(&mut draft) {
-                    Ok(()) if !strict && !exhaustive => match build.expand_history(&mut draft) {
-                        Ok(()) => build.retain_evaluated(&mut draft)?,
-                        Err(e) => break Err(e),
-                    },
                     Ok(()) => None,
                     Err(e) => break Err(e),
                 }
@@ -712,39 +680,12 @@ fn solve(
         let mut doc = match attempt {
             Ok(doc) => doc,
             Err(e) => {
-                if exhaustive {
-                    if !build.empty_domain {
-                        return Err(e);
-                    }
-                    decisions.split(&pins, &build.demands);
-                    failure = Some(e);
-                    continue;
-                }
                 failure = Some(e);
                 decisions.equalities(&pins, build.equalities);
                 if let Some(parent) = build.blocked_parent.take() {
                     let affected = choices::ancestors(&draft, &BTreeSet::from([parent]));
                     let demands = build.demands;
-                    let mut branches = Vec::new();
-                    for (edge, demand) in &demands {
-                        if pins.contains_key(edge)
-                            || demand.selector.parse::<node_semver::Version>().is_ok()
-                            || !affected.contains(&demand.package.key(&demand.selected))
-                        {
-                            continue;
-                        }
-                        let direct = matches!(edge.0, choices::Owner::Importer(_));
-                        let alternatives: Vec<_> = cache
-                            .versions(&demand.package, &demand.selector, direct)?
-                            .iter()
-                            .rev()
-                            .filter(|v| **v != demand.selected)
-                            .cloned()
-                            .collect();
-                        if !alternatives.is_empty() {
-                            branches.push((edge.clone(), alternatives));
-                        }
-                    }
+                    let branches = alternatives(cache, demands.iter(), &pins, &affected, Err)?;
                     decisions.alternatives(&pins, branches);
                 }
                 continue;
@@ -755,8 +696,7 @@ fn solve(
         // A successful incremental graph is final unless this edit added a
         // duplicate release. Preserve the feasibility search for graph errors
         // and strict peers, where a different release can be required.
-        let incremental = !strict && !exhaustive;
-        let duplicates = incremental.then(|| choices::introduced_duplicates(&doc, old));
+        let duplicates = (!strict).then(|| choices::introduced_duplicates(&doc, old));
         if best.is_none() && duplicates.as_ref().is_some_and(BTreeSet::is_empty) {
             return Ok(doc);
         }
@@ -777,25 +717,13 @@ fn solve(
         let feasible = !strict || issues.is_empty();
         let score = choices::score(&doc, old, &issues, &impact);
         let best_so_far = feasible && best.as_ref().is_none_or(|(s, _)| &score < s);
-        if !exhaustive && feasible && !best_so_far {
+        if feasible && !best_so_far {
             decisions.complete_roots(pins, &demands);
             continue;
         }
-        let lower = choices::lower_bound(&doc, old, &demands, &choices::Choices::new(), exhaustive);
+        let lower = choices::lower_bound(&doc, old, &demands);
         if best_so_far && score == lower {
             return Ok(doc);
-        }
-        if exhaustive {
-            let branch_lower = choices::lower_bound(&doc, old, &demands, &pins, true);
-            if best_so_far {
-                best = Some((score, doc));
-            } else if !feasible && failure.is_none() {
-                failure = Some(LockfileError::UnmetPeers(issues));
-            }
-            if best.as_ref().is_none_or(|(upper, _)| branch_lower < *upper) {
-                decisions.split(&pins, &demands);
-            }
-            continue;
         }
         if !feasible && best.is_some() {
             continue;
@@ -840,29 +768,10 @@ fn solve(
         };
         // A strict peer conflict can require changing an ancestor to replace
         // its incompatible subtree.
-        let affected = &peer_affected;
-        let mut branches = Vec::new();
-        for (edge, demand) in demands.iter().rev().filter(|(edge, demand)| {
-            !pins.contains_key(*edge)
-                && affected.contains(&demand.package.key(&demand.selected))
-                && demand.selector.parse::<node_semver::Version>().is_err()
-        }) {
-            let direct = matches!(edge.0, choices::Owner::Importer(_));
-            match cache.versions(&demand.package, &demand.selector, direct) {
-                Ok(all) => {
-                    let versions: Vec<_> = all
-                        .iter()
-                        .rev()
-                        .filter(|v| **v != demand.selected)
-                        .cloned()
-                        .collect();
-                    if !versions.is_empty() {
-                        branches.push((edge.clone(), versions));
-                    }
-                }
-                Err(e) => failure = Some(e),
-            }
-        }
+        let branches = alternatives(cache, demands.iter().rev(), &pins, &peer_affected, |e| {
+            failure = Some(e);
+            Ok(())
+        })?;
         if best_so_far {
             best = Some((score, doc));
         } else if !feasible && failure.is_none() {
@@ -901,4 +810,40 @@ fn solve(
             reconcile::missing(&["dependencies"], "no feasible version assignment")
         })
     })
+}
+
+/// Each undecided range selection on a path to `affected`, with its other
+/// eligible releases newest first.
+fn alternatives<'d>(
+    cache: &mut graph::Sources<'_>,
+    demands: impl Iterator<Item = (&'d choices::Edge, &'d std::rc::Rc<choices::Demand>)>,
+    pins: &choices::Choices,
+    affected: &BTreeSet<String>,
+    mut lookup_failed: impl FnMut(LockfileError) -> Result<()>,
+) -> Result<Vec<(choices::Edge, Vec<String>)>> {
+    let mut branches = Vec::new();
+    for (edge, demand) in demands {
+        if pins.contains_key(edge)
+            || demand.selector.parse::<node_semver::Version>().is_ok()
+            || !affected.contains(&demand.package.key(&demand.selected))
+        {
+            continue;
+        }
+        let direct = matches!(edge.0, choices::Owner::Importer(_));
+        match cache.versions(&demand.package, &demand.selector, direct) {
+            Ok(all) => {
+                let others: Vec<_> = all
+                    .iter()
+                    .rev()
+                    .filter(|v| **v != demand.selected)
+                    .cloned()
+                    .collect();
+                if !others.is_empty() {
+                    branches.push((edge.clone(), others));
+                }
+            }
+            Err(e) => lookup_failed(e)?,
+        }
+    }
+    Ok(branches)
 }

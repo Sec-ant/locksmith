@@ -175,7 +175,10 @@ impl Registry {
         let mut requests = Vec::new();
         for (base, name) in keys {
             let key = (base, name);
-            if self.packages.contains_key(&key) || self.failed.contains_key(&key) {
+            if self.packages.contains_key(&key)
+                || self.pinned.contains_key(&key)
+                || self.failed.contains_key(&key)
+            {
                 continue;
             }
             let request = self.metadata_request(&key.1, &key.0)?;

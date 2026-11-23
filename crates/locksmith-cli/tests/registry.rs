@@ -1201,6 +1201,47 @@ fn git_driver_resolves_a_missing_release_and_keeps_git_stages_on_registry_failur
 }
 
 #[test]
+fn removing_a_dependency_does_not_read_its_registry_metadata() {
+    let project = tempdir().unwrap();
+    let root = project.path();
+    let registry = Registry::serve(BTreeMap::new());
+    write_empty_lock(root);
+    write(
+        root,
+        "package.json",
+        &json!({"name":"root","packageManager":"pnpm@10.34.9"}),
+    );
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        &json!({
+            "packages":[], "registry":registry.base, "minimumReleaseAge":60
+        }),
+    );
+    let hook = "module.exports = {hooks: {readPackage: pkg => pkg}};\n";
+    fs::write(root.join(".pnpmfile.cjs"), hook).unwrap();
+    let mut old = output(run(root, CLI, &["generate", "--stdout"]));
+    old["importers"]["."]["dependencies"]["removed"] =
+        json!({"specifier":"1.0.0","version":"1.0.0"});
+    old["packages"]["removed@1.0.0"] = json!({"resolution":{"integrity":INTEGRITY}});
+    old["snapshots"]["removed@1.0.0"] = json!({});
+    write(root, "pnpm-lock.yaml", &old);
+
+    let generated = output(run(root, CLI, &["generate", "--allow-network", "--stdout"]));
+    assert_eq!(generated["importers"]["."], json!({}));
+    assert!(registry.finish().is_empty());
+
+    fs::write(
+        root.join(".pnpmfile.cjs"),
+        format!("{hook}// comment only\n"),
+    )
+    .unwrap();
+    let generated = output(run(root, CLI, &["generate", "--stdout"]));
+    assert_eq!(generated["importers"]["."], json!({}));
+    assert!(generated["snapshots"].get("removed@1.0.0").is_none());
+}
+
+#[test]
 fn generate_uses_only_metadata_and_reuses_its_cache_in_an_untracked_workspace() {
     let dir = tempdir().unwrap();
     let root = dir.path();

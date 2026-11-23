@@ -1,5 +1,7 @@
 mod sources;
 
+use std::collections::BTreeMap;
+
 use locksmith::{LockfileError, PackageSource, RegistryPackage, SourceManifest};
 use node_semver::{Range, Version};
 use serde_json::Value;
@@ -13,6 +15,7 @@ pub struct GenerationSource<'a> {
     hook_manifests: bool,
     prepared: std::collections::BTreeMap<(RegistryPackage, String), Value>,
     registry: Option<Registry>,
+    named: Option<BTreeMap<String, String>>,
     routes: std::collections::BTreeMap<RegistryPackage, String>,
 }
 impl<'a> GenerationSource<'a> {
@@ -29,6 +32,7 @@ impl<'a> GenerationSource<'a> {
             hook_manifests,
             prepared: Default::default(),
             registry: None,
+            named: None,
             routes: Default::default(),
         }
     }
@@ -44,14 +48,24 @@ impl<'a> GenerationSource<'a> {
         }
         Ok(self.registry.as_mut().expect("initialized registry"))
     }
+    fn routing_client(&mut self) -> crate::Result<(&Registry, &BTreeMap<String, String>)> {
+        self.client()?;
+        let registry = self.registry.as_ref().expect("initialized registry");
+        if self.named.is_none() {
+            self.named = Some(named_registries(&registry.config)?);
+        }
+        Ok((
+            registry,
+            self.named.as_ref().expect("initialized named registries"),
+        ))
+    }
     fn route(
         &mut self,
         name: &str,
         spec: &str,
     ) -> crate::Result<Option<(RegistryPackage, String)>> {
         let version = self.version.map(|v| (v.major(), v.minor(), v.patch()));
-        let registry = self.client()?;
-        let named = named_registries(&registry.config)?;
+        let (registry, named) = self.routing_client()?;
         let (prefix, selector) = spec.split_once(':').unwrap_or(("", spec));
         let explicit = named
             .get(prefix)
@@ -104,7 +118,10 @@ impl<'a> GenerationSource<'a> {
             // route, unless an explicit alias bypasses a scoped registry.
             let plain_default =
                 version.is_none_or(|v| v >= (12, 18, 0) || v.0 == 11 && v >= (11, 28, 11));
-            if !plain_default || base != default || registry.registry(&package.name)? != base {
+            if !plain_default
+                || base != default
+                || explicit.is_some() && registry.registry(&package.name)? != base
+            {
                 let declared = if canonical {
                     named
                         .iter()
@@ -132,24 +149,20 @@ impl<'a> GenerationSource<'a> {
         Ok(Some((package, selector)))
     }
     fn package_base(&mut self, package: &RegistryPackage) -> crate::Result<String> {
-        let route = self.routes.get(package).cloned();
+        if let Some(route) = self.routes.get(package) {
+            return Ok(route.clone());
+        }
+        let Some(prefix) = &package.prefix else {
+            return self.client()?.registry(&package.name);
+        };
         let version = self.version.map(|v| (v.major(), v.minor(), v.patch()));
-        let client = self.client()?;
-        Ok(match route {
-            Some(url) => url,
-            None => match &package.prefix {
-                Some(prefix) => {
-                    let named = named_registries(&client.config)?;
-                    let url = named
-                        .get(prefix)
-                        .map(String::as_str)
-                        .or_else(|| builtin_registry(prefix, version))
-                        .ok_or_else(|| format!("missing registry {prefix}"))?;
-                    Registry::validated_base(url)?
-                }
-                None => client.registry(&package.name)?,
-            },
-        })
+        let (_, named) = self.routing_client()?;
+        let url = named
+            .get(prefix)
+            .map(String::as_str)
+            .or_else(|| builtin_registry(prefix, version))
+            .ok_or_else(|| format!("missing registry {prefix}"))?;
+        Registry::validated_base(url)
     }
     fn load(&mut self, package: &RegistryPackage) -> crate::Result<(&Registry, (String, String))> {
         let base = self.package_base(package)?;
@@ -161,8 +174,8 @@ impl<'a> GenerationSource<'a> {
 
 /// Registry aliases by prefix. A `registries` declaration takes a prefix from a
 /// `namedRegistries` entry, which overrides pnpm's built-in `gh` and `npmjs`.
-fn named_registries(config: &Value) -> crate::Result<std::collections::BTreeMap<String, String>> {
-    let mut named = std::collections::BTreeMap::new();
+fn named_registries(config: &Value) -> crate::Result<BTreeMap<String, String>> {
+    let mut named = BTreeMap::new();
     for (prefix, url) in config["namedRegistries"].as_object().into_iter().flatten() {
         let url = url.as_str().ok_or("expected named registry URL")?;
         named.insert(prefix.clone(), url.to_owned());
@@ -188,6 +201,16 @@ fn error(path: &[&str], error: impl ToString) -> LockfileError {
         message: error.to_string(),
         request: None,
     }
+}
+/// Locked releases need no publication evidence unless a trust policy, a
+/// minimum release age or a publication-time cutoff applies to them.
+fn skips_pin_checks(client: &Registry, time_cutoff: bool) -> bool {
+    client.config["trustLockfile"] == true
+        || (client.config["trustPolicy"]
+            .as_str()
+            .is_none_or(|s| s == "off")
+            && client.min_age == 0
+            && !time_cutoff)
 }
 impl PackageSource for GenerationSource<'_> {
     fn prepare_releases(
@@ -231,13 +254,7 @@ impl PackageSource for GenerationSource<'_> {
         }
         let mut prepare = || -> crate::Result<()> {
             let client = self.client()?;
-            if client.config["trustLockfile"] == true
-                || (client.config["trustPolicy"]
-                    .as_str()
-                    .is_none_or(|s| s == "off")
-                    && client.min_age == 0
-                    && client.config["resolutionMode"] != "time-based")
-            {
+            if skips_pin_checks(client, client.config["resolutionMode"] == "time-based") {
                 return Ok(());
             }
             let keys = packages
@@ -344,13 +361,7 @@ impl PackageSource for GenerationSource<'_> {
     ) -> Result<bool, LockfileError> {
         let mut check = || -> crate::Result<bool> {
             let client = self.client()?;
-            if client.config["trustLockfile"] == true
-                || (client.config["trustPolicy"]
-                    .as_str()
-                    .is_none_or(|s| s == "off")
-                    && client.min_age == 0
-                    && (direct || client.transitive_cutoff.is_none()))
-            {
+            if skips_pin_checks(client, !direct && client.transitive_cutoff.is_some()) {
                 return Ok(true);
             }
             let base = self.package_base(package)?;
