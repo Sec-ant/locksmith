@@ -230,8 +230,9 @@ pub(super) struct Baseline<'a> {
     incomplete: std::cell::RefCell<Option<(u64, BTreeSet<String>)>>,
     expansions: std::cell::RefCell<Expansions>,
     partition: super::incremental::Partition<'a>,
-    // Locked releases whose declarations disagree with the compatibility database setting.
-    compat_stale: BTreeSet<&'a str>,
+    // Locked releases whose recorded declarations may disagree with the
+    // compatibility database under the current setting.
+    compat_candidates: BTreeSet<&'a str>,
 }
 
 impl<'a> Baseline<'a> {
@@ -257,7 +258,7 @@ impl<'a> Baseline<'a> {
             }
         }
         let snapshots = graph::section(old, "snapshots");
-        let compat_stale = graph::section(old, "packages")
+        let compat_candidates = graph::section(old, "packages")
             .into_iter()
             .flatten()
             .filter(|(key, record)| {
@@ -292,7 +293,7 @@ impl<'a> Baseline<'a> {
             links: WorkspaceLinks::new(manifests, config),
             changed_overrides: super::incremental::changed_overrides(old, header),
             partition: super::incremental::Partition::new(old, config),
-            compat_stale,
+            compat_candidates,
         }
     }
     fn matching(&self, package: &RegistryPackage, selector: &str) -> Vec<String> {
@@ -939,7 +940,7 @@ impl<'a, 's> Build<'a, 's> {
                 && !original.is_null()
                 && record.is_object()
                 && local.is_none()
-                && !(self.rereads_manifests && self.base.compat_stale.contains(base))
+                && !(self.rereads_manifests && self.base.compat_candidates.contains(base))
                 && (self.base.same_override_rules
                     || self.base.changed_overrides.as_ref().is_some_and(|changed| {
                         !super::incremental::observes_override(&record, original, changed)

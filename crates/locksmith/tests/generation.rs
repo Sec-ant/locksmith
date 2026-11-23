@@ -780,6 +780,56 @@ fn a_hook_reads_every_release_again_once_any_project_changes() {
 }
 
 #[test]
+fn a_hook_rewrite_that_the_lock_still_satisfies_keeps_its_releases() {
+    // The rewrite widens a range the locked child already satisfies. The
+    // release also declares an optional peer only in peerDependenciesMeta,
+    // which pnpm records as a peer.
+    struct Widen;
+    impl locksmith::GenerationHooks for Widen {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin" {
+                raw["dependencies"]["leaf"] = "^1.0.0".into();
+            }
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({"dependencies":{"leaf":"1.0.0"},"peerDependenciesMeta":{"extra":{"optional":true}}}),
+    );
+    registry.add("leaf", "1.0.0", json!({}));
+    registry.add("added", "1.0.0", json!({}));
+    let config = json!({"pnpmfileChecksum":"hook"});
+    let version = node_semver::Version::new(10, 12, 4);
+    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let generate = |old: &Lockfile, inputs: &BTreeMap<String, Value>, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(inputs, &config).with_pnpm_version(&version),
+            registry,
+            &mut Widen,
+        )
+        .unwrap()
+    };
+    let before = generate(&empty_workspace_lock(), &inputs, &mut registry);
+    assert!(
+        before.project().unwrap()["packages"]["plugin@1.0.0"]["peerDependencies"]
+            .get("extra")
+            .is_some()
+    );
+    // A newer release would be selected if the plugin were resolved again.
+    registry.add("leaf", "1.1.0", json!({}));
+    inputs.insert("new".into(), json!({"dependencies":{"added":"1"}}));
+    let after = generate(&before, &inputs, &mut registry);
+    assert_eq!(
+        after.project().unwrap()["snapshots"]["plugin@1.0.0"]["dependencies"]["leaf"],
+        "1.0.0"
+    );
+}
+
+#[test]
 fn an_automatic_required_peer_reuses_a_release_in_the_previous_lock() {
     let mut registry = Registry::default();
     registry.add("host", "1.0.0", json!({}));

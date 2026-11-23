@@ -232,12 +232,15 @@ impl Baseline<'_> {
 }
 
 impl<'a> Build<'a, '_> {
-    /// pnpm runs readPackage for every release once it resolves, and a hook can
-    /// read inputs outside the file its checksum covers. A release the hook
-    /// leaves untouched resolves as its publication did. One the hook rewrites
-    /// is stale when its recorded children no longer satisfy the declarations.
-    fn rewritten_by_hook(&mut self) -> Result<BTreeSet<&'a str>> {
+    /// pnpm reads every manifest again once it resolves, then applies the
+    /// compatibility database and readPackage. The lockfile records neither
+    /// `ignoreCompatibilityDb` nor what a hook read outside its checksummed file.
+    /// A release is stale when those evaluated declarations no longer match its
+    /// record: different peers, or recorded children that no longer satisfy them.
+    /// Only database rules and hook rewrites can make a publication disagree.
+    fn stale_releases(&mut self) -> Result<BTreeSet<&'a str>> {
         let old: &'a Value = self.old;
+        let hooks = self.cache.reads_packages();
         let snapshots = graph::section(old, "snapshots");
         let overridden: BTreeSet<&str> = graph::section(self.header, "overrides")
             .into_iter()
@@ -246,18 +249,49 @@ impl<'a> Build<'a, '_> {
             .collect();
         let mut stale = BTreeSet::new();
         for (key, record) in graph::section(old, "packages").into_iter().flatten() {
-            if RegistryPackage::from_key(key).is_none() {
+            let candidate = self.base.compat_candidates.contains(key.as_str());
+            if !hooks && !candidate || RegistryPackage::from_key(key).is_none() {
                 continue;
             }
             let manifest = &Rc::clone(self.cache.release(key)?).manifest;
-            if !self.cache.hook_changed.contains(key) {
+            if !candidate && !self.cache.hook_changed.contains(key) {
                 continue;
             }
-            let peers = &manifest["peerDependencies"];
+            // pnpm records an optional peer declared only in peerDependenciesMeta.
+            fn declared_peers(doc: &Value) -> BTreeMap<&str, bool> {
+                let optional = |name: &str| doc["peerDependenciesMeta"][name]["optional"] == true;
+                graph::section(doc, "peerDependencies")
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, _)| (name.as_str(), optional(name)))
+                    .chain(
+                        graph::section(doc, "peerDependenciesMeta")
+                            .into_iter()
+                            .flatten()
+                            .filter(|(name, _)| optional(name))
+                            .map(|(name, _)| (name.as_str(), true)),
+                    )
+                    .collect()
+            }
+            let peers = declared_peers(manifest);
+            // Some pnpm releases omit a peer the package also lists as a dependency.
+            let (mut recorded, mut evaluated) = (declared_peers(record), peers.clone());
+            for name in graph::section(manifest, "dependencies")
+                .into_iter()
+                .flatten()
+                .map(|(n, _)| n)
+            {
+                recorded.remove(name.as_str());
+                evaluated.remove(name.as_str());
+            }
+            if recorded != evaluated {
+                stale.insert(key.as_str());
+                continue;
+            }
             let declared: BTreeMap<&str, Option<&str>> = ["dependencies", "optionalDependencies"]
                 .into_iter()
                 .flat_map(|group| graph::section(manifest, group).into_iter().flatten())
-                .filter(|(name, _)| peers.get(name.as_str()).is_none())
+                .filter(|(name, _)| !peers.contains_key(name.as_str()))
                 .map(|(name, spec)| (name.as_str(), spec.as_str()))
                 .collect();
             let satisfied = |body: &Value| {
@@ -266,7 +300,7 @@ impl<'a> Build<'a, '_> {
                     .flat_map(|group| graph::section(body, group).into_iter().flatten())
                     .all(|(name, _)| {
                         declared.contains_key(name.as_str())
-                            || peers.get(name).is_some()
+                            || peers.contains_key(name.as_str())
                             || record["peerDependencies"].get(name).is_some()
                     });
                 recorded_children
@@ -276,6 +310,10 @@ impl<'a> Build<'a, '_> {
                         };
                         if overridden.contains(name) {
                             return true;
+                        }
+                        // A workspace protocol resolves to a linked member.
+                        if spec.is_some_and(|spec| spec.starts_with("workspace:")) {
+                            return pin.starts_with("link:");
                         }
                         let child = graph::snapshot_key(name, pin, snapshots);
                         let Some((_, version)) = RegistryPackage::from_key(&child) else {
@@ -374,14 +412,11 @@ impl<'a> Build<'a, '_> {
         }
         self.seeded_history = true;
         self.rereads_manifests = outdated;
-        let mut stale = if outdated && self.cache.reads_packages() {
-            self.rewritten_by_hook()?
+        let stale = if outdated {
+            self.stale_releases()?
         } else {
             BTreeSet::new()
         };
-        if outdated {
-            stale.extend(self.base.compat_stale.iter().copied());
-        }
         let mut previous = self.base.incomplete.borrow_mut();
         if previous
             .as_ref()
