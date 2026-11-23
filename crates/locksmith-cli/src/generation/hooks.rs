@@ -1,6 +1,6 @@
 use std::{
     io::{self, BufRead, BufReader, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     str::FromStr,
     time::Duration,
@@ -31,6 +31,22 @@ const dispatch = nodeHookHost();
   }
 })().catch(e => { console.error(e); process.exitCode = 1; });
 "#;
+
+fn loader_path(path: PathBuf) -> PathBuf {
+    // Rust canonicalizes Windows paths with the verbatim prefix, which
+    // Node's module loader interprets as part of the module path.
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+            return format!("//{}", share.replace('\\', "/")).into();
+        }
+        if let Some(local) = text.strip_prefix(r"\\?\") {
+            return local.replace('\\', "/").into();
+        }
+    }
+    path
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Runtime {
@@ -164,6 +180,7 @@ impl Host {
                 crate::registry::hook_registries(config, version.map_or(12, Version::major))?;
             let configured_registry = config.get("registry").cloned();
             let configured_registries = config.get("registries").cloned();
+            let configured_scope_routes = config.get("registriesByScope").cloned();
             config["registry"] = routes["default"].clone();
             config[field] = routes.clone();
             *config = self.call("updateConfig", config)?;
@@ -196,6 +213,8 @@ impl Host {
                     "registriesByScope".into(),
                     crate::registry::updated_hook_registries(returned, &routes["default"])?,
                 );
+            } else if let Some(configured) = configured_scope_routes {
+                settings.insert("registriesByScope".into(), configured);
             }
         } else {
             *config = self.call("updateConfig", config)?;
@@ -271,7 +290,7 @@ impl Hooks {
         };
         let paths = files
             .iter()
-            .map(|(path, global)| Ok((Path::new(path).canonicalize()?, *global)))
+            .map(|(path, global)| Ok((loader_path(Path::new(path).canonicalize()?), *global)))
             .collect::<io::Result<Vec<_>>>()?;
         let pre = match version.map(|v| (v.major(), v.minor())) {
             Some((9, _) | (10, 0..=9)) => "global",

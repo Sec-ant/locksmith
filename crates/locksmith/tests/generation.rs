@@ -11,6 +11,7 @@ type Result<T> = std::result::Result<T, LockfileError>;
 struct Registry {
     packages: BTreeMap<String, BTreeMap<String, Value>>,
     tarballs: BTreeSet<String>,
+    tags: BTreeMap<(&'static str, &'static str), &'static str>,
 }
 impl Registry {
     fn add(&mut self, name: &str, version: &str, manifest: Value) {
@@ -21,13 +22,36 @@ impl Registry {
     }
 }
 impl PackageSource for Registry {
+    fn registry_selector(
+        &mut self,
+        name: &str,
+        specifier: &str,
+    ) -> Result<Option<(RegistryPackage, String)>> {
+        Ok(match specifier.strip_prefix("mirror:") {
+            Some(selector) => {
+                RegistryPackage::selector(name, selector).map(|(mut package, range)| {
+                    package.prefix = Some("mirror".into());
+                    (package, range)
+                })
+            }
+            None => RegistryPackage::selector(name, specifier),
+        })
+    }
+
     fn versions(
         &mut self,
         package: &RegistryPackage,
         selector: &str,
         _: bool,
     ) -> Result<Vec<String>> {
-        let range = selector.parse::<node_semver::Range>().unwrap();
+        let Ok(range) = selector.parse::<node_semver::Range>() else {
+            return Ok(self
+                .tags
+                .get(&(package.name.as_str(), selector))
+                .map(|v| v.to_string())
+                .into_iter()
+                .collect());
+        };
         let mut versions: Vec<_> = self
             .packages
             .get(&package.name)
@@ -876,7 +900,7 @@ fn a_hook_reads_every_release_again_once_any_project_changes() {
 }
 
 #[test]
-fn hook_changes_to_a_dependency_source_update_the_lock() {
+fn hook_changes_to_a_dependency_source_or_tag_update_the_lock() {
     struct Rewrite<'a>(&'a str);
     impl locksmith::GenerationHooks for Rewrite<'_> {
         fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
@@ -893,6 +917,8 @@ fn hook_changes_to_a_dependency_source_update_the_lock() {
     for name in ["plugin", "leaf", "other"] {
         registry.add(name, "1.0.0", json!({}));
     }
+    registry.add("leaf", "2.0.0", json!({}));
+    registry.tags.insert(("leaf", "beta"), "2.0.0");
     let generate = |old: &Lockfile, manifests: &_, leaf, registry: &mut Registry| {
         locksmith::generate_with_hooks(
             old,
@@ -902,8 +928,27 @@ fn hook_changes_to_a_dependency_source_update_the_lock() {
         )
         .unwrap()
     };
-    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
-    let mut old = generate(&empty_workspace_lock(), &inputs, "1", &mut registry);
+    let mut inputs = workspace(&[
+        (".", json!({"dependencies":{"plugin":"1"}})),
+        ("packages/a", json!({"name":"a","version":"1.0.0"})),
+        ("packages/b", json!({"name":"b","version":"1.0.0"})),
+    ]);
+    let mut old = generate(&empty_workspace_lock(), &inputs, "mirror:1", &mut registry);
+    let leaf = |lock: &Lockfile| {
+        lock.project().unwrap()["snapshots"]["plugin@1.0.0"]["dependencies"]["leaf"].clone()
+    };
+    assert_eq!(leaf(&old), "mirror:1.0.0");
+    for (member, selector, expected) in [
+        ("same-mirror", "mirror:1", "mirror:1.0.0"),
+        ("default-source", "1", "1.0.0"),
+        ("tag", "beta", "2.0.0"),
+        ("workspace-a", "workspace:./packages/a", "link:packages/a"),
+        ("workspace-b", "workspace:./packages/b", "link:packages/b"),
+    ] {
+        inputs.insert(member.into(), json!({"dependencies":{"other":"1"}}));
+        old = generate(&old, &inputs, selector, &mut registry);
+        assert_eq!(leaf(&old), expected, "{selector}");
+    }
     for (member, source, needs_fetch) in [
         ("one", first, true),
         ("two", first, false),
@@ -925,6 +970,57 @@ fn hook_changes_to_a_dependency_source_update_the_lock() {
             source
         );
     }
+}
+
+#[test]
+fn overrides_remove_peers_before_the_old_graph_is_reused() {
+    struct Rewrite(&'static str);
+    impl locksmith::GenerationHooks for Rewrite {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin" {
+                raw["peerDependencies"] = json!({(self.0):"*"});
+            }
+            Ok(raw)
+        }
+    }
+
+    let archive = "https://example.test/leaf.tgz";
+    let mut registry = Registry::default();
+    registry.add("plugin", "1.0.0", json!({"dependencies":{"leaf":archive}}));
+    registry.tarballs.insert(archive.into());
+    let config = json!({
+        "pnpmfileChecksum":"stable",
+        "autoInstallPeers":false,
+        "overrides":{"plugin>host":"-"}
+    });
+    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let generate = |old: &Lockfile, manifests: &_, peer, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(manifests, &config),
+            registry,
+            &mut Rewrite(peer),
+        )
+        .unwrap()
+    };
+    let old = generate(&empty_workspace_lock(), &inputs, "ghost", &mut registry);
+    assert_eq!(
+        old.project().unwrap()["packages"]["plugin@1.0.0"]["peerDependencies"],
+        json!({"ghost":"*"})
+    );
+    inputs.insert("one".into(), json!({}));
+    let next = generate(&old, &inputs, "host", &mut registry);
+    let record = &next.project().unwrap()["packages"]["plugin@1.0.0"];
+    assert!(record.get("peerDependencies").is_none());
+    // The effective peer map is still empty. The existing archive pin is
+    // sufficient when a second unrelated importer changes the lockfile.
+    registry.tarballs.clear();
+    inputs.insert("two".into(), json!({}));
+    let unchanged = generate(&next, &inputs, "host", &mut registry);
+    assert_eq!(
+        unchanged.project().unwrap()["packages"]["plugin@1.0.0"],
+        *record
+    );
 }
 
 #[test]

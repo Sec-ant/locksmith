@@ -19,17 +19,8 @@ pub(super) struct Engine {
 
 fn resolve(ctx: Ctx<'_>, name: String, parent: String) -> rquickjs::Result<String> {
     let resolved = require_resolve(&ctx, &name, &parent, None, false)?;
-    let path = std::fs::canonicalize(resolved.as_ref())?;
-    let path = path.to_string_lossy();
-    #[cfg(windows)]
-    let path = match path.strip_prefix(r"\\?\UNC\") {
-        Some(share) => format!("//{}", share.replace('\\', "/")),
-        None => path
-            .strip_prefix(r"\\?\")
-            .unwrap_or(&path)
-            .replace('\\', "/"),
-    };
-    Ok(path.to_string())
+    let path = super::loader_path(std::fs::canonicalize(resolved.as_ref())?);
+    Ok(path.to_string_lossy().into_owned())
 }
 
 impl Engine {

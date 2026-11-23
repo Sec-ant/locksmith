@@ -245,6 +245,59 @@ fn update_config_reads_effective_registry_routes_and_redirects_metadata() {
 }
 
 #[test]
+fn an_identity_update_config_preserves_the_configured_scope_routes() {
+    let project = tempdir().unwrap();
+    let root = project.path();
+    write_empty_lock(root);
+    let publication =
+        |name| json!({"name":name,"versions":{"1.0.0":{}}, "dist-tags":{"latest":"1.0.0"}});
+    let default = Registry::serve(BTreeMap::from([("lib", publication("lib"))]));
+    let scoped = Registry::serve(BTreeMap::from([("@scope/lib", publication("@scope/lib"))]));
+    fs::write(root.join(".npmrc"), format!("registry={}/\n", default.base)).unwrap();
+    write(
+        root,
+        "package.json",
+        &json!({"dependencies":{"lib":"1","@scope/lib":"1"}}),
+    );
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        &json!({
+            "minimumReleaseAge":0,
+            "registriesByScope":{
+                "default":format!("{}/", default.base),
+                "@scope":format!("{}/", scoped.base),
+            }
+        }),
+    );
+    fs::write(
+        root.join(".pnpmfile.cjs"),
+        "exports.hooks = { updateConfig: config => config };",
+    )
+    .unwrap();
+    let result = output(run(
+        root,
+        CLI,
+        &[
+            "generate",
+            "--pnpm-version=12.15.0",
+            "--allow-network",
+            "--stdout",
+        ],
+    ));
+    assert_eq!(
+        result["importers"]["."]["dependencies"]["lib"]["version"],
+        "1.0.0"
+    );
+    assert_eq!(
+        result["importers"]["."]["dependencies"]["@scope/lib"]["version"],
+        "1.0.0"
+    );
+    assert_eq!(default.finish().first().unwrap().path, "/lib");
+    assert_eq!(scoped.finish().first().unwrap().path, "/@scope/lib");
+}
+
+#[test]
 fn generate_requires_a_lock_before_running_hooks_or_contacting_the_registry() {
     let project = tempdir().unwrap();
     let root = project.path();

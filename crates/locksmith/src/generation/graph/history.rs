@@ -238,7 +238,8 @@ fn declarations_match(
     record: &Value,
     bodies: &[&Value],
     snapshots: Option<&serde_json::Map<String, Value>>,
-    rules: &manifest::Overrides<'_>,
+    base: &Baseline<'_>,
+    cache: &mut Sources<'_>,
 ) -> Result<bool> {
     // pnpm records an optional peer declared only in peerDependenciesMeta as `*`.
     fn declared_peers(doc: &Value) -> BTreeMap<&str, (&str, bool)> {
@@ -262,7 +263,18 @@ fn declarations_match(
             .collect()
     }
     let name = manifest["name"].as_str().unwrap_or_default();
-    let peers = declared_peers(manifest);
+    let mut peers = BTreeMap::new();
+    for (peer, (range, optional)) in declared_peers(manifest) {
+        // Optional metadata alone supplies a peer without a selector to override.
+        let effective = if manifest["peerDependencies"].get(peer).is_some() {
+            base.rules.apply(manifest, ".", peer, range)?
+        } else {
+            Some(std::borrow::Cow::Borrowed(range))
+        };
+        if let Some(range) = effective {
+            peers.insert(peer, (range, optional));
+        }
+    }
     let ordinary = |group: &str| {
         graph::section(manifest, group)
             .into_iter()
@@ -272,25 +284,17 @@ fn declarations_match(
     };
     // Some pnpm releases omit a peer the package also lists as a dependency.
     let dependencies = ordinary("dependencies");
-    let (mut recorded, mut evaluated) = (declared_peers(record), peers.clone());
     // pnpm also drops a peer on the package itself.
-    for dependency in dependencies.iter().chain([&name]) {
-        recorded.remove(dependency);
-        evaluated.remove(dependency);
-    }
-    if recorded.len() != evaluated.len() {
+    let compared = |peer: &str| peer != name && !dependencies.contains(peer);
+    let recorded = declared_peers(record);
+    if !recorded
+        .into_iter()
+        .filter(|(peer, _)| compared(peer))
+        .eq(peers.iter().filter_map(|(&peer, (range, optional))| {
+            compared(peer).then_some((peer, (range.as_ref(), *optional)))
+        }))
+    {
         return Ok(false);
-    }
-    for (peer, (range, optional)) in evaluated {
-        // A peer declared only in the optional metadata has no selector to override.
-        let effective = if manifest["peerDependencies"].get(peer).is_some() {
-            rules.apply(manifest, ".", peer, range)?
-        } else {
-            Some(std::borrow::Cow::Borrowed(range))
-        };
-        if recorded.get(peer).copied() != effective.as_deref().map(|range| (range, optional)) {
-            return Ok(false);
-        }
     }
     // pnpm installs bundled dependencies from the tarball and skips a
     // dependency on the package itself.
@@ -315,13 +319,13 @@ fn declarations_match(
                 let Some(spec) = spec.as_str() else {
                     return Ok(false);
                 };
-                if let Some(spec) = rules.apply(manifest, ".", dependency, spec)? {
+                if let Some(spec) = base.rules.apply(manifest, ".", dependency, spec)? {
                     declared.insert(dependency.as_str(), (group, spec));
                 }
             }
         }
     }
-    Ok(bodies.iter().all(|body| {
+    if !bodies.iter().all(|body| {
         ["dependencies", "optionalDependencies"]
             .into_iter()
             .flat_map(|group| graph::section(body, group).into_iter().flatten())
@@ -330,47 +334,85 @@ fn declarations_match(
                     || peers.contains_key(child.as_str())
                     || record["peerDependencies"].get(child).is_some()
             })
-            && declared.iter().all(|(dependency, (group, spec))| {
-                let Some((recorded_group, pin)) = graph::dependency(body, dependency) else {
-                    return false;
-                };
-                if recorded_group != *group {
-                    return false;
-                }
-                // A workspace protocol resolves to a linked member.
-                if spec.starts_with("workspace:") {
-                    return pin.starts_with("link:");
-                }
-                let child = graph::snapshot_key(dependency, pin, snapshots);
-                if let Some((package, range)) = RegistryPackage::selector(dependency, spec) {
-                    return RegistryPackage::from_key(&child).is_some_and(|(locked, version)| {
-                        locked.name == package.name
-                            // A dist-tag names a release the lock already chose.
-                            && (range == "*"
-                                || range.parse::<node_semver::Range>().is_err()
-                                || manifest::matches_version(&range, Some(version)))
-                    });
-                }
-                let locator = if pin.starts_with("link:") {
-                    pin
-                } else {
-                    manifest::selector(graph::package_key(&child))
-                        .1
-                        .unwrap_or_default()
-                };
-                // A non-registry declaration must identify the recorded source.
-                spec == locator
-                    || ["file:", "link:"].into_iter().any(|protocol| {
-                        spec.strip_prefix(protocol)
-                            .zip(locator.strip_prefix(protocol))
-                            .is_some_and(|(path, locked)| {
-                                !path.starts_with('/')
-                                    && path.as_bytes().get(1) != Some(&b':')
-                                    && graph::linked_importer(".", path) == locked
-                            })
+    }) {
+        return Ok(false);
+    }
+    if bodies.is_empty() {
+        return Ok(true);
+    }
+    for (dependency, (group, spec)) in declared {
+        let mut pins = bodies.iter().map(|body| {
+            graph::dependency(body, dependency)
+                .filter(|(recorded_group, _)| *recorded_group == group)
+                .map(|(_, pin)| pin)
+        });
+        if spec.starts_with("workspace:") {
+            let expected = base
+                .links
+                .resolve_for_generation(dependency, &spec, ".", manifest, false)?
+                .map(|(target, _)| target);
+            let expected = expected
+                .as_deref()
+                .and_then(|target| target.strip_prefix("link:"));
+            if !pins.all(|pin| {
+                pin.and_then(|pin| pin.strip_prefix("link:"))
+                    .is_some_and(|path| {
+                        expected.is_some_and(|target| graph::linked_importer(".", path) == target)
                     })
-            })
-    }))
+            }) {
+                return Ok(false);
+            }
+        } else if let Some((package, selector)) = cache.registry_selector(dependency, &spec)? {
+            let range = selector.parse::<node_semver::Range>().ok();
+            let tag_version = if range.is_none() {
+                cache
+                    .versions(&package, &selector, false)?
+                    .first()
+                    .map(String::as_str)
+            } else {
+                None
+            };
+            if !pins.all(|pin| {
+                let Some(pin) = pin else { return false };
+                let child = graph::snapshot_key(dependency, pin, snapshots);
+                RegistryPackage::from_key(&child).is_some_and(|(locked, version)| {
+                    locked == package
+                        && (selector == "*"
+                            || tag_version == Some(version)
+                            || range.as_ref().is_some_and(|range| {
+                                version
+                                    .parse::<node_semver::Version>()
+                                    .is_ok_and(|v| v.satisfies(range))
+                            }))
+                })
+            }) {
+                return Ok(false);
+            }
+        } else if !pins.all(|pin| {
+            let Some(pin) = pin else { return false };
+            let child = graph::snapshot_key(dependency, pin, snapshots);
+            let locator = if pin.starts_with("link:") {
+                pin
+            } else {
+                manifest::selector(graph::package_key(&child))
+                    .1
+                    .unwrap_or_default()
+            };
+            spec == locator
+                || ["file:", "link:"].into_iter().any(|protocol| {
+                    spec.strip_prefix(protocol)
+                        .zip(locator.strip_prefix(protocol))
+                        .is_some_and(|(path, locked)| {
+                            !path.starts_with('/')
+                                && path.as_bytes().get(1) != Some(&b':')
+                                && graph::linked_importer(".", path) == locked
+                        })
+                })
+        }) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl<'a> Build<'a, '_> {
@@ -401,7 +443,7 @@ impl<'a> Build<'a, '_> {
             }
             let manifest = &Rc::clone(self.cache.release(key)?).manifest;
             let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
-            if !declarations_match(manifest, record, bodies, snapshots, &self.base.rules)? {
+            if !declarations_match(manifest, record, bodies, snapshots, self.base, self.cache)? {
                 stale.insert(key.as_str());
             }
         }

@@ -21,6 +21,7 @@ pub(super) struct Sources<'a> {
     hooks: Option<&'a mut dyn GenerationHooks>,
     extensions: super::compat::Extensions,
     versions: BTreeMap<(RegistryPackage, String, bool), Vec<String>>,
+    selectors: BTreeMap<(String, String), Option<(RegistryPackage, String)>>,
     accepted: [BTreeMap<RegistryPackage, BTreeMap<String, bool>>; 2],
     releases: BTreeMap<String, Rc<SourceManifest>>,
     published_sha1: BTreeMap<String, String>,
@@ -39,6 +40,7 @@ impl<'a> Sources<'a> {
             hooks,
             extensions,
             versions: BTreeMap::new(),
+            selectors: BTreeMap::new(),
             accepted: Default::default(),
             releases: BTreeMap::new(),
             published_sha1: BTreeMap::new(),
@@ -100,6 +102,20 @@ impl<'a> Sources<'a> {
                 entry.insert(versions)
             }
         })
+    }
+    fn registry_selector(
+        &mut self,
+        name: &str,
+        specifier: &str,
+    ) -> Result<Option<(RegistryPackage, String)>> {
+        let key = (name.to_owned(), specifier.to_owned());
+        let selection = match self.selectors.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(self.source.registry_selector(name, specifier)?)
+            }
+        };
+        Ok(selection.clone())
     }
     fn accepts_pin(
         &mut self,
@@ -523,7 +539,7 @@ impl<'a, 's> Build<'a, 's> {
             .links
             .resolve_for_generation(name, spec, dir, parent, direct)?
         {
-            if !(injected && !spec.starts_with("link:")) {
+            if !injected || spec.starts_with("link:") {
                 return Ok(target);
             }
             let path = target.strip_prefix("link:").expect("workspace link");
@@ -542,7 +558,7 @@ impl<'a, 's> Build<'a, 's> {
                 format!("no workspace member satisfies {spec}"),
             ));
         }
-        let Some((package, selector)) = self.cache.source.registry_selector(name, spec)? else {
+        let Some((package, selector)) = self.cache.registry_selector(name, spec)? else {
             if let Some(path) = spec.strip_prefix("file:") {
                 let path = graph::linked_importer(dir, path);
                 if let Some(raw) = self.manifests.get(&path) {
@@ -832,8 +848,7 @@ impl<'a, 's> Build<'a, 's> {
             }
         }
         for range in ranges.iter().copied().collect::<BTreeSet<_>>() {
-            let Some((package, selector)) = self.cache.source.registry_selector(name, range)?
-            else {
+            let Some((package, selector)) = self.cache.registry_selector(name, range)? else {
                 continue;
             };
             if let Some(raw) = self.cache.versions(&package, &selector, false)?.first()
@@ -929,12 +944,13 @@ impl<'a, 's> Build<'a, 's> {
                     self.local_dirs.insert(base.to_owned(), path.to_owned());
                 }
             }
-            let can_reuse = !self.exhaustive
-                && !self.cache.reads_packages()
-                && !original.is_null()
-                && record.is_object()
-                && local.is_none()
-                && !(self.rereads_manifests && self.base.compat_candidates.contains(base))
+            let needs_expansion = self.exhaustive
+                || self.cache.reads_packages()
+                || original.is_null()
+                || !record.is_object()
+                || local.is_some()
+                || (self.rereads_manifests && self.base.compat_candidates.contains(base));
+            let can_reuse = !needs_expansion
                 && (self.base.same_override_rules
                     || self.base.changed_overrides.as_ref().is_some_and(|changed| {
                         !super::incremental::observes_override(&record, original, changed)
@@ -1038,11 +1054,11 @@ impl<'a, 's> Build<'a, 's> {
                 {
                     // Older locks can carry the same tarball's SHA-1 even when
                     // the registry now publishes a stronger default digest.
-                    if !self
+                    if self
                         .cache
                         .published_sha1
                         .get(base)
-                        .is_some_and(|sha| Some(sha.as_str()) == hash.as_str())
+                        .is_none_or(|sha| Some(sha.as_str()) != hash.as_str())
                     {
                         return Err(reconcile::missing(
                             &["packages", base],
