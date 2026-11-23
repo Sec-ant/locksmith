@@ -89,6 +89,7 @@ impl<'a> GenerationSource<'a> {
         };
         let default = registry.registry("")?;
         if prefix == "jsr"
+            && explicit.is_none()
             && base == default
             && !registry.rc.contains_key("@jsr:registry")
             && registry.config["registries"].get("@jsr").is_none()
@@ -476,5 +477,19 @@ mod tests {
             generation.package_base(&package).unwrap(),
             "https://named.example.invalid/"
         );
+    }
+
+    #[test]
+    fn an_explicit_jsr_mirror_takes_precedence_over_the_public_route() {
+        let mirror = "https://mirror.example.invalid/";
+        let config = serde_json::json!({"registry":mirror,"namedRegistries":{"jsr":mirror}});
+        let mut generation = GenerationSource::new(&config, None, false, false);
+        let (package, selector) = generation
+            .route("assert", "jsr:@std/assert@^1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(package.name, "@jsr/std__assert");
+        assert_eq!(selector, "^1");
+        assert_eq!(generation.package_base(&package).unwrap(), mirror);
     }
 }

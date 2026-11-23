@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     LockfileError, RegistryRequest, Value, WorkspaceConfig, graph, manifest, reconcile,
-    workspace_links::WorkspaceLinks,
+    workspace_links::{self, WorkspaceLinks},
 };
 
 mod history;
@@ -657,19 +657,33 @@ impl<'a, 's> Build<'a, 's> {
         let old_key = old_key
             .as_deref()
             .filter(|k| self.old["snapshots"].get(*k).is_some());
-        if let Some((target, package)) = self
+        let local = self
             .base
             .links
-            .resolve_for_generation(name, spec, dir, parent, direct)?
-        {
-            if !inject_workspace_dependency(name, parent, spec, self.config) {
-                return Ok(target);
-            }
+            .resolve_for_generation(name, spec, dir, parent, direct)?;
+        let inject =
+            local.is_some() && inject_workspace_dependency(name, parent, spec, self.config);
+        if let Some((target, member)) = &local {
             let path = target.strip_prefix("link:").expect("workspace link");
-            let raw = package.ok_or_else(|| {
-                reconcile::missing(&[dir, name], "missing injected workspace manifest")
-            })?;
-            return self.directory(path, raw, old_key);
+            let already_local = if inject {
+                old_key
+                    .and_then(|key| manifest::selector(graph::package_key(key)).1)
+                    .and_then(|locator| locator.strip_prefix("file:"))
+                    == Some(path)
+            } else {
+                old_ref
+                    .and_then(|pin| pin.strip_prefix("link:"))
+                    .is_some_and(|old| {
+                        workspace_links::member_target(dir, old, self.config) == path
+                    })
+            };
+            if already_local
+                || spec.starts_with("workspace:")
+                || spec.starts_with("link:")
+                || workspace_links::prefers_workspace(self.config)
+            {
+                return self.workspace_target(target, *member, inject, old_key);
+            }
         }
         if spec.starts_with("workspace:") {
             self.empty_domain = true;
@@ -696,7 +710,11 @@ impl<'a, 's> Build<'a, 's> {
                         .or_else(|| spec.strip_prefix("tool:"))
                         .is_some_and(|range| manifest::matches_version(range, Some(version)))
                 });
+            let same_locked_locator = old_key
+                .and_then(|key| manifest::selector(graph::package_key(key)).1)
+                .is_some_and(|locator| spec == locator && !spec.starts_with("file:"));
             let immutable = same_runtime
+                || same_locked_locator
                 || old_entry.is_some_and(|v| v["specifier"] == spec) && !spec.starts_with("file:");
             let mut key = match old_key.filter(|_| immutable) {
                 Some(key) => key.to_owned(),
@@ -741,7 +759,18 @@ impl<'a, 's> Build<'a, 's> {
         }
         let incumbent = incumbent.filter(|v| locked.iter().any(|s| s == v));
         let versions = if locked.is_empty() || self.exhaustive {
-            let mut eligible = self.cache.versions(&package, selector, direct)?.to_vec();
+            let mut eligible = match self.cache.versions(&package, selector, direct) {
+                Ok(versions) => versions.to_vec(),
+                // pnpm falls back to a matching workspace package when registry lookup fails.
+                Err(error) => {
+                    return match local {
+                        Some((target, member)) => {
+                            self.workspace_target(&target, member, inject, old_key)
+                        }
+                        None => Err(error),
+                    };
+                }
+            };
             if let Some(v) = incumbent
                 && !eligible.iter().any(|x| x == v)
             {
@@ -751,6 +780,15 @@ impl<'a, 's> Build<'a, 's> {
         } else {
             locked
         };
+        if let Some((target, Some(member))) = &local
+            && incumbent
+                .or_else(|| versions.first().map(String::as_str))
+                .is_none_or(|version| {
+                    workspace_links::prefers_workspace_version(self.config, member, version)
+                })
+        {
+            return self.workspace_target(target, Some(member), inject, old_key);
+        }
         if versions.is_empty() {
             self.empty_domain = true;
             if let Owner::Snapshot(parent) = &edge.0 {
@@ -810,6 +848,22 @@ impl<'a, 's> Build<'a, 's> {
         );
         self.pending.insert(key.clone());
         Ok(key)
+    }
+
+    fn workspace_target(
+        &mut self,
+        target: &str,
+        member: Option<&Value>,
+        inject: bool,
+        previous: Option<&str>,
+    ) -> Result<String> {
+        if !inject {
+            return Ok(target.to_owned());
+        }
+        let path = target.strip_prefix("link:").expect("workspace link");
+        let raw = member
+            .ok_or_else(|| reconcile::missing(&[path], "missing injected workspace manifest"))?;
+        self.directory(path, raw, previous)
     }
     fn directory(&mut self, path: &str, raw: &Value, previous: Option<&str>) -> Result<String> {
         let name = raw["name"]

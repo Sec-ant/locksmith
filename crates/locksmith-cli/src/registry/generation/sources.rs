@@ -9,8 +9,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fluent_uri::{Uri, UriRef};
 use locksmith::SourceManifest;
+use ring::digest;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha512};
 
 use super::GenerationSource;
 use crate::{Result, workspace};
@@ -39,7 +39,7 @@ pub(super) fn resolve(
                 json!({"directory":relative,"type":"directory"}),
             );
         }
-        return archive(name, &locator, fs::File::open(path)?);
+        return archive(name, &locator, fs::File::open(path)?, None);
     }
     if git_spec(spec) {
         return git(name, spec, source.network);
@@ -101,20 +101,22 @@ fn remote_archive(
     if !network {
         return Err(format!("missing tarball manifest for {name}; use --allow-network").into());
     }
-    let release = download_archive(client, name, spec)?;
+    let release = download_archive(client, name, spec, expected_integrity)?;
     let integrity = release.resolution["integrity"]
         .as_str()
         .expect("archive integrity");
-    if expected_integrity.is_some_and(|expected| expected != integrity) {
-        return Err(format!("tarball integrity differs from the locked release for {name}").into());
-    }
     if cache_manifest && let Some(path) = cache(integrity) {
         crate::registry::metadata::store_json(&path, &release.manifest)?;
     }
     Ok(release)
 }
 
-fn download_archive(client: &super::Registry, name: &str, spec: &str) -> Result<SourceManifest> {
+fn download_archive(
+    client: &super::Registry,
+    name: &str,
+    spec: &str,
+    integrity: Option<&str>,
+) -> Result<SourceManifest> {
     // Tarball hosts commonly redirect to a CDN. Follow a bounded chain and
     // send registry credentials only to the original origin.
     let original: ureq::http::Uri = spec.parse()?;
@@ -150,7 +152,7 @@ fn download_archive(client: &super::Registry, name: &str, spec: &str) -> Result<
         if !response.status().is_success() {
             return Err(format!("tarball source returned HTTP {}", response.status()).into());
         }
-        return archive(name, spec, response.body_mut().as_reader());
+        return archive(name, spec, response.body_mut().as_reader(), integrity);
     }
     Err(format!("too many redirects for tarball {spec}").into())
 }
@@ -191,10 +193,19 @@ fn relative(from: &Path, to: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
-fn archive(name: &str, locator: &str, mut reader: impl Read) -> Result<SourceManifest> {
+fn archive(
+    name: &str,
+    locator: &str,
+    mut reader: impl Read,
+    expected: Option<&str>,
+) -> Result<SourceManifest> {
     // Hash compressed bytes, including data after the manifest and tar end markers.
     let mut compressed = tempfile::tempfile()?;
-    let mut hash = Sha512::new();
+    let (algorithm, digests) = match expected {
+        Some(value) => locked_integrity(value)?,
+        None => (&digest::SHA512, Vec::new()),
+    };
+    let mut hash = digest::Context::new(algorithm);
     let mut buf = [0u8; 64 * 1024];
     loop {
         use io::Write;
@@ -205,6 +216,22 @@ fn archive(name: &str, locator: &str, mut reader: impl Read) -> Result<SourceMan
         hash.update(&buf[..count]);
         compressed.write_all(&buf[..count])?;
     }
+    let hash = STANDARD.encode(hash.finish());
+    let integrity = match expected {
+        Some(value)
+            if digests
+                .iter()
+                .any(|&digest| digest == hash || digest == hash.trim_end_matches('=')) =>
+        {
+            value.to_owned()
+        }
+        Some(_) => {
+            return Err(
+                format!("tarball integrity differs from the locked release for {name}").into(),
+            );
+        }
+        None => format!("sha512-{hash}"),
+    };
     io::Seek::rewind(&mut compressed)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(compressed));
     for entry in tar.entries()? {
@@ -215,7 +242,6 @@ fn archive(name: &str, locator: &str, mut reader: impl Read) -> Result<SourceMan
             if matches!(&parts[..],[Component::Normal(_),Component::Normal(n)] | [Component::Normal(n)] if *n=="package.json")
             {
                 let raw: Value = serde_json::from_reader(entry)?;
-                let integrity = format!("sha512-{}", STANDARD.encode(hash.finalize()));
                 return package(
                     name,
                     locator,
@@ -226,6 +252,27 @@ fn archive(name: &str, locator: &str, mut reader: impl Read) -> Result<SourceMan
         }
     }
     Err(format!("no package.json in {locator}").into())
+}
+
+fn locked_integrity(value: &str) -> Result<(&'static digest::Algorithm, Vec<&str>)> {
+    // SRI accepts any matching digest of the strongest algorithm present.
+    for (name, algorithm) in [
+        ("sha512", &digest::SHA512),
+        ("sha384", &digest::SHA384),
+        ("sha256", &digest::SHA256),
+        ("sha1", &digest::SHA1_FOR_LEGACY_USE_ONLY),
+    ] {
+        let hashes: Vec<_> = value
+            .split_ascii_whitespace()
+            .filter_map(|token| token.split_once('-'))
+            .filter(|(prefix, _)| *prefix == name)
+            .map(|(_, hash)| hash.split_once('?').map_or(hash, |(digest, _)| digest))
+            .collect();
+        if !hashes.is_empty() {
+            return Ok((algorithm, hashes));
+        }
+    }
+    Err("missing supported tarball integrity digest".into())
 }
 
 fn git_spec(spec: &str) -> bool {
@@ -369,4 +416,45 @@ fn git(name: &str, spec: &str, network: bool) -> Result<SourceManifest> {
         crate::registry::metadata::store_json(&path, &manifest.manifest)?;
     }
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn a_locked_archive_is_verified_with_its_recorded_hash() {
+        let raw = br#"{"name":"package","version":"1.0.0"}"#;
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(raw.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, "package/package.json", raw.as_slice())
+            .unwrap();
+        let bytes = tar.into_inner().unwrap().finish().unwrap();
+        let url = "https://mirror.example.invalid/package.tgz";
+        let sri = format!("sha256-{}", STANDARD.encode(Sha256::digest(&bytes)));
+        let release = archive("package", url, bytes.as_slice(), Some(&sri)).unwrap();
+        assert_eq!(release.resolution["integrity"], sri);
+        let bad = format!(
+            "sha256-{}",
+            STANDARD.encode(Sha256::digest(b"other archive"))
+        );
+        assert!(
+            archive("package", url, bytes.as_slice(), Some(&bad))
+                .unwrap_err()
+                .to_string()
+                .contains("tarball integrity differs")
+        );
+        let stronger = format!(
+            "{sri} sha512-{}",
+            STANDARD.encode(digest::digest(&digest::SHA512, b"other archive"))
+        );
+        assert!(archive("package", url, bytes.as_slice(), Some(&stronger)).is_err());
+    }
 }

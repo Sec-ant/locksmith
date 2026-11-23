@@ -879,6 +879,7 @@ dependencies = [
  "mimalloc",
  "nodejs-semver",
  "percent-encoding",
+ "ring",
  "rquickjs",
  "serde",
  "serde-saphyr",

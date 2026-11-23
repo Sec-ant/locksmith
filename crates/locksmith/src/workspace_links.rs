@@ -56,6 +56,26 @@ pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceCo
         .unwrap_or(configuration.resolution.inject_workspace_packages)
 }
 
+pub(crate) fn prefers_workspace(config: &WorkspaceConfig) -> bool {
+    config
+        .resolution
+        .parameters
+        .get("preferWorkspacePackages")
+        .is_some_and(|v| v == true)
+}
+
+pub(crate) fn prefers_workspace_version(
+    config: &WorkspaceConfig,
+    workspace: &Value,
+    registry_version: &str,
+) -> bool {
+    let versions = workspace["version"]
+        .as_str()
+        .and_then(|v| v.parse::<node_semver::Version>().ok())
+        .zip(registry_version.parse::<node_semver::Version>().ok());
+    versions.is_some_and(|(local, registry)| local >= registry || prefers_workspace(config))
+}
+
 pub(crate) struct WorkspaceLinks<'a> {
     manifests: &'a BTreeMap<String, Value>,
     config: &'a WorkspaceConfig,

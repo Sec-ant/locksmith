@@ -7,8 +7,6 @@ use std::{
     rc::Rc,
 };
 
-use serde_json::json;
-
 use super::{Baseline, Build, Draft, Node, RegistryPackage, Result, Sources};
 use crate::{
     Value, WorkspaceConfig,
@@ -200,7 +198,11 @@ fn transitive_pin(old: &Value, body: &Value, name: &str, depth: usize) -> Option
 }
 
 impl Baseline<'_> {
-    fn incomplete(&self, cache: &mut Sources<'_>) -> Result<BTreeSet<String>> {
+    fn incomplete(
+        &self,
+        cache: &mut Sources<'_>,
+        live: Option<&BTreeSet<&str>>,
+    ) -> Result<BTreeSet<String>> {
         let mut refresh = BTreeSet::new();
         let patches_changed =
             self.old.get("patchedDependencies") != self.header.get("patchedDependencies");
@@ -209,6 +211,7 @@ impl Baseline<'_> {
             if locator.starts_with("file:") || record["resolution"]["type"] == "directory" {
                 refresh.insert(key.as_str());
             } else if let Some((package, version)) = RegistryPackage::from_key(key)
+                && live.is_none_or(|keys| keys.contains(key.as_str()))
                 && !cache.accepts_pin(&package, version, false)?
             {
                 refresh.insert(key.as_str());
@@ -298,7 +301,6 @@ fn declarations_match(
     {
         return Ok(false);
     }
-    declared.retain(|name, _| manifest["name"].as_str() != Some(name));
     if !bodies.iter().all(|(_, body)| {
         ["dependencies", "optionalDependencies"]
             .into_iter()
@@ -417,16 +419,81 @@ fn declarations_match(
 }
 
 impl<'a> Build<'a, '_> {
-    /// pnpm reads every manifest again once it resolves, then applies the
-    /// compatibility database and readPackage. The lockfile records neither
-    /// `ignoreCompatibilityDb` nor what a hook read outside its checksummed file,
-    /// so a hook can stop, start or change a rewrite with the same checksum.
-    /// A release is stale when its evaluated declarations no longer match its
-    /// record: different peers, or recorded children that no longer satisfy
-    /// them. Without hooks, only database rules can make a publication disagree.
-    fn stale_releases(&mut self, draft: &mut Draft) -> Result<BTreeSet<&'a str>> {
+    /// Evaluate each historical parent before following its recorded children.
+    /// Expansion selects fresh children when the parent can no longer be kept.
+    fn evaluate_history(
+        &mut self,
+        draft: &mut Draft,
+    ) -> Result<(BTreeSet<&'a str>, BTreeSet<&'a str>)> {
+        let mut stale = BTreeSet::new();
+        let mut live = BTreeSet::new();
+        let Some(snapshots) = graph::section(self.old, "snapshots") else {
+            return Ok((live, stale));
+        };
+        let mut pending: Vec<_> = draft
+            .roots
+            .values()
+            .flat_map(|deps| deps.values())
+            .filter_map(|dep| snapshots.get_key_value(&dep.target))
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some((key, body)) = pending.pop() {
+            if !seen.insert(key.as_str()) {
+                continue;
+            }
+            let base = graph::package_key(key);
+            let Some(record) = self.old["packages"].get(base) else {
+                continue;
+            };
+            if stale.contains(base) {
+                continue;
+            }
+            let locator = manifest::selector(base).1.unwrap_or_default();
+            let release = if RegistryPackage::from_key(base).is_some() {
+                Some(self.cache.release(base)?)
+            } else if record["resolution"]["type"] == "git"
+                || locator.starts_with("http://")
+                || locator.starts_with("https://")
+            {
+                Some(self.cache.locked_source(base, &record["resolution"])?)
+            } else if locator.starts_with("file:") || record["resolution"]["type"] == "directory" {
+                continue;
+            } else {
+                None
+            };
+            if let Some(release) = release {
+                let manifest = &Rc::clone(release).manifest;
+                if live.insert(base) {
+                    reconcile::published::refresh_installation_metadata(
+                        &mut draft.document["packages"][base],
+                        manifest,
+                    );
+                }
+                if !declarations_match(base, manifest, record, &[(key, body)], self)? {
+                    stale.insert(base);
+                    continue;
+                }
+            }
+            for group in ["dependencies", "optionalDependencies"] {
+                for (name, reference) in graph::section(body, group).into_iter().flatten() {
+                    if let Some(pin) = reference.as_str().filter(|pin| !pin.starts_with("link:"))
+                        && let Some(child) = snapshots.get_key_value(&graph::snapshot_key(
+                            name,
+                            pin,
+                            Some(snapshots),
+                        ))
+                    {
+                        pending.push(child);
+                    }
+                }
+            }
+        }
+        Ok((live, stale))
+    }
+
+    /// The lockfile does not record whether the compatibility database was enabled.
+    fn stale_compat_releases(&mut self) -> Result<BTreeSet<&'a str>> {
         let old: &'a Value = self.old;
-        let hooks = self.cache.reads_packages();
         let snapshots = graph::section(old, "snapshots");
         let mut occurrences = BTreeMap::<&str, Vec<(&str, &Value)>>::new();
         for (snapshot, body) in snapshots.into_iter().flatten() {
@@ -436,48 +503,16 @@ impl<'a> Build<'a, '_> {
                 .push((snapshot, body));
         }
         let mut stale = BTreeSet::new();
-        let mut reachable = None;
         for (key, record) in graph::section(old, "packages").into_iter().flatten() {
-            let release = if RegistryPackage::from_key(key).is_some() {
-                if !hooks && !self.base.compat_candidates.contains(key.as_str()) {
-                    continue;
-                }
-                self.cache.release(key)?
-            } else {
-                let locator = manifest::selector(key).1.unwrap_or_default();
-                if !hooks
-                    || !(record["resolution"]["type"] == "git"
-                        || locator.starts_with("http://")
-                        || locator.starts_with("https://"))
-                {
-                    continue;
-                }
-                // A removed archive must not force a download just to discard it.
-                if reachable.is_none() {
-                    let roots = draft
-                        .roots
-                        .values()
-                        .flat_map(|deps| deps.values())
-                        .filter(|d| old["snapshots"].get(&d.target).is_some())
-                        .map(|d| d.target.clone())
-                        .collect();
-                    reachable = Some(graph::closure_from_edges(old, &json!({}), &roots)?.packages);
-                }
-                if !reachable.as_ref().expect("old graph closure").contains(key) {
-                    continue;
-                }
-                self.cache.locked_source(key, &record["resolution"])?
-            };
-            let manifest = &Rc::clone(release).manifest;
+            if !self.base.compat_candidates.contains(key.as_str())
+                || RegistryPackage::from_key(key).is_none()
+            {
+                continue;
+            }
             let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
+            let manifest = &Rc::clone(self.cache.release(key)?).manifest;
             if !declarations_match(key, manifest, record, bodies, self)? {
                 stale.insert(key.as_str());
-            }
-            if hooks {
-                reconcile::published::refresh_installation_metadata(
-                    &mut draft.document["packages"][key],
-                    manifest,
-                );
             }
         }
         Ok(stale)
@@ -563,19 +598,31 @@ impl<'a> Build<'a, '_> {
                 draft.document[field] = v.clone();
             }
         }
-        let stale = if outdated {
-            self.stale_releases(draft)?
+        let (reachable, stale) = if outdated && self.cache.reads_packages() {
+            let (live, stale) = self.evaluate_history(draft)?;
+            (Some(live), stale)
+        } else if outdated {
+            (None, self.stale_compat_releases()?)
         } else {
-            BTreeSet::new()
+            (None, BTreeSet::new())
         };
         let mut previous = self.base.incomplete.borrow_mut();
-        if previous
-            .as_ref()
-            .is_none_or(|(epoch, _)| *epoch != self.cache.policy_epoch)
-        {
-            *previous = Some((self.cache.policy_epoch, self.base.incomplete(self.cache)?));
-        }
-        let incomplete = &previous.as_ref().expect("current publication policy").1;
+        let scoped;
+        let incomplete = if let Some(reachable) = &reachable {
+            scoped = self.base.incomplete(self.cache, Some(reachable))?;
+            &scoped
+        } else {
+            if previous
+                .as_ref()
+                .is_none_or(|(epoch, _)| *epoch != self.cache.policy_epoch)
+            {
+                *previous = Some((
+                    self.cache.policy_epoch,
+                    self.base.incomplete(self.cache, None)?,
+                ));
+            }
+            &previous.as_ref().expect("current publication policy").1
+        };
         let expanded;
         let incomplete =
             if self.reopened.is_empty() && self.pinned_snapshots.is_empty() && stale.is_empty() {

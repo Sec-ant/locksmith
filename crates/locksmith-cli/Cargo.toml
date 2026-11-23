@@ -39,6 +39,7 @@ llrt_modules = { version = "0.8.1-beta", optional = true, default-features = fal
 rquickjs = { version = "0.11", optional = true, default-features = false, features = ["futures", "loader"] }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "time"] }
 fluent-uri = "0.4.1"
+ring = "0.17.14"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 mimalloc = { version = "0.1.52", features = ["v2", "no_thp"] }

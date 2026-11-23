@@ -11,8 +11,9 @@ type Result<T> = std::result::Result<T, LockfileError>;
 struct Registry {
     packages: BTreeMap<String, BTreeMap<String, Value>>,
     tarballs: BTreeSet<String>,
-    cached_tarballs: BTreeSet<String>,
+    cached_tarballs: BTreeMap<String, SourceManifest>,
     tags: BTreeMap<(&'static str, &'static str), &'static str>,
+    require_known_pins: bool,
 }
 impl Registry {
     fn add(&mut self, name: &str, version: &str, manifest: Value) {
@@ -74,33 +75,35 @@ impl PackageSource for Registry {
             json!({"integrity":"sha512-fixture"}),
         )
     }
+    fn accepts_pin(&mut self, package: &RegistryPackage, _: &str, _: bool) -> Result<bool> {
+        assert!(
+            !self.require_known_pins || self.packages.contains_key(&package.name),
+            "unexpected lookup of {}",
+            package.name
+        );
+        Ok(true)
+    }
     fn other(&mut self, _: &str, name: &str, specifier: &str) -> Result<SourceManifest> {
         assert!(
             self.tarballs.contains(specifier),
             "unexpected fetch for {specifier}"
         );
-        self.cached_tarballs.insert(specifier.into());
-        SourceManifest::new(
+        let release = SourceManifest::new(
             format!("{name}@{specifier}"),
             json!({"name":name,"version":"1.0.0"}),
             json!({"integrity":"sha512-fixture","tarball":specifier}),
-        )
+        )?;
+        self.cached_tarballs
+            .insert(release.key.clone(), release.clone());
+        Ok(release)
     }
-    fn locked_source(
-        &mut self,
-        name: &str,
-        locator: &str,
-        resolution: &Value,
-    ) -> Result<SourceManifest> {
-        assert!(
-            self.cached_tarballs.contains(locator),
-            "missing cached archive {locator}"
-        );
-        SourceManifest::new(
-            format!("{name}@{locator}"),
-            json!({"name":name,"version":"1.0.0"}),
-            resolution.clone(),
-        )
+    fn locked_source(&mut self, name: &str, locator: &str, _: &Value) -> Result<SourceManifest> {
+        let key = format!("{name}@{locator}");
+        Ok(self
+            .cached_tarballs
+            .get(&key)
+            .unwrap_or_else(|| panic!("missing cached archive {locator}"))
+            .clone())
     }
 }
 fn workspace(entries: &[(&str, Value)]) -> BTreeMap<String, Value> {
@@ -1807,6 +1810,180 @@ fn a_link_override_preserves_the_declared_dev_group_with_pnpm_12_17() {
             json!({(group):{"sdk":{"specifier":"link:../sdk","version":"link:../sdk"}}})
         );
     }
+}
+
+#[test]
+fn implicit_workspace_links_follow_the_registry_and_workspace_version_preference() {
+    let previous = Lockfile::parse(&json!({
+        "lockfileVersion":"9.0",
+        "importers":{".":{"dependencies":{"foo":{"specifier":"^1","version":"1.1.0"}}},"packages/foo":{}},
+        "packages":{"foo@1.1.0":{"resolution":{"integrity":"sha512-fixture"}}},
+        "snapshots":{"foo@1.1.0":{}}
+    }).to_string()).unwrap();
+    for (version, prefer, declaration, expected) in [
+        ("1.0.0", false, "^1", "1.1.0"),
+        ("1.1.0", false, "^1", "link:packages/foo"),
+        ("1.2.0", false, "^1", "link:packages/foo"),
+        ("1.0.0", true, "^1", "link:packages/foo"),
+        ("1.0.0", false, "workspace:^1", "link:packages/foo"),
+    ] {
+        let manifests = workspace(&[
+            (".", json!({"dependencies":{"foo":declaration}})),
+            ("packages/foo", json!({"name":"foo","version":version})),
+        ]);
+        let config = json!({"linkWorkspacePackages":true,"preferWorkspacePackages":prefer});
+        let mut registry = Registry::default();
+        registry.add("foo", "1.1.0", json!({}));
+        for baseline in [&previous, &empty_workspace_lock()] {
+            let result = generate(
+                baseline,
+                &GenerateContext::new(&manifests, &config),
+                &mut registry,
+            )
+            .unwrap();
+            assert_eq!(
+                result.project().unwrap()["importers"]["."]["dependencies"]["foo"]["version"],
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hook_does_not_load_an_unreachable_registry_release() {
+    struct Identity;
+    impl locksmith::GenerationHooks for Identity {
+        fn read_package(&mut self, _: &str, raw: Value) -> Result<Value> {
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add(
+        "parent",
+        "1.0.0",
+        json!({"dependencies":{"removed-child":"1"}}),
+    );
+    registry.add("removed-child", "1.0.0", json!({}));
+    registry.add("kept", "1.0.0", json!({}));
+    let config = json!({"pnpmfileChecksum":"stable"});
+    let generate = |previous: &Lockfile, registry: &mut Registry, dependencies: Value| {
+        let manifests = workspace(&[(".", json!({"dependencies":dependencies}))]);
+        locksmith::generate_with_hooks(
+            previous,
+            &GenerateContext::new(&manifests, &config),
+            registry,
+            &mut Identity,
+        )
+        .unwrap()
+    };
+    let previous = generate(
+        &empty_workspace_lock(),
+        &mut registry,
+        json!({"parent":"1","kept":"1"}),
+    );
+    registry.packages.remove("parent");
+    registry.packages.remove("removed-child");
+    registry.require_known_pins = true;
+    let next = generate(&previous, &mut registry, json!({"kept":"1"}));
+    let doc = next.project().unwrap();
+    assert_eq!(doc["snapshots"], json!({"kept@1.0.0":{}}));
+    assert_eq!(
+        doc["packages"],
+        json!({"kept@1.0.0":{"resolution":{"integrity":"sha512-fixture"}}})
+    );
+}
+
+#[test]
+fn a_rewritten_parent_uses_only_the_archive_edges_it_still_declares() {
+    const ARCHIVE: &str = "https://example.test/archive.tgz";
+    struct Rewrite(Option<bool>);
+    impl locksmith::GenerationHooks for Rewrite {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin"
+                && let Some(keep_archive) = self.0
+            {
+                raw["dependencies"] = if keep_archive {
+                    json!({"child":"^2", "archive":ARCHIVE})
+                } else {
+                    json!({"child":"^2"})
+                };
+            }
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({"dependencies":{"child":"^1","archive":ARCHIVE}}),
+    );
+    registry.add("child", "1.0.0", json!({}));
+    registry.add("child", "2.0.0", json!({}));
+    registry.tarballs.insert(ARCHIVE.into());
+    let mut manifests = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let config = json!({"pnpmfileChecksum":"stable"});
+    let generate = |previous: &Lockfile, manifests: &_, registry: &mut Registry, rewrite| {
+        locksmith::generate_with_hooks(
+            previous,
+            &GenerateContext::new(manifests, &config),
+            registry,
+            &mut Rewrite(rewrite),
+        )
+        .unwrap()
+    };
+    let previous = generate(&empty_workspace_lock(), &manifests, &mut registry, None);
+    registry.tarballs.clear();
+    manifests.insert("edited".into(), json!({}));
+    let kept = generate(&previous, &manifests, &mut registry, Some(true));
+    assert_eq!(
+        kept.project().unwrap()["snapshots"]["plugin@1.0.0"]["dependencies"],
+        json!({
+            "child":"2.0.0","archive":ARCHIVE
+        })
+    );
+
+    registry.cached_tarballs.clear();
+    let removed = generate(&previous, &manifests, &mut registry, Some(false));
+    let doc = removed.project().unwrap();
+    assert_eq!(
+        doc["snapshots"]["plugin@1.0.0"]["dependencies"],
+        json!({"child":"2.0.0"})
+    );
+    assert!(doc["packages"].get(format!("archive@{ARCHIVE}")).is_none());
+}
+
+#[test]
+fn a_hook_can_add_an_ordinary_dependency_with_the_same_alias_as_the_package() {
+    struct Alias(bool);
+    impl locksmith::GenerationHooks for Alias {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if self.0 && raw["name"] == "plugin" {
+                raw["dependencies"]["plugin"] = "npm:helper@^1".into();
+            }
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add("plugin", "1.0.0", json!({}));
+    registry.add("helper", "1.0.0", json!({}));
+    let mut manifests = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let config = json!({"pnpmfileChecksum":"stable"});
+    let generate = |previous: &Lockfile, manifests: &_, registry: &mut Registry, alias| {
+        locksmith::generate_with_hooks(
+            previous,
+            &GenerateContext::new(manifests, &config),
+            registry,
+            &mut Alias(alias),
+        )
+        .unwrap()
+    };
+    let previous = generate(&empty_workspace_lock(), &manifests, &mut registry, false);
+    manifests.insert("edited".into(), json!({}));
+    let next = generate(&previous, &manifests, &mut registry, true);
+    assert_eq!(
+        next.project().unwrap()["snapshots"]["plugin@1.0.0"]["dependencies"]["plugin"],
+        "helper@1.0.0"
+    );
 }
 
 #[test]

@@ -437,19 +437,13 @@ impl PinSelector<'_, '_> {
         let target = context.target.index();
         let preferred_local = |key: &str| -> Option<Pin> {
             let (link, package) = resolved.as_ref()?;
-            let workspace_version = package.as_ref()?["version"]
-                .as_str()?
-                .parse::<node_semver::Version>()
-                .ok()?;
             let (_, version) = graph::package_key(key).rsplit_once('@')?;
-            let locked = version.parse::<node_semver::Version>().ok()?;
-            let prefer = context
-                .configuration
-                .resolution
-                .parameters
-                .get("preferWorkspacePackages")
-                .is_some_and(|v| v == true);
-            (workspace_version >= locked || prefer).then(|| Pin {
+            crate::workspace_links::prefers_workspace_version(
+                context.configuration,
+                package.as_ref()?,
+                version,
+            )
+            .then(|| Pin {
                 side: target,
                 key: link.clone(),
                 reference: link.clone(),
