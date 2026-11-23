@@ -442,12 +442,64 @@ impl<'a> Baseline<'a> {
             })
             .clone()
     }
+    /// Whether a release declares the same dependency selector that already
+    /// had no eligible target. A release the source cannot load is kept, so
+    /// evaluating it reports its own error.
+    pub fn repeats_requirement(
+        &self,
+        cache: &mut Sources<'_>,
+        key: &str,
+        name: &str,
+        spec: &str,
+    ) -> Result<bool> {
+        if cache.reads_packages() && !cache.releases.contains_key(key) {
+            return Ok(false);
+        }
+        let Ok(release) = cache.release(key).map(Rc::clone) else {
+            return Ok(false);
+        };
+        Ok(self
+            .publication(".", &release)?
+            .ordinary
+            .get(name)
+            .is_some_and(|(_, declared)| declared == spec))
+    }
 }
 
 fn importer_pin<'a>(old: &'a Value, id: &str, name: &str) -> Option<&'a Value> {
     manifest::GROUPS
         .iter()
         .find_map(|group| old["importers"][id][group].get(name))
+}
+
+/// A release whose dependency declaration had no eligible target, and that
+/// declaration when a selector caused the failure.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct Blocked {
+    pub parent: String,
+    pub requirement: Option<(String, String)>,
+}
+
+impl Blocked {
+    fn requirement(parent: &str, name: &str, spec: &str) -> Self {
+        Self {
+            parent: graph::package_key(parent).to_owned(),
+            requirement: Some((name.to_owned(), spec.to_owned())),
+        }
+    }
+    pub fn release(key: &str) -> Self {
+        Self {
+            parent: graph::package_key(key).to_owned(),
+            requirement: None,
+        }
+    }
+}
+
+pub(super) struct Relaxation {
+    allow_optional_peers: bool,
+    project_interiors: bool,
+    collapse_collisions: bool,
+    reopened: BTreeSet<String>,
 }
 
 pub(super) struct Build<'a, 'b, 's> {
@@ -460,7 +512,7 @@ pub(super) struct Build<'a, 'b, 's> {
     pins: &'a Choices,
     pinned_snapshots: BTreeSet<&'a str>,
     pub demands: Demands,
-    pub blocked_parent: Option<String>,
+    pub blocked: Option<Blocked>,
     pub equalities: Vec<(Vec<Edge>, Vec<String>)>,
     pub conflicting_history: BTreeSet<String>,
     reopened: BTreeSet<String>,
@@ -472,6 +524,10 @@ pub(super) struct Build<'a, 'b, 's> {
     rereads_manifests: bool,
     pub allow_optional_peers: bool,
     pub optional_peer_collision: bool,
+    /// Distinct bodies share a key and no release choice can reconcile them.
+    pub unrepairable_collision: bool,
+    /// Keep the first, shallowest body of each key, as pnpm does.
+    pub collapse_collisions: bool,
     local_dirs: BTreeMap<String, String>,
     pending: BTreeSet<String>,
 }
@@ -496,7 +552,7 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
             local_dirs: BTreeMap::new(),
             pending: BTreeSet::new(),
             demands: BTreeMap::new(),
-            blocked_parent: None,
+            blocked: None,
             equalities: Vec::new(),
             conflicting_history: BTreeSet::new(),
             reopened: BTreeSet::new(),
@@ -507,6 +563,8 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
             rereads_manifests: true,
             allow_optional_peers: true,
             optional_peer_collision: false,
+            unrepairable_collision: false,
+            collapse_collisions: false,
         }
     }
     pub fn resolve(&mut self) -> Result<Draft> {
@@ -614,19 +672,41 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
             // different historical children, even when neither key was retained.
             self.project_interiors = true;
             self.conflicting_history.clear();
-        } else {
-            if self.conflicting_history.is_subset(&self.reopened) {
-                return false;
-            }
+        } else if !self.conflicting_history.is_subset(&self.reopened) {
             self.reopened.append(&mut self.conflicting_history);
+        } else if self.unrepairable_collision && !self.collapse_collisions {
+            // pnpm keeps the body of the shallowest occurrence of a dependency
+            // path, even when deeper occurrences resolved different children.
+            self.collapse_collisions = true;
+        } else {
+            return false;
         }
+        self.unrepairable_collision = false;
         self.used_interior_history = false;
         self.pending.clear();
         self.local_dirs.clear();
         self.demands.clear();
         self.equalities.clear();
-        self.blocked_parent = None;
+        self.blocked = None;
         true
+    }
+
+    /// The projection fallbacks this assignment needed. Alternative assignments
+    /// share most of its graph and start from the same fallbacks.
+    pub fn relaxation(&self) -> Relaxation {
+        Relaxation {
+            allow_optional_peers: self.allow_optional_peers,
+            project_interiors: self.project_interiors,
+            collapse_collisions: self.collapse_collisions,
+            reopened: self.reopened.clone(),
+        }
+    }
+
+    pub fn relax(&mut self, relaxation: &Relaxation) {
+        self.allow_optional_peers = relaxation.allow_optional_peers;
+        self.project_interiors = relaxation.project_interiors;
+        self.collapse_collisions = relaxation.collapse_collisions;
+        self.reopened.clone_from(&relaxation.reopened);
     }
 
     fn select(
@@ -639,6 +719,7 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
         old_entry: Option<&Value>,
     ) -> Result<String> {
         let direct = matches!(owner, Owner::Importer(_));
+        let declared = spec;
         let catalog = spec.strip_prefix("catalog:");
         let spec = match catalog {
             Some(c) => self
@@ -676,7 +757,7 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
         }
         if spec.starts_with("workspace:") {
             if let Owner::Snapshot(parent) = &owner {
-                self.blocked_parent = Some(graph::package_key(parent).to_owned());
+                self.blocked = Some(Blocked::requirement(parent, name, declared));
             }
             return Err(reconcile::missing(
                 &[dir, name],
@@ -779,7 +860,7 @@ impl<'a, 'b, 's> Build<'a, 'b, 's> {
         }
         if versions.is_empty() {
             if let Owner::Snapshot(parent) = &edge.0 {
-                self.blocked_parent = Some(graph::package_key(parent).to_owned());
+                self.blocked = Some(Blocked::requirement(parent, name, declared));
             }
             return Err(reconcile::missing(
                 &[&package.name],

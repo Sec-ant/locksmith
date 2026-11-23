@@ -72,3 +72,9 @@ The edit does not have to touch the plugin's project. With the plugin in one wor
 A plugin lists `child: "1"` in both `dependencies` and `peerDependencies`. The app using the plugin supplies no `child` of its own. The plugin resolves `child@1.0.0` from its ordinary dependencies.
 
 With pnpm 11.28.6, the plugin's snapshot contains `dependencies.child: 1.0.0`, while the package record omits `peerDependencies.child`. With 11.28.7, the same snapshot edge remains and the package record also contains `peerDependencies.child: "1"`. The same change appears between 12.14.0 and 12.15.0. Keeping the declaration matters on a later install when the app starts supplying the peer itself. [Upstream reproduction](https://github.com/pnpm/pnpm/issues/17056) · [pnpm 11.28.7](https://github.com/pnpm/pnpm/releases/tag/v11.28.7) · [pnpm 12.15](https://github.com/pnpm/pnpm/releases/tag/v12.15.0)
+
+## Two occurrences can share a snapshot key with different children
+
+A snapshot key names a release and the peers it resolves from outside. It does not name the release's ordinary children. Two occurrences of the same release can therefore resolve different children and still print the same key. This happens, for example, when a lockfile kept per-snapshot children from earlier installs and an edit then gives both occurrences the same peers, or when `dedupe-peers` prints only the release of each peer provider.
+
+pnpm writes one body per key. It keeps the body of the shallowest occurrence and drops the deeper one's children. The lockfile still passes `--frozen-lockfile`. [pnpm 10.33.2 peer resolution](https://github.com/pnpm/pnpm/blob/v10.33.2/pkg-manager/resolve-dependencies/src/resolvePeers.ts#L598)

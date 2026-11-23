@@ -786,6 +786,46 @@ fn a_peer_can_use_an_external_provider_or_its_own_dependency() {
 }
 
 #[test]
+fn a_provided_peer_hides_the_peers_of_the_packages_own_dependency() {
+    // `icon` depends on `styled` and also declares it as a peer. The consumer
+    // provides `styled`, so the peers of icon's own `styled` never reach icon.
+    let mut registry = Registry::default();
+    registry.add("react-is", "1.0.0", json!({}));
+    registry.add(
+        "styled",
+        "1.0.0",
+        json!({"peerDependencies":{"react-is":"1"}}),
+    );
+    registry.add(
+        "icon",
+        "1.0.0",
+        json!({"dependencies":{"styled":"1"},"peerDependencies":{"styled":"1"}}),
+    );
+    let manifests = workspace(&[(
+        ".",
+        json!({"dependencies":{"icon":"1","styled":"1","react-is":"1"}}),
+    )]);
+    for (dedupe, expected) in [
+        (false, "1.0.0(styled@1.0.0(react-is@1.0.0))"),
+        (true, "1.0.0(styled@1.0.0)"),
+    ] {
+        let config = json!({"dedupePeers":dedupe});
+        let lock = run(&empty_workspace_lock(), &manifests, config, &mut registry).unwrap();
+        let doc = lock.project().unwrap();
+        let pin = doc["importers"]["."]["dependencies"]["icon"]["version"]
+            .as_str()
+            .unwrap();
+        assert_eq!(pin, expected);
+        let body = &doc["snapshots"][format!("icon@{pin}")];
+        assert!(body.get("transitivePeerDependencies").is_none());
+        assert_eq!(
+            body["dependencies"]["styled"],
+            doc["importers"]["."]["dependencies"]["styled"]["version"]
+        );
+    }
+}
+
+#[test]
 fn a_file_dependency_keeps_its_child_release_in_a_peer_specific_snapshot() {
     let mut registry = Registry::default();
     for name in ["host", "leaf"] {

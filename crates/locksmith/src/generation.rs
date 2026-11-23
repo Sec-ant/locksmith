@@ -634,6 +634,8 @@ fn solve(
     let mut best_trace: Option<choices::Trace> = None;
     let mut best: Option<(choices::Score, Value)> = None;
     let mut failure = None;
+    let mut reopened = BTreeSet::new();
+    let mut relaxation = None;
     'search: while let Some(pins) = decisions.next() {
         if !visited.insert(pins.clone()) {
             continue;
@@ -646,6 +648,9 @@ fn solve(
         }
         let mut build = graph::Build::new(cache, &base, &pins);
         build.prefer_historical_peers = !strict;
+        if let Some(relaxation) = &relaxation {
+            build.relax(relaxation);
+        }
         let mut draft;
         let attempt = loop {
             draft = match build.resolve() {
@@ -678,14 +683,39 @@ fn solve(
             }
         };
         let mut doc = match attempt {
-            Ok(doc) => doc,
+            Ok(doc) => {
+                relaxation = Some(build.relaxation());
+                doc
+            }
             Err(e) => {
                 failure = Some(e);
                 decisions.equalities(&pins, build.equalities);
-                if let Some(parent) = build.blocked_parent.take() {
-                    let affected = choices::ancestors(&draft, &BTreeSet::from([parent]));
+                // Reopen each unsatisfied declaration once, at the choices that select
+                // its parent. pnpm itself stops at the first such declaration.
+                if let Some(blocked) = build.blocked.take()
+                    && reopened.insert(blocked.clone())
+                {
                     let demands = build.demands;
-                    let branches = alternatives(cache, demands.iter(), &pins, &affected, Err)?;
+                    let parents = BTreeSet::from([blocked.parent.clone()]);
+                    let mut branches = alternatives(cache, demands.iter(), &pins, &parents, Err)?;
+                    if let Some((name, spec)) = &blocked.requirement {
+                        for (edge, versions) in &mut branches {
+                            let package = &demands[edge].package;
+                            let mut kept = Vec::with_capacity(versions.len());
+                            for version in versions.drain(..) {
+                                if !base.repeats_requirement(
+                                    cache,
+                                    &package.key(&version),
+                                    name,
+                                    spec,
+                                )? {
+                                    kept.push(version);
+                                }
+                            }
+                            *versions = kept;
+                        }
+                        branches.retain(|(_, versions)| !versions.is_empty());
+                    }
                     decisions.alternatives(&pins, branches);
                 }
                 continue;

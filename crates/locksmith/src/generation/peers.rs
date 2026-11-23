@@ -12,7 +12,25 @@ use super::{
 };
 use crate::{Value, graph, manifest, reconcile};
 
-type Requirements = BTreeMap<String, Vec<usize>>;
+type Requirements = BTreeMap<String, Requirement>;
+
+/// The declarations that require a peer at a package, and how they reach it.
+#[derive(Default)]
+pub(super) struct Requirement {
+    declarations: Vec<usize>,
+    /// The package declares this peer itself.
+    own: bool,
+    /// The dependencies through which a descendant's declaration arrives.
+    via: BTreeSet<String>,
+}
+
+impl Requirement {
+    /// A consumer-provided peer replaces the package's own dependency of that
+    /// name, together with the peers that dependency would have required.
+    fn active(&self, replaced: impl Fn(&str) -> bool) -> bool {
+        self.own || self.via.iter().any(|edge| !replaced(edge))
+    }
+}
 
 struct PeerDeclaration {
     owner: String,
@@ -35,9 +53,9 @@ fn requirements(draft: &Draft) -> (BTreeMap<String, Requirements>, Vec<PeerDecla
         .collect();
     let mut parents = vec![Vec::new(); nodes.len()];
     for (parent, node) in nodes.iter().enumerate() {
-        for dep in node.edges.values() {
+        for (name, dep) in &node.edges {
             if let Some(&child) = indices.get(dep.target.as_str()) {
-                parents[child].push(parent);
+                parents[child].push((parent, name.as_str()));
             }
         }
     }
@@ -45,7 +63,8 @@ fn requirements(draft: &Draft) -> (BTreeMap<String, Requirements>, Vec<PeerDecla
         .iter()
         .map(|n| manifest::selector(&n.package).0)
         .collect();
-    let mut free = vec![BTreeMap::<&str, Vec<usize>>::new(); nodes.len()];
+    let mut free = Vec::new();
+    free.resize_with(nodes.len(), BTreeMap::<&str, Requirement>::new);
     let mut declarations = Vec::new();
     let mut visited = vec![usize::MAX; nodes.len()];
     let mut pending = Vec::new();
@@ -69,12 +88,19 @@ fn requirements(draft: &Draft) -> (BTreeMap<String, Requirements>, Vec<PeerDecla
             pending.push(source);
             visited[source] = id;
             while let Some(child) = pending.pop() {
-                free[child].entry(peer).or_default().push(id);
-                for &parent in &parents[child] {
-                    if visited[parent] != id
-                        && names[parent] != peer
-                        && !nodes[parent].edges.contains_key(peer)
-                    {
+                let requirement = free[child].entry(peer).or_default();
+                requirement.declarations.push(id);
+                requirement.own |= child == source;
+                for &(parent, edge) in &parents[child] {
+                    if names[parent] == peer || nodes[parent].edges.contains_key(peer) {
+                        continue;
+                    }
+                    free[parent]
+                        .entry(peer)
+                        .or_default()
+                        .via
+                        .insert(edge.to_owned());
+                    if visited[parent] != id {
                         visited[parent] = id;
                         pending.push(parent);
                     }
@@ -89,7 +115,7 @@ fn requirements(draft: &Draft) -> (BTreeMap<String, Requirements>, Vec<PeerDecla
         .zip(free.into_iter().map(|entries| {
             entries
                 .into_iter()
-                .map(|(name, ids)| (name.to_owned(), ids))
+                .map(|(name, requirement)| (name.to_owned(), requirement))
                 .collect()
         }))
         .collect();
@@ -158,9 +184,14 @@ impl Instances<'_, '_> {
             let Provider::Package(id) = slot else {
                 continue;
             };
-            self.nodes[*id].scope = self.free[&self.nodes[*id].key]
-                .keys()
-                .filter_map(|n| Some((n.clone(), scope.get(n)?.clone())))
+            let free = &self.free[&self.nodes[*id].key];
+            // The package's own dependency is replaced where the consumer provides that peer.
+            let replaced =
+                |edge: &str| scope.contains_key(edge) && free.get(edge).is_some_and(|r| r.own);
+            self.nodes[*id].scope = free
+                .iter()
+                .filter(|(_, requirement)| requirement.active(replaced))
+                .filter_map(|(n, _)| Some((n.clone(), scope.get(n)?.clone())))
                 .collect();
         }
     }
@@ -274,7 +305,7 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Resul
                         {
                             continue;
                         }
-                        for &id in reqs {
+                        for &id in &reqs.declarations {
                             if !declarations[id].optional {
                                 wants.entry(name).or_default().insert(id);
                             } else if declarations[id].install_optional
@@ -540,7 +571,9 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Resul
             .filter(|name| !free[&occurrence.key].contains_key(*name))
             .cloned()
             .collect();
-        for name in free[&occurrence.key].keys() {
+        let free = &free[&occurrence.key];
+        let replaced = |edge: &str| occurrence.scope.contains_key(edge);
+        for (name, requirement) in free {
             if node.record["peerDependencies"].get(name).is_some() {
                 if let Some(p) = occurrence.scope.get(name) {
                     let group = if node.record["peerDependenciesMeta"][name]["optional"] == true {
@@ -550,7 +583,7 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Resul
                     };
                     body[group][name] = reference(name, p).into();
                 }
-            } else {
+            } else if requirement.active(replaced) {
                 transitive.insert(name.clone());
             }
         }
@@ -596,8 +629,9 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Resul
         }
     }
     collisions.retain(|(key, _, _, _, body)| {
-        if build.config.resolution.dedupe_peer_dependents
-            && shares_children(&doc, key, &doc["snapshots"][*key], body)
+        if build.collapse_collisions
+            || build.config.resolution.dedupe_peer_dependents
+                && shares_children(&doc, key, &doc["snapshots"][*key], body)
         {
             return false;
         }
@@ -617,7 +651,8 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_, '_>) -> Resul
         );
         let equalities = common_children((left, prior), (right, &body), ordinary, &build.demands);
         if equalities.is_empty() {
-            build.blocked_parent = Some(graph::package_key(key).into());
+            build.blocked = Some(super::graph::Blocked::release(key));
+            build.unrepairable_collision = true;
             return Err(error);
         }
         build.equalities.extend(equalities);

@@ -107,10 +107,25 @@ pub(in crate::generation) fn reuse_children(
         // A root selects a whole subtree. Two releases may force different
         // grandchildren even when their direct children have no duplicate.
         // Group releases by the direct constraints observable on this graph.
+        // A dependency whose current subtree reaches no introduced duplicate
+        // cannot remove one, so its constraint does not distinguish releases.
+        let mut present = BTreeSet::new();
+        let mut related = BTreeSet::new();
+        for node in draft.nodes.values().filter(|node| node.package == current) {
+            for (name, edge) in &node.edges {
+                present.insert(name.as_str());
+                if affected.contains(graph::package_key(&edge.target)) {
+                    related.insert(name.as_str());
+                }
+            }
+        }
         let shape = |raw: &Value| -> Result<Vec<_>> {
             let mut shape = Vec::new();
             for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
                 for (name, value) in graph::section(raw, group).into_iter().flatten() {
+                    if present.contains(name.as_str()) && !related.contains(name.as_str()) {
+                        continue;
+                    }
                     let Some(spec) = value.as_str() else { continue };
                     let range = match overrides.select(raw, name, spec)? {
                         Some(value) => overrides.resolve(".", name, value)?,
