@@ -8,7 +8,7 @@ use super::{JSR_REGISTRY, ProjectRc, Registry};
 
 pub struct GenerationSource<'a> {
     config: &'a Value,
-    major: Option<u64>,
+    version: Option<&'a Version>,
     network: bool,
     hook_manifests: bool,
     prepared: std::collections::BTreeMap<(RegistryPackage, String), Value>,
@@ -16,10 +16,15 @@ pub struct GenerationSource<'a> {
     routes: std::collections::BTreeMap<RegistryPackage, String>,
 }
 impl<'a> GenerationSource<'a> {
-    pub fn new(config: &'a Value, major: Option<u64>, network: bool, hook_manifests: bool) -> Self {
+    pub fn new(
+        config: &'a Value,
+        version: Option<&'a Version>,
+        network: bool,
+        hook_manifests: bool,
+    ) -> Self {
         Self {
             config,
-            major,
+            version,
             network,
             hook_manifests,
             prepared: Default::default(),
@@ -29,7 +34,11 @@ impl<'a> GenerationSource<'a> {
     }
     fn client(&mut self) -> crate::Result<&mut Registry> {
         if self.registry.is_none() {
-            let mut registry = Registry::new(self.config, self.major, ProjectRc::Working)?;
+            let mut registry = Registry::new(
+                self.config,
+                self.version.map(Version::major),
+                ProjectRc::Working,
+            )?;
             registry.generation_network = Some(self.network);
             self.registry = Some(registry);
         }
@@ -40,16 +49,28 @@ impl<'a> GenerationSource<'a> {
         name: &str,
         spec: &str,
     ) -> crate::Result<Option<(RegistryPackage, String)>> {
-        let built_in = self.major.is_none_or(|v| v >= 11);
+        let version = self.version.map(|v| (v.major(), v.minor(), v.patch()));
         let registry = self.client()?;
-        let named = named_registries(&registry.config, built_in)?;
+        let named = named_registries(&registry.config)?;
         let (prefix, selector) = spec.split_once(':').unwrap_or(("", spec));
-        let explicit = named.get(prefix).map(String::as_str);
+        let explicit = named
+            .get(prefix)
+            .map(String::as_str)
+            .or_else(|| builtin_registry(prefix, version));
         let request = if prefix == "jsr" || explicit.is_some() {
             let (actual, range) = selector
                 .rsplit_once('@')
                 .filter(|(n, _)| !n.is_empty())
-                .unwrap_or((name, selector));
+                .unwrap_or_else(|| {
+                    if selector.is_empty() || selector.parse::<Range>().is_ok() {
+                        (name, selector)
+                    } else {
+                        (
+                            selector,
+                            registry.config["tag"].as_str().unwrap_or("latest"),
+                        )
+                    }
+                });
             let actual = if prefix == "jsr" {
                 format!("@jsr/{}", actual.trim_start_matches('@').replace('/', "__"))
             } else {
@@ -75,42 +96,53 @@ impl<'a> GenerationSource<'a> {
         {
             base = JSR_REGISTRY.into();
         }
-        if base != default {
-            // An alias in the specifier names its registry. A plain dependency
-            // routed to another registry takes a declared prefix for that URL.
-            package.prefix = if explicit.is_some() {
-                Some(prefix.to_owned())
-            } else {
-                named_registries(&registry.config, false)?
-                    .into_iter()
-                    .find(|(_, url)| url.trim_end_matches('/') == base.trim_end_matches('/'))
-                    .map(|(p, _)| p)
-            };
+        if version.is_none_or(|v| v >= (11, 20, 0)) {
+            let canonical =
+                version.is_none_or(|v| v >= (12, 16, 0) || v.0 == 11 && v >= (11, 28, 10));
+            // pnpm 11.28.11 and 12.18 restored plain keys for the default
+            // route, unless an explicit alias bypasses a scoped registry.
+            let plain_default =
+                version.is_none_or(|v| v >= (12, 18, 0) || v.0 == 11 && v >= (11, 28, 11));
+            if !plain_default || base != default || registry.registry(&package.name)? != base {
+                let declared = if canonical {
+                    named
+                        .iter()
+                        .find(|(_, url)| url.trim_end_matches('/') == base.trim_end_matches('/'))
+                        .map(|(prefix, _)| prefix.clone())
+                } else {
+                    None
+                };
+                package.prefix = declared.or_else(|| explicit.map(|_| prefix.to_owned()));
+            }
         }
-        if self
-            .routes
-            .insert(package.clone(), base.clone())
-            .is_some_and(|old| old != base)
-        {
-            return Err(format!(
-                "two registries give {} the same lockfile identity",
-                package.name
-            )
-            .into());
+        match self.routes.entry(package.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(base);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() != &base => {
+                return Err(format!(
+                    "two registries give {} the same lockfile identity",
+                    package.name
+                )
+                .into());
+            }
+            _ => {}
         }
         Ok(Some((package, selector)))
     }
     fn package_base(&mut self, package: &RegistryPackage) -> crate::Result<String> {
         let route = self.routes.get(package).cloned();
-        let built_in = self.major.is_none_or(|v| v >= 11);
+        let version = self.version.map(|v| (v.major(), v.minor(), v.patch()));
         let client = self.client()?;
         Ok(match route {
             Some(url) => url,
             None => match &package.prefix {
                 Some(prefix) => {
-                    let named = named_registries(&client.config, built_in)?;
+                    let named = named_registries(&client.config)?;
                     let url = named
                         .get(prefix)
+                        .map(String::as_str)
+                        .or_else(|| builtin_registry(prefix, version))
                         .ok_or_else(|| format!("missing registry {prefix}"))?;
                     Registry::validated_base(url)?
                 }
@@ -128,15 +160,8 @@ impl<'a> GenerationSource<'a> {
 
 /// Registry aliases by prefix. A `registries` declaration takes a prefix from a
 /// `namedRegistries` entry, which overrides pnpm's built-in `gh` and `npmjs`.
-fn named_registries(
-    config: &Value,
-    built_in: bool,
-) -> crate::Result<std::collections::BTreeMap<String, String>> {
+fn named_registries(config: &Value) -> crate::Result<std::collections::BTreeMap<String, String>> {
     let mut named = std::collections::BTreeMap::new();
-    if built_in {
-        named.insert("gh".to_owned(), "https://npm.pkg.github.com/".to_owned());
-        named.insert("npmjs".to_owned(), "https://registry.npmjs.org/".to_owned());
-    }
     for (prefix, url) in config["namedRegistries"].as_object().into_iter().flatten() {
         let url = url.as_str().ok_or("expected named registry URL")?;
         named.insert(prefix.clone(), url.to_owned());
@@ -147,6 +172,14 @@ fn named_registries(
         }
     }
     Ok(named)
+}
+
+fn builtin_registry(prefix: &str, version: Option<(u64, u64, u64)>) -> Option<&'static str> {
+    match prefix {
+        "gh" if version.is_none_or(|v| v >= (11, 1, 0)) => Some("https://npm.pkg.github.com/"),
+        "npmjs" if version.is_none_or(|v| v >= (11, 20, 0)) => Some("https://registry.npmjs.org/"),
+        _ => None,
+    }
 }
 fn error(path: &[&str], error: impl ToString) -> LockfileError {
     LockfileError::ResolutionRequired {
@@ -276,7 +309,10 @@ impl PackageSource for GenerationSource<'_> {
         let mut fetch = || -> crate::Result<SourceManifest> {
             let name = &package.name;
             let base = self.package_base(package)?;
-            let include_tarball = self.client()?.config["lockfileIncludeTarballUrl"] == true;
+            let pnpm = self.version.map(|v| (v.major(), v.minor(), v.patch()));
+            let client = self.client()?;
+            let include_tarball = client.config["lockfileIncludeTarballUrl"] == true
+                || pnpm.is_some_and(|v| v < (11, 20, 0)) && client.registry(name)? != base;
             let raw = if let Some(value) = self.prepared.remove(&(package.clone(), version.into()))
             {
                 value
@@ -375,6 +411,15 @@ impl PackageSource for GenerationSource<'_> {
     ) -> Result<SourceManifest, LockfileError> {
         sources::resolve(self, from, name, spec).map_err(|err| error(&[from, name], err))
     }
+    fn locked_source(
+        &mut self,
+        name: &str,
+        locator: &str,
+        resolution: &Value,
+    ) -> Result<SourceManifest, LockfileError> {
+        sources::locked(self, name, locator, resolution)
+            .map_err(|err| error(&["packages", name], err))
+    }
 }
 
 pub(super) fn cache_file(
@@ -402,4 +447,34 @@ pub(super) fn cache_file(
         dir.join("locksmith/registry")
             .join(format!("{:x}.json", hash.finalize())),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_builtin_npmjs_route_starts_at_pnpm_11_20() {
+        let old = "11.19.0".parse().unwrap();
+        let new = "11.20.0".parse().unwrap();
+        let config = serde_json::json!({"registry":"https://mirror.example.invalid/"});
+        let mut generation = GenerationSource::new(&config, Some(&old), false, false);
+        assert!(generation.route("lib", "npmjs:^1").unwrap().is_none());
+        let mut generation = GenerationSource::new(&config, Some(&new), false, false);
+        let (package, range) = generation.route("lib", "npmjs:^1").unwrap().unwrap();
+        assert_eq!(range, "^1");
+        assert_eq!(package.prefix.as_deref(), Some("npmjs"));
+        assert_eq!(
+            generation.package_base(&package).unwrap(),
+            "https://registry.npmjs.org/"
+        );
+        let mut config = config;
+        config["namedRegistries"]["npmjs"] = "https://named.example.invalid/".into();
+        let mut generation = GenerationSource::new(&config, Some(&old), false, false);
+        let (package, _) = generation.route("lib", "npmjs:^1").unwrap().unwrap();
+        assert_eq!(
+            generation.package_base(&package).unwrap(),
+            "https://named.example.invalid/"
+        );
+    }
 }

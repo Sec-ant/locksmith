@@ -35,6 +35,7 @@ impl Registry {
         let address = listener.local_addr().unwrap();
         let base = format!("http://{address}");
         for (name, doc) in &mut packages {
+            doc["name"] = (*name).into();
             for (version, body) in doc["versions"].as_object_mut().unwrap() {
                 body["name"] = (*name).into();
                 body["version"] = version.clone().into();
@@ -369,11 +370,21 @@ fn a_pinned_git_manifest_can_be_replayed_offline_with_full_hook_inputs() {
         root.join(".pnpmfile.cjs"),
         r#"
 module.exports = { hooks: { readPackage(pkg) {
-  if (pkg.name === 'git-dep') pkg.bin = { cli: pkg.custom.entry };
+  if (pkg.name === 'git-dep') {
+    const stage = require('node:fs').readFileSync('stage', 'utf8');
+    if (stage === 'initial') {
+      pkg.bin = { cli: pkg.custom.entry };
+      pkg.os = ['darwin'];
+    } else {
+      pkg.engines = { node: '>=22' };
+      if (stage === 'edges') pkg.dependencies = { child: 'link:../local' };
+    }
+  }
   return pkg;
 } } };"#,
     )
     .unwrap();
+    fs::write(root.join("stage"), "initial").unwrap();
     let first = run(root, CLI, &["generate", "--stdout", "--allow-network"]);
     assert!(
         first.status.success(),
@@ -390,6 +401,7 @@ module.exports = { hooks: { readPackage(pkg) {
     assert_eq!(record["resolution"]["commit"], sha.trim());
     assert_eq!(record["resolution"]["path"], "/package");
     assert_eq!(record["hasBin"], true);
+    assert_eq!(record["os"], json!(["darwin"]));
     fs::rename(&origin, root.join("unavailable")).unwrap();
     for host in if cfg!(feature = "pnpmfile") {
         vec!["node", "embedded"]
@@ -404,6 +416,35 @@ module.exports = { hooks: { readPackage(pkg) {
         );
         assert_eq!(first.stdout, again.stdout);
     }
+    fs::write(root.join("pnpm-lock.yaml"), &first.stdout).unwrap();
+    fs::write(root.join("stage"), "metadata").unwrap();
+    let mut importer = json!({"name":"app","packageManager":"pnpm@10.34.9","dependencies":{"git-dep":spec,"local":"link:unavailable/package"}});
+    write(root, "package.json", &importer);
+    let record_and_snapshots = |value: &Value| {
+        let (key, record) = value["packages"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap();
+        (record.clone(), value["snapshots"][key].clone())
+    };
+    let metadata = run(root, CLI, &["generate", "--stdout"]);
+    let (updated, snapshot) = record_and_snapshots(&output(metadata.clone()));
+    assert_eq!(updated["resolution"], record["resolution"]);
+    assert_eq!(updated["engines"], json!({"node":">=22"}));
+    assert!(updated.get("hasBin").is_none());
+    assert!(updated.get("os").is_none());
+    assert_eq!(snapshot, json!({}));
+
+    fs::write(root.join("pnpm-lock.yaml"), &metadata.stdout).unwrap();
+    fs::write(root.join("stage"), "edges").unwrap();
+    importer["dependencies"]["local"] = "link:unavailable".into();
+    write(root, "package.json", &importer);
+    let regenerated = output(run(root, CLI, &["generate", "--stdout"]));
+    let (updated, snapshot) = record_and_snapshots(&regenerated);
+    assert_eq!(updated["resolution"], record["resolution"]);
+    assert_eq!(snapshot["dependencies"]["child"], "link:../local");
 }
 
 #[test]
@@ -578,6 +619,48 @@ exports.hooks = { async preResolution(ctx, logger) {
 }
 
 #[test]
+fn generate_uses_the_target_pnpm_default_for_implicit_workspace_members() {
+    let project = tempdir().unwrap();
+    let root = project.path();
+    write_empty_lock(root);
+    write(root, "package.json", &json!({"name":"root","private":true}));
+    write(root, "pnpm-workspace.yaml", &json!({}));
+    for name in ["app", "provider"] {
+        fs::create_dir_all(root.join("packages").join(name)).unwrap();
+    }
+    write(
+        root,
+        "packages/app/package.json",
+        &json!({"name":"app","dependencies":{"provider":"workspace:*"}}),
+    );
+    write(
+        root,
+        "packages/provider/package.json",
+        &json!({"name":"provider","version":"1.0.0"}),
+    );
+    let generate = |version: &str| {
+        output(run(
+            root,
+            CLI,
+            &["generate", "--pnpm-version", version, "--stdout"],
+        ))
+    };
+    for version in ["9.15.9", "10.4.1"] {
+        let old = generate(version);
+        assert_eq!(
+            old["importers"]["packages/app"]["dependencies"]["provider"]["version"],
+            "link:../provider"
+        );
+        assert!(old["importers"].get("packages/provider").is_some());
+    }
+    for version in ["10.5.0", "12.21.0"] {
+        assert_eq!(generate(version)["importers"], json!({".":{}}));
+    }
+    write(root, "pnpm-workspace.yaml", &json!({"packages":[]}));
+    assert_eq!(generate("9.15.9")["importers"], json!({".":{}}));
+}
+
+#[test]
 fn generate_resolves_links_in_both_directions_for_external_workspace_members() {
     let project = tempdir().unwrap();
     let root = project.path().join("common/temp/space");
@@ -747,6 +830,107 @@ fn generate_revalidates_expired_metadata_and_observes_new_publications() {
         );
     }
     server.join().unwrap();
+}
+
+#[test]
+fn tarball_redirects_keep_the_path_and_cache_the_original_manifest() {
+    let project = tempdir().unwrap();
+    let root = project.path();
+    write_empty_lock(root);
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let cdn = TcpListener::bind("127.0.0.1:0").unwrap();
+    let spec = format!("http://{}/pkg/archive.tgz", origin.local_addr().unwrap());
+    let cdn_address = cdn.local_addr().unwrap();
+    fs::write(
+        root.join(".npmrc"),
+        format!(
+            "//{}/:_authToken=origin-secret\n//{cdn_address}/:_authToken=cdn-secret\n",
+            origin.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut manifest = json!({"name":"archive-app","packageManager":"pnpm@10.34.9","dependencies":{"archive":spec}});
+    write(root, "package.json", &manifest);
+    fs::write(
+        root.join(".pnpmfile.cjs"),
+        r#"module.exports = { hooks: { readPackage(pkg) {
+  if (pkg.name === 'archive' && require('node:fs').existsSync('changed')) {
+    pkg.dependencies = { child: 'link:../local' };
+    pkg.cpu = [pkg.fixtureArch];
+  }
+  return pkg;
+} } };"#,
+    )
+    .unwrap();
+    let handle = thread::spawn(move || {
+        let request = |listener: &TcpListener, expected: &str, authorized: bool| {
+            let (stream, _) = listener.accept().unwrap();
+            let mut headers = BufReader::new(&stream).lines().map(Result::unwrap);
+            assert_eq!(
+                headers.next().unwrap().split_ascii_whitespace().nth(1),
+                Some(expected)
+            );
+            let auth = headers.take_while(|s| !s.is_empty()).find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim().to_owned())
+            });
+            assert_eq!(
+                auth.as_deref(),
+                authorized.then_some("Bearer origin-secret")
+            );
+            stream
+        };
+        for (path, location) in [
+            ("/pkg/archive.tgz", "?download=1".to_owned()),
+            ("/pkg/archive.tgz?download=1", "../relocated".to_owned()),
+            ("/relocated", format!("//{cdn_address}/served.tgz")),
+        ] {
+            let mut stream = request(&origin, path, true);
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+        let mut stream = request(&cdn, "/served.tgz", false);
+        let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let body = br#"{"name":"archive","version":"1.0.0","fixtureArch":"arm64"}"#;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "package/package.json", body.as_slice())
+            .unwrap();
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&bytes).unwrap();
+    });
+    let first = run(root, CLI, &["generate", "--allow-network", "--stdout"]);
+    let old = output(first.clone());
+    handle.join().unwrap();
+    let key = format!("archive@{spec}");
+    assert_eq!(old["snapshots"][&key], json!({}));
+
+    fs::write(root.join("pnpm-lock.yaml"), &first.stdout).unwrap();
+    fs::write(root.join("changed"), []).unwrap();
+    manifest["dependencies"]["local"] = "link:local".into();
+    write(root, "package.json", &manifest);
+    let update = output(run(root, CLI, &["generate", "--stdout"]));
+    assert_eq!(
+        update["packages"][&key]["resolution"],
+        old["packages"][&key]["resolution"]
+    );
+    assert_eq!(update["packages"][&key]["cpu"], json!(["arm64"]));
+    assert_eq!(
+        update["snapshots"][&key]["dependencies"]["child"],
+        "link:../local"
+    );
 }
 
 #[test]
@@ -1137,6 +1321,138 @@ fn time_based_generation_keeps_only_pnpm9s_direct_publication_keys() {
         "@scope/core@1.0.0"
     );
     assert_eq!(result["time"], json!({"/direct@1.0.0":stamp}));
+    registry.finish();
+}
+
+#[test]
+fn a_transitive_tag_uses_the_tagged_version_in_time_based_resolution() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_empty_lock(root);
+    let registry = Registry::serve(BTreeMap::from([
+        (
+            "parent",
+            json!({
+                "dist-tags":{"latest":"1.0.0"},
+                "time":{"1.0.0":"2020-02-01T00:00:00Z"},
+                "versions":{"1.0.0":{"dependencies":{"tagged":"beta","ranged":"^1"}}}
+            }),
+        ),
+        (
+            "tagged",
+            json!({
+                "dist-tags":{"beta":"2.0.0","latest":"1.0.0"},
+                "time":{"1.0.0":"2020-01-01T00:00:00Z","2.0.0":"2021-01-01T00:00:00Z"},
+                "versions":{"1.0.0":{},"2.0.0":{}}
+            }),
+        ),
+        (
+            "ranged",
+            json!({
+                "dist-tags":{"latest":"1.1.0"},
+                "time":{"1.0.0":"2020-01-01T00:00:00Z","1.1.0":"2021-01-01T00:00:00Z"},
+                "versions":{"1.0.0":{},"1.1.0":{}}
+            }),
+        ),
+    ]));
+    write(
+        root,
+        "package.json",
+        &json!({"dependencies":{"parent":"1.0.0"}}),
+    );
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        &json!({
+            "registry":registry.base, "resolutionMode":"time-based"
+        }),
+    );
+    let lock = output(run(
+        root,
+        CLI,
+        &[
+            "generate",
+            "--stdout",
+            "--allow-network",
+            "--pnpm-version",
+            "10.12.4",
+        ],
+    ));
+    assert_eq!(
+        lock["snapshots"]["parent@1.0.0"]["dependencies"],
+        json!({
+            "tagged":"2.0.0", "ranged":"1.0.0"
+        })
+    );
+    registry.finish();
+}
+
+#[test]
+fn named_registry_aliases_resolve_versionless_packages_and_use_pnpm_lock_keys() {
+    let publication =
+        json!({"dist-tags":{"latest":"1.0.0","beta":"2.0.0"},"versions":{"1.0.0":{},"2.0.0":{}}});
+    let registry = Registry::serve(BTreeMap::from([
+        ("lib", publication.clone()),
+        ("real-package", publication.clone()),
+        ("@scope/core", publication),
+    ]));
+    for (version, plain, qualified) in [
+        ("11.19.0", "1.0.0", "1.0.0"),
+        ("11.20.0", "1.0.0", "work:1.0.0"),
+        ("11.28.11", "1.0.0", "1.0.0"),
+        ("12.15.0", "1.0.0", "work:1.0.0"),
+        ("12.16.0", "work:1.0.0", "work:1.0.0"),
+        ("12.18.0", "1.0.0", "1.0.0"),
+    ] {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_empty_lock(root);
+        write(
+            root,
+            "package.json",
+            &json!({"dependencies":{
+                "lib":"^1","alias":"work:real-package","scoped":"work:@scope/core",
+                "tagged":"work:lib@beta"
+            }}),
+        );
+        write(
+            root,
+            "pnpm-workspace.yaml",
+            &json!({
+                "registry":registry.base,"namedRegistries":{"work":registry.base},
+                "minimumReleaseAge":0,"trustPolicy":"off"
+            }),
+        );
+        let lock = output(run(
+            root,
+            CLI,
+            &[
+                "generate",
+                "--stdout",
+                "--allow-network",
+                "--pnpm-version",
+                version,
+            ],
+        ));
+        let deps = &lock["importers"]["."]["dependencies"];
+        assert_eq!(deps["lib"]["version"], plain, "pnpm {version}");
+        assert_eq!(
+            deps["alias"]["version"],
+            format!("real-package@{qualified}"),
+            "pnpm {version}"
+        );
+        assert_eq!(
+            deps["scoped"]["version"],
+            format!("@scope/core@{qualified}"),
+            "pnpm {version}"
+        );
+        let tag = qualified.replace("1.0.0", "2.0.0");
+        assert_eq!(
+            deps["tagged"]["version"],
+            format!("lib@{tag}"),
+            "pnpm {version}"
+        );
+    }
     registry.finish();
 }
 

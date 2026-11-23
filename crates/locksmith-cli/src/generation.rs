@@ -56,7 +56,8 @@ pub fn run(
         None => WorkspaceConfig::from_pnpm(&project.config)?,
     };
     let patches = workspace::patches(&config, "", working_file)?;
-    let manifests = Members::for_generation(&project)?.filesystem_manifests(&project.root)?;
+    let manifests =
+        Members::for_generation(&project, version.as_ref())?.filesystem_manifests(&project.root)?;
     let mut input = GenerateContext::new(&manifests, &project.config)
         .with_patches(&patches)
         .with_exhaustive(exhaustive);
@@ -65,7 +66,7 @@ pub fn run(
     }
     let mut registry = GenerationSource::new(
         &project.config,
-        version.as_ref().map(|v| v.major()),
+        version.as_ref(),
         allow_network,
         hooks.as_ref().is_some_and(hooks::Hooks::reads_packages),
     );

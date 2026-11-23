@@ -107,20 +107,29 @@ impl Channel {
         })
     }
     fn call(&mut self, request: &impl Serialize) -> Result<Value> {
-        let writer = self.write.as_mut().expect("open channel");
-        serde_json::to_writer(&mut *writer, request)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
         let closed = || -> Box<dyn std::error::Error> {
             "Node hook host closed its response channel".into()
         };
+        let writer = self.write.as_mut().ok_or_else(closed)?;
+        serde_json::to_writer(&mut *writer, request)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
         let line = match self.timeout {
-            Some(limit) => self.replies.recv_timeout(limit).map_err(|e| match e {
-                std::sync::mpsc::RecvTimeoutError::Timeout => {
-                    format!("pnpmfile hook did not respond within {}s", limit.as_secs()).into()
+            Some(limit) => match self.replies.recv_timeout(limit) {
+                Ok(line) => line,
+                Err(e) => {
+                    // A late response cannot be matched to another request.
+                    self.write.take();
+                    let _ = self.child.kill();
+                    return Err(match e {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => {
+                            format!("pnpmfile hook did not respond within {}s", limit.as_secs())
+                                .into()
+                        }
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => closed(),
+                    });
                 }
-                std::sync::mpsc::RecvTimeoutError::Disconnected => closed(),
-            })?,
+            },
             None => self.replies.recv().map_err(|_| closed())?,
         }?;
         let mut reply: Value = serde_json::from_str(&line)?;
@@ -138,6 +147,35 @@ impl Drop for Channel {
         self.write.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timed_out_hook_channel_rejects_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.cjs");
+        std::fs::write(
+            &path,
+            "module.exports.hooks = { async updateConfig(config) { \
+             await new Promise(resolve => setTimeout(resolve, 500)); return config; } };",
+        )
+        .unwrap();
+        let mut channel = Channel::node(None).unwrap();
+        let path = loader_path(path.canonicalize().unwrap());
+        channel
+            .call(&json!({"op":"open","value":{"files":[[path,false]],"releaseFields":[]}}))
+            .unwrap();
+        channel.timeout = Some(Duration::from_millis(15));
+        let call = json!({"op":"updateConfig","value":{"registry":"https://example.invalid/"}});
+        let error = channel.call(&call).unwrap_err().to_string();
+        assert!(error.contains("did not respond"), "{error}");
+        channel.timeout = None;
+        let error = channel.call(&call).unwrap_err().to_string();
+        assert!(error.contains("closed its response channel"), "{error}");
     }
 }
 

@@ -147,6 +147,7 @@ impl<'a> Sources<'a> {
         self.hooks.as_ref().is_some_and(|h| h.reads_packages())
     }
     fn insert_release(&mut self, mut release: SourceManifest) -> Result<()> {
+        release.validate_directory()?;
         if let Some(hash) = release.manifest["dist"]["shasum"]
             .as_str()
             .and_then(crate::registry::sha1_integrity)
@@ -241,6 +242,35 @@ impl<'a> Sources<'a> {
             self.other.insert(req.clone(), key);
         }
         Ok(self.other[&req].clone())
+    }
+    fn locked_source(&mut self, key: &str, resolution: &Value) -> Result<&Rc<SourceManifest>> {
+        let verify = |release: &SourceManifest| -> Result<()> {
+            if let Some(hash) = resolution.get("integrity")
+                && release.resolution.get("integrity") != Some(hash)
+            {
+                return Err(reconcile::missing(
+                    &[key],
+                    "source integrity differs from the locked release",
+                ));
+            }
+            Ok(())
+        };
+        if !self.releases.contains_key(key) {
+            let (name, locator) = manifest::selector(key);
+            let locator = locator.expect("locked source locator");
+            let release = self.source.locked_source(name, locator, resolution)?;
+            if release.key != key {
+                return Err(reconcile::missing(
+                    &[key],
+                    format!("source manifest identifies {}", release.key),
+                ));
+            }
+            verify(&release)?;
+            self.insert_release(release)?;
+        } else {
+            verify(&self.releases[key])?;
+        }
+        Ok(&self.releases[key])
     }
     pub(super) fn release(&mut self, key: &str) -> Result<&Rc<SourceManifest>> {
         if !self.releases.contains_key(key) {
@@ -1127,17 +1157,11 @@ impl<'a, 's> Build<'a, 's> {
                     }
                 }
             } else {
-                if !self.cache.releases.contains_key(base)
+                if local.is_none()
                     && RegistryPackage::from_key(base).is_none()
-                    && let Some(locator) = manifest::selector(base).1
+                    && manifest::selector(base).1.is_some()
                 {
-                    let actual = self.cache.other(".", manifest::selector(base).0, locator)?;
-                    if actual != base {
-                        return Err(reconcile::missing(
-                            &[base],
-                            format!("source manifest identifies {actual}"),
-                        ));
-                    }
+                    self.cache.locked_source(base, &record["resolution"])?;
                 }
                 let release = Rc::clone(self.cache.release(base)?);
                 let mut resolution = std::borrow::Cow::Borrowed(&release.resolution);

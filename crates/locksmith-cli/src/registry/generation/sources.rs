@@ -7,6 +7,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fluent_uri::{Uri, UriRef};
 use locksmith::SourceManifest;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha512};
@@ -44,48 +45,131 @@ pub(super) fn resolve(
         return git(name, spec, source.network);
     }
     if spec.starts_with("https://") || spec.starts_with("http://") {
-        if !source.network {
-            return Err(format!("missing tarball manifest for {name}; use --allow-network").into());
-        }
-        let client = source.client()?;
-        // Tarball hosts commonly redirect to a CDN. Follow a bounded chain and
-        // send registry credentials only to the original origin.
-        let origin = |url: &str| url.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
-        let mut url = spec.to_owned();
-        for _ in 0..10 {
-            let mut request = client.agent.get(&url);
-            if origin(&url) == origin(spec)
-                && let Some(auth) = client.auth(&url, name)?
-            {
-                request = request.header("Authorization", &auth);
-            }
-            let mut response = request.call()?;
-            if response.status().is_redirection() {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or("tarball redirect without a location")?;
-                url = if location.starts_with("https://") || location.starts_with("http://") {
-                    location.to_owned()
-                } else if location.starts_with('/') {
-                    format!("{}{location}", origin(&url))
-                } else {
-                    format!(
-                        "{}/{location}",
-                        url.rsplit_once('/').map_or(&*url, |(dir, _)| dir)
-                    )
-                };
-                continue;
-            }
-            if !response.status().is_success() {
-                return Err(format!("tarball source returned HTTP {}", response.status()).into());
-            }
-            return archive(name, spec, response.body_mut().as_reader());
-        }
-        return Err(format!("too many redirects for tarball {spec}").into());
+        return remote_archive(source, name, spec, None);
     }
     Err(format!("source manifest and resolution required for {spec}").into())
+}
+
+pub(super) fn locked(
+    source: &mut GenerationSource<'_>,
+    name: &str,
+    locator: &str,
+    resolution: &Value,
+) -> Result<SourceManifest> {
+    if resolution["type"] != "git"
+        && (locator.starts_with("https://") || locator.starts_with("http://"))
+    {
+        remote_archive(source, name, locator, resolution["integrity"].as_str())
+    } else {
+        resolve(source, ".", name, locator)
+    }
+}
+
+fn remote_archive(
+    source: &mut GenerationSource<'_>,
+    name: &str,
+    spec: &str,
+    expected_integrity: Option<&str>,
+) -> Result<SourceManifest> {
+    let network = source.network;
+    let cache_manifest = source.hook_manifests;
+    let client = source.client()?;
+    let auth = client.auth(spec, name)?;
+    let cache = |integrity: &str| {
+        super::cache_file(
+            spec,
+            &format!("tarball-manifest/{integrity}"),
+            auth.as_deref(),
+        )
+    };
+    if let Some(integrity) = expected_integrity
+        && let Some(path) = cache(integrity)
+    {
+        match fs::File::open(path) {
+            Ok(file) => {
+                return package(
+                    name,
+                    spec,
+                    serde_json::from_reader(io::BufReader::new(file))?,
+                    json!({"integrity":integrity,"tarball":spec}),
+                );
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    if !network {
+        return Err(format!("missing tarball manifest for {name}; use --allow-network").into());
+    }
+    let release = download_archive(client, name, spec)?;
+    let integrity = release.resolution["integrity"]
+        .as_str()
+        .expect("archive integrity");
+    if expected_integrity.is_some_and(|expected| expected != integrity) {
+        return Err(format!("tarball integrity differs from the locked release for {name}").into());
+    }
+    if cache_manifest && let Some(path) = cache(integrity) {
+        crate::registry::metadata::store_json(&path, &release.manifest)?;
+    }
+    Ok(release)
+}
+
+fn download_archive(client: &super::Registry, name: &str, spec: &str) -> Result<SourceManifest> {
+    // Tarball hosts commonly redirect to a CDN. Follow a bounded chain and
+    // send registry credentials only to the original origin.
+    let original: ureq::http::Uri = spec.parse()?;
+    let mut url = original.clone();
+    for _ in 0..10 {
+        let text = url.to_string();
+        let mut request = client.agent.get(&text);
+        if same_origin(&url, &original)
+            && let Some(auth) = client.auth(&text, name)?
+        {
+            request = request.header("Authorization", &auth);
+        }
+        let mut response = request.call()?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("tarball redirect without a location")?;
+            let base = Uri::parse(text.as_str())?;
+            url = UriRef::parse(location)?
+                .resolve_against(&base)?
+                .strip_fragment()
+                .as_str()
+                .parse()?;
+            if !matches!(url.scheme_str(), Some("http" | "https"))
+                || url.authority().is_none_or(|a| a.as_str().contains('@'))
+            {
+                return Err("expected an HTTP(S) tarball redirect without credentials".into());
+            }
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!("tarball source returned HTTP {}", response.status()).into());
+        }
+        return archive(name, spec, response.body_mut().as_reader());
+    }
+    Err(format!("too many redirects for tarball {spec}").into())
+}
+
+fn same_origin(left: &ureq::http::Uri, right: &ureq::http::Uri) -> bool {
+    let port = |uri: &ureq::http::Uri| {
+        uri.port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            })
+    };
+    left.scheme() == right.scheme()
+        && left
+            .host()
+            .zip(right.host())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && port(left) == port(right)
 }
 
 fn package(fallback: &str, locator: &str, raw: Value, resolution: Value) -> Result<SourceManifest> {

@@ -589,14 +589,21 @@ pub struct Members {
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
-        Self::from_project(project, false)
+        Self::from_project(project, false, None)
     }
 
-    pub fn for_generation(project: &Project) -> Result<Self> {
-        Self::from_project(project, true)
+    pub fn for_generation(
+        project: &Project,
+        version: Option<&node_semver::Version>,
+    ) -> Result<Self> {
+        Self::from_project(project, true, version)
     }
 
-    fn from_project(project: &Project, external: bool) -> Result<Self> {
+    fn from_project(
+        project: &Project,
+        external: bool,
+        version: Option<&node_semver::Version>,
+    ) -> Result<Self> {
         let mut this = Self {
             include: vec![],
             exclude: vec![],
@@ -605,8 +612,10 @@ impl Members {
             return Ok(this);
         }
         let patterns: Vec<String> = match project.config.get("packages") {
-            // pnpm 10 and 12 resolve only the root when the workspace file lists no packages.
-            None if external => Vec::new(),
+            // pnpm 10.5 made an omitted packages field root-only.
+            None if external && version.is_none_or(|v| (v.major(), v.minor()) >= (10, 5)) => {
+                Vec::new()
+            }
             None => vec!["**".into()],
             Some(v) => serde_json::from_value(v.clone())?,
         };

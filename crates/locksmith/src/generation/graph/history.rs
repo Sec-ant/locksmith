@@ -7,6 +7,8 @@ use std::{
     rc::Rc,
 };
 
+use serde_json::json;
+
 use super::{Baseline, Build, Draft, Node, RegistryPackage, Result, Sources};
 use crate::{
     Value, WorkspaceConfig,
@@ -35,55 +37,15 @@ impl Node {
         }
         let mut external = BTreeSet::new();
         if let Some(peers) = graph::section(&self.record, "peerDependencies") {
-            let tokens = crate::peer::explicit_bindings(key);
-            let mut direct = BTreeMap::new();
+            let (bound, opaque) = external_peers(old, key, body, peers, config);
             for name in peers.keys() {
-                if let Some((_, pin)) = graph::dependency(body, name) {
-                    direct.insert(name.clone(), pin.to_owned());
-                }
-            }
-            if let Some(hash) = &self.patch {
-                direct.insert("patch_hash".into(), hash.clone());
-            }
-            // pnpm hashes every peer resolved for an instance, including peers
-            // its descendants require. Their pins are recorded in the keys of
-            // the children that bound them. An unresolved peer stays absent.
-            if tokens.is_none() {
-                for name in body["transitivePeerDependencies"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    if let Some(pin) = transitive_pin(old, body, name, 8) {
-                        direct.insert(name.to_owned(), pin);
-                    }
-                }
-            }
-            // Opaque suffixes remain usable when the recorded peer pins
-            // reproduce the hash exactly with this workspace's pnpm encoding.
-            let exact_hash = tokens.is_none()
-                && crate::peer::matches_bindings(
-                    key,
-                    &direct,
-                    config.resolution.lock.dedupe_peers,
-                    config.linked_peer_encoding,
-                );
-            for name in peers.keys() {
-                let Some((group, pin)) = graph::dependency(body, name) else {
+                let Some((group, _)) = graph::dependency(body, name) else {
                     if self.edges.contains_key(name) {
                         return false;
                     }
                     continue;
                 };
-                let (actual, _) = crate::peer::canonical_binding(name, pin);
-                let bound = exact_hash
-                    || tokens.as_ref().is_some_and(|t| {
-                        t.get(actual).is_some_and(|token| {
-                            crate::peer::token_matches(name, pin, actual, token)
-                        })
-                    });
-                if bound {
+                if bound.contains(name.as_str()) {
                     let group_wanted =
                         if self.record["peerDependenciesMeta"][name]["optional"] == true {
                             "optionalDependencies"
@@ -95,7 +57,7 @@ impl Node {
                     }
                     external.insert(name.as_str());
                 } else if !self.edges.contains_key(name)
-                    || tokens.is_none()
+                    || opaque
                     || !peers::records_fallback_peers(config)
                 {
                     // A bare edge with a newly declared peer could be an old
@@ -140,6 +102,55 @@ impl Node {
                     })
             })
     }
+}
+
+fn external_peers<'p>(
+    old: &Value,
+    key: &str,
+    body: &Value,
+    peers: &'p serde_json::Map<String, Value>,
+    config: &WorkspaceConfig,
+) -> (BTreeSet<&'p str>, bool) {
+    if let Some(tokens) = crate::peer::explicit_bindings(key) {
+        let external = peers.keys().filter_map(|name| {
+            let (_, pin) = graph::dependency(body, name)?;
+            let (actual, _) = crate::peer::canonical_binding(name, pin);
+            tokens
+                .get(actual)
+                .is_some_and(|token| crate::peer::token_matches(name, pin, actual, token))
+                .then_some(name.as_str())
+        });
+        return (external.collect(), false);
+    }
+
+    let mut direct: BTreeMap<_, _> = peers
+        .keys()
+        .filter_map(|name| Some((name.clone(), graph::dependency(body, name)?.1.to_owned())))
+        .collect();
+    if let Some(hash) = crate::peer::patch(key) {
+        direct.insert("patch_hash".into(), hash.into());
+    }
+    // Opaque suffixes prove a binding when all recorded pins reproduce the hash.
+    for name in body["transitivePeerDependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if let Some(pin) = transitive_pin(old, body, name, 8) {
+            direct.insert(name.to_owned(), pin);
+        }
+    }
+    let matches = crate::peer::matches_bindings(
+        key,
+        &direct,
+        config.resolution.lock.dedupe_peers,
+        config.linked_peer_encoding,
+    );
+    let external = peers
+        .keys()
+        .filter(|name| matches && direct.contains_key(*name));
+    (external.map(String::as_str).collect(), true)
 }
 
 /// The provider of `name` that a historical instance received for one of its
@@ -237,7 +248,7 @@ fn declarations_match(
     key: &str,
     manifest: &Value,
     record: &Value,
-    bodies: &[&Value],
+    bodies: &[(&str, &Value)],
     build: &mut Build<'_, '_>,
 ) -> Result<bool> {
     let base = build.base;
@@ -287,8 +298,8 @@ fn declarations_match(
     {
         return Ok(false);
     }
-    declared.retain(|name, _| !peers.contains_key(name) && manifest["name"].as_str() != Some(name));
-    if !bodies.iter().all(|body| {
+    declared.retain(|name, _| manifest["name"].as_str() != Some(name));
+    if !bodies.iter().all(|(_, body)| {
         ["dependencies", "optionalDependencies"]
             .into_iter()
             .flat_map(|group| graph::section(body, group).into_iter().flatten())
@@ -303,12 +314,28 @@ fn declarations_match(
     if bodies.is_empty() {
         return Ok(true);
     }
+    let mut external = BTreeSet::new();
+    if declared.keys().any(|name| peers.contains_key(name))
+        && let Some(peers) = graph::section(record, "peerDependencies")
+    {
+        for &(key, body) in bodies {
+            let (bound, _) = external_peers(build.old, key, body, peers, config);
+            external.extend(bound.into_iter().map(|name| (key, name)));
+        }
+    }
     for (dependency, (group, spec)) in declared {
-        let mut pins = bodies.iter().map(|body| {
-            graph::dependency(body, dependency)
-                .filter(|(recorded_group, _)| *recorded_group == group)
-                .map(|(_, pin)| pin)
-        });
+        let mut pins = bodies
+            .iter()
+            .filter(|(key, _)| !external.contains(&(*key, dependency)))
+            .map(|(_, body)| {
+                graph::dependency(body, dependency)
+                    .filter(|(recorded_group, _)| *recorded_group == group)
+                    .map(|(_, pin)| pin)
+            })
+            .peekable();
+        if pins.peek().is_none() {
+            continue;
+        }
         if spec.starts_with("workspace:") {
             let resolved = base
                 .links
@@ -397,28 +424,60 @@ impl<'a> Build<'a, '_> {
     /// A release is stale when its evaluated declarations no longer match its
     /// record: different peers, or recorded children that no longer satisfy
     /// them. Without hooks, only database rules can make a publication disagree.
-    fn stale_releases(&mut self) -> Result<BTreeSet<&'a str>> {
+    fn stale_releases(&mut self, draft: &mut Draft) -> Result<BTreeSet<&'a str>> {
         let old: &'a Value = self.old;
         let hooks = self.cache.reads_packages();
         let snapshots = graph::section(old, "snapshots");
-        let mut occurrences = BTreeMap::<&str, Vec<&Value>>::new();
+        let mut occurrences = BTreeMap::<&str, Vec<(&str, &Value)>>::new();
         for (snapshot, body) in snapshots.into_iter().flatten() {
             occurrences
                 .entry(graph::package_key(snapshot))
                 .or_default()
-                .push(body);
+                .push((snapshot, body));
         }
         let mut stale = BTreeSet::new();
+        let mut reachable = None;
         for (key, record) in graph::section(old, "packages").into_iter().flatten() {
-            if !hooks && !self.base.compat_candidates.contains(key.as_str())
-                || RegistryPackage::from_key(key).is_none()
-            {
-                continue;
-            }
-            let manifest = &Rc::clone(self.cache.release(key)?).manifest;
+            let release = if RegistryPackage::from_key(key).is_some() {
+                if !hooks && !self.base.compat_candidates.contains(key.as_str()) {
+                    continue;
+                }
+                self.cache.release(key)?
+            } else {
+                let locator = manifest::selector(key).1.unwrap_or_default();
+                if !hooks
+                    || !(record["resolution"]["type"] == "git"
+                        || locator.starts_with("http://")
+                        || locator.starts_with("https://"))
+                {
+                    continue;
+                }
+                // A removed archive must not force a download just to discard it.
+                if reachable.is_none() {
+                    let roots = draft
+                        .roots
+                        .values()
+                        .flat_map(|deps| deps.values())
+                        .filter(|d| old["snapshots"].get(&d.target).is_some())
+                        .map(|d| d.target.clone())
+                        .collect();
+                    reachable = Some(graph::closure_from_edges(old, &json!({}), &roots)?.packages);
+                }
+                if !reachable.as_ref().expect("old graph closure").contains(key) {
+                    continue;
+                }
+                self.cache.locked_source(key, &record["resolution"])?
+            };
+            let manifest = &Rc::clone(release).manifest;
             let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
             if !declarations_match(key, manifest, record, bodies, self)? {
                 stale.insert(key.as_str());
+            }
+            if hooks {
+                reconcile::published::refresh_installation_metadata(
+                    &mut draft.document["packages"][key],
+                    manifest,
+                );
             }
         }
         Ok(stale)
@@ -499,8 +558,13 @@ impl<'a> Build<'a, '_> {
         }
         self.seeded_history = true;
         self.rereads_manifests = outdated;
+        for field in ["packages", "snapshots"] {
+            if let Some(v) = self.old.get(field) {
+                draft.document[field] = v.clone();
+            }
+        }
         let stale = if outdated {
-            self.stale_releases()?
+            self.stale_releases(draft)?
         } else {
             BTreeSet::new()
         };
@@ -534,11 +598,6 @@ impl<'a> Build<'a, '_> {
             .map(|d| d.target.clone())
             .collect();
         let doc = &mut draft.document;
-        for field in ["packages", "snapshots"] {
-            if let Some(v) = self.old.get(field) {
-                doc[field] = v.clone();
-            }
-        }
         if let Some(records) = doc.get_mut("snapshots").and_then(Value::as_object_mut) {
             for key in incomplete {
                 records.remove(key);

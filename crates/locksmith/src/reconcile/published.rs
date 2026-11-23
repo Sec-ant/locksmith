@@ -423,3 +423,27 @@ pub(crate) fn package_record(raw: &Value, resolution: &Value) -> Value {
     }
     package
 }
+
+pub(crate) fn refresh_installation_metadata(record: &mut Value, raw: &Value) {
+    let updated = package_record(raw, &record["resolution"]);
+    let record = record.as_object_mut().expect("package record");
+    for field in [
+        "os",
+        "cpu",
+        "libc",
+        "deprecated",
+        "engines",
+        "hasBin",
+        "bundledDependencies",
+    ] {
+        match updated.get(field) {
+            Some(value) if record.get(field) != Some(value) => {
+                record.insert(field.to_owned(), value.clone());
+            }
+            None => {
+                record.shift_remove(field);
+            }
+            Some(_) => {}
+        }
+    }
+}

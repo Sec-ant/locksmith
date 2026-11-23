@@ -95,9 +95,11 @@ impl Registry {
         let lowest = direct && matches!(mode, "lowest-direct" | "time-based") && range.is_some();
         let pick = |age_filter: bool, cutoff: bool, lowest: bool| -> Result<Option<&'p str>> {
             let eligible = |v: &str| -> Result<bool> {
-                Ok((!cutoff || self.before_cutoff(doc, v, direct)?)
-                    && (!age_filter || self.old_enough(doc, v)?)
-                    && (self.generation_network.is_none() || self.trusted(doc, v)?))
+                Ok(
+                    (!cutoff || range.is_none() || self.before_cutoff(doc, v, direct)?)
+                        && (!age_filter || self.old_enough(doc, v)?)
+                        && (self.generation_network.is_none() || self.trusted(doc, v)?),
+                )
             };
             let tag = if range.is_some() { "latest" } else { specifier };
             if !lowest

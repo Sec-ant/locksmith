@@ -11,6 +11,7 @@ type Result<T> = std::result::Result<T, LockfileError>;
 struct Registry {
     packages: BTreeMap<String, BTreeMap<String, Value>>,
     tarballs: BTreeSet<String>,
+    cached_tarballs: BTreeSet<String>,
     tags: BTreeMap<(&'static str, &'static str), &'static str>,
 }
 impl Registry {
@@ -78,10 +79,27 @@ impl PackageSource for Registry {
             self.tarballs.contains(specifier),
             "unexpected fetch for {specifier}"
         );
+        self.cached_tarballs.insert(specifier.into());
         SourceManifest::new(
             format!("{name}@{specifier}"),
             json!({"name":name,"version":"1.0.0"}),
             json!({"integrity":"sha512-fixture","tarball":specifier}),
+        )
+    }
+    fn locked_source(
+        &mut self,
+        name: &str,
+        locator: &str,
+        resolution: &Value,
+    ) -> Result<SourceManifest> {
+        assert!(
+            self.cached_tarballs.contains(locator),
+            "missing cached archive {locator}"
+        );
+        SourceManifest::new(
+            format!("{name}@{locator}"),
+            json!({"name":name,"version":"1.0.0"}),
+            resolution.clone(),
         )
     }
 }
@@ -1113,6 +1131,91 @@ fn history_keeps_the_optional_group_and_ignores_bundled_dependencies() {
     inputs.insert("added".into(), json!({}));
     let next = generate(&old, &inputs, &mut registry);
     assert_eq!(next.project().unwrap()["snapshots"], *graph);
+}
+
+#[test]
+fn history_updates_a_packages_own_peer_fallback_and_keeps_external_bindings() {
+    struct Rewrite(&'static str);
+    impl locksmith::GenerationHooks for Rewrite {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin" {
+                raw["dependencies"]["host"] = self.0.into();
+            }
+            Ok(raw)
+        }
+    }
+
+    let mut registry = Registry::default();
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({
+            "dependencies":{"host":"^1"},
+            "peerDependencies":{"host":"*"}
+        }),
+    );
+    for version in ["1.0.0", "2.0.0"] {
+        registry.add("host", version, json!({}));
+    }
+    let config = json!({"pnpmfileChecksum":"stable","autoInstallPeers":false});
+    let version = node_semver::Version::from((12, 15, 0));
+    let mut inputs = workspace(&[
+        (".", json!({"dependencies":{"plugin":"1"}})),
+        (
+            "with-host",
+            json!({"dependencies":{"plugin":"1","host":"1"}}),
+        ),
+    ]);
+    let generate = |old: &Lockfile, manifests: &_, range, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(manifests, &config).with_pnpm_version(&version),
+            registry,
+            &mut Rewrite(range),
+        )
+        .unwrap()
+    };
+    let old = generate(&empty_workspace_lock(), &inputs, "^1", &mut registry);
+    assert_eq!(
+        old.project().unwrap()["snapshots"]["plugin@1.0.0"]["dependencies"]["host"],
+        "1.0.0"
+    );
+    inputs.insert("unrelated".into(), json!({}));
+    let next = generate(&old, &inputs, "^2", &mut registry);
+    let doc = next.project().unwrap();
+    assert_eq!(
+        doc["snapshots"]["plugin@1.0.0"]["dependencies"]["host"],
+        "2.0.0"
+    );
+    assert_eq!(
+        doc["snapshots"]["plugin@1.0.0(host@1.0.0)"]["dependencies"]["host"],
+        "1.0.0"
+    );
+}
+
+#[test]
+fn a_directory_source_identifies_the_same_path_in_its_locator_and_resolution() {
+    let manifest = json!({"name":"child","version":"1.0.0"});
+    assert!(
+        SourceManifest::new(
+            "child@file:packages/child",
+            manifest.clone(),
+            json!({"type":"directory","directory":"packages/child"}),
+        )
+        .is_ok()
+    );
+    let error = SourceManifest::new(
+        "child@file:packages/child",
+        manifest,
+        json!({"type":"directory","directory":"packages/other"}),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("directory must match the file: package locator")
+    );
 }
 
 #[test]

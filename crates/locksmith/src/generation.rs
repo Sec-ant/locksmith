@@ -47,11 +47,29 @@ impl SourceManifest {
         if !resolution.is_object() {
             return Err(reconcile::missing(&[&key], "expected a resolution mapping"));
         }
-        Ok(Self {
+        let release = Self {
             key,
             manifest,
             resolution,
-        })
+        };
+        release.validate_directory()?;
+        Ok(release)
+    }
+
+    fn validate_directory(&self) -> Result<()> {
+        if self.resolution["type"] == "directory" || self.resolution.get("directory").is_some() {
+            let directory = self.resolution["directory"].as_str();
+            let locator = manifest::selector(&self.key)
+                .1
+                .and_then(|locator| locator.strip_prefix("file:"));
+            if directory.is_none() || directory != locator {
+                return Err(reconcile::missing(
+                    &[&self.key, "resolution", "directory"],
+                    "directory must match the file: package locator",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Check the registry identity and distribution integrity before using the release.
@@ -178,6 +196,17 @@ pub trait PackageSource {
             &[from, name],
             format!("source manifest and resolution required for {specifier}"),
         ))
+    }
+
+    /// Read the original manifest of a pinned Git or HTTP archive dependency.
+    /// A source can use the locked resolution to find an integrity-checked cache entry.
+    fn locked_source(
+        &mut self,
+        name: &str,
+        locator: &str,
+        _resolution: &Value,
+    ) -> Result<SourceManifest> {
+        self.other(".", name, locator)
     }
 }
 
