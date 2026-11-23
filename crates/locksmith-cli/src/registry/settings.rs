@@ -14,6 +14,7 @@ pub(super) fn copy_settings(settings: &mut Value, from: &Value) {
     for key in [
         "registry",
         "registries",
+        "registriesByScope",
         "namedRegistries",
         "networkConcurrency",
         "minimumReleaseAge",

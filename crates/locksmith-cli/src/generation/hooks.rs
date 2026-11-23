@@ -144,6 +144,67 @@ impl Host {
             Self::Embedded(host) => host.call(&request),
         }
     }
+
+    fn update_config(&mut self, config: &mut Value, version: Option<&Version>) -> Result<()> {
+        let field = match version {
+            Some(v)
+                if (v.major() == 10 && v.minor() >= 8) || (v.major() == 11 && v.minor() < 23) =>
+            {
+                Some("registries")
+            }
+            Some(v) if v.major() == 11 || v >= &Version::from((12, 4, 1)) => {
+                Some("registriesByScope")
+            }
+            None => Some("registriesByScope"),
+            _ => None,
+        };
+        let checksum = config.get("pnpmfileChecksum").cloned();
+        if let Some(field) = field {
+            let routes =
+                crate::registry::hook_registries(config, version.map_or(12, Version::major))?;
+            let configured_registry = config.get("registry").cloned();
+            let configured_registries = config.get("registries").cloned();
+            config["registry"] = routes["default"].clone();
+            config[field] = routes.clone();
+            *config = self.call("updateConfig", config)?;
+            let settings = config.as_object_mut().expect("updated configuration");
+            if settings.get("registry") == routes.get("default") {
+                settings.remove("registry");
+                if let Some(registry) = configured_registry {
+                    settings.insert("registry".into(), registry);
+                }
+            }
+            let returned = settings.remove(field);
+            if version.is_some_and(|v| v.major() < 12) {
+                // pnpm 11.23+ takes changes to the routes through
+                // registriesByScope. It ignores a returned registries setting.
+                settings.remove("registries");
+                if let Some(original) = configured_registries {
+                    settings.insert("registries".into(), original);
+                }
+            } else if let (Some(Value::Object(mut original)), Some(returned)) = (
+                configured_registries,
+                settings.get("registries").and_then(Value::as_object),
+            ) {
+                original.extend(returned.clone());
+                settings.insert("registries".into(), original.into());
+            }
+            // Leaving the projection unchanged preserves routing via the original
+            // settings, including changes to the declarative registries setting.
+            if let Some(returned) = returned.filter(|returned| returned != &routes) {
+                settings.insert(
+                    "registriesByScope".into(),
+                    crate::registry::updated_hook_registries(returned, &routes["default"])?,
+                );
+            }
+        } else {
+            *config = self.call("updateConfig", config)?;
+        }
+        if let Some(checksum) = checksum {
+            config["pnpmfileChecksum"] = checksum;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -237,11 +298,7 @@ impl Hooks {
             config["pnpmfileChecksum"] = json!({});
         }
         if operations.update_config {
-            let checksum = config.get("pnpmfileChecksum").cloned();
-            *config = host.call("updateConfig", config)?;
-            if let Some(checksum) = checksum {
-                config["pnpmfileChecksum"] = checksum;
-            }
+            host.update_config(config, version)?;
         }
         Ok(Some(Self { host, operations }))
     }

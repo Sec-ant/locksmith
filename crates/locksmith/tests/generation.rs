@@ -8,10 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, LockfileError>;
 
 #[derive(Default)]
-struct Registry(BTreeMap<String, BTreeMap<String, Value>>);
+struct Registry {
+    packages: BTreeMap<String, BTreeMap<String, Value>>,
+    tarballs: BTreeSet<String>,
+}
 impl Registry {
     fn add(&mut self, name: &str, version: &str, manifest: Value) {
-        self.0
+        self.packages
             .entry(name.into())
             .or_default()
             .insert(version.into(), manifest);
@@ -26,7 +29,7 @@ impl PackageSource for Registry {
     ) -> Result<Vec<String>> {
         let range = selector.parse::<node_semver::Range>().unwrap();
         let mut versions: Vec<_> = self
-            .0
+            .packages
             .get(&package.name)
             .into_iter()
             .flat_map(|m| m.keys())
@@ -37,13 +40,24 @@ impl PackageSource for Registry {
         Ok(versions.into_iter().map(|v| v.to_string()).collect())
     }
     fn release(&mut self, package: &RegistryPackage, version: &str) -> Result<SourceManifest> {
-        let mut raw = self.0[&package.name][version].clone();
+        let mut raw = self.packages[&package.name][version].clone();
         raw["name"] = package.name.clone().into();
         raw["version"] = version.into();
         SourceManifest::new(
             package.key(version),
             raw,
             json!({"integrity":"sha512-fixture"}),
+        )
+    }
+    fn other(&mut self, _: &str, name: &str, specifier: &str) -> Result<SourceManifest> {
+        assert!(
+            self.tarballs.contains(specifier),
+            "unexpected fetch for {specifier}"
+        );
+        SourceManifest::new(
+            format!("{name}@{specifier}"),
+            json!({"name":name,"version":"1.0.0"}),
+            json!({"integrity":"sha512-fixture","tarball":specifier}),
         )
     }
 }
@@ -116,6 +130,51 @@ fn run(
             .with_pnpm_version(&node_semver::Version::from((12, 21, 0))),
         source,
     )
+}
+
+#[test]
+fn a_new_member_inherits_the_updated_root_peer_instance() {
+    let mut registry = Registry::default();
+    for version in ["1.0.0", "2.0.0"] {
+        registry.add("host", version, json!({}));
+    }
+    registry.add("bridge", "1.0.0", json!({"peerDependencies":{"host":"*"}}));
+    registry.add(
+        "consumer",
+        "1.0.0",
+        json!({"peerDependencies":{"bridge":"1"}}),
+    );
+    let member = json!({"dependencies":{"consumer":"1"}});
+    let mut inputs = workspace(&[
+        (".", json!({"dependencies":{"bridge":"1","host":"1"}})),
+        ("existing", member.clone()),
+    ]);
+    let config = json!({"autoInstallPeers":false});
+    let old = run(
+        &empty_workspace_lock(),
+        &inputs,
+        config.clone(),
+        &mut registry,
+    )
+    .unwrap();
+    inputs.get_mut(".").unwrap()["dependencies"]["host"] = "2".into();
+    inputs.insert("-new".into(), member);
+    inputs.insert(
+        "shadowed".into(),
+        json!({"dependencies":{"consumer":"1","bridge":"1","host":"1"}}),
+    );
+    let next = run(&old, &inputs, config, &mut registry).unwrap();
+    let importers = &next.project().unwrap()["importers"];
+    for id in ["existing", "-new"] {
+        assert_eq!(
+            importers[id]["dependencies"]["consumer"]["version"], "1.0.0(bridge@1.0.0(host@2.0.0))",
+            "{id}"
+        );
+    }
+    assert_eq!(
+        importers["shadowed"]["dependencies"]["consumer"]["version"],
+        "1.0.0(bridge@1.0.0(host@1.0.0))"
+    );
 }
 #[test]
 fn changing_a_transitive_override_preserves_independent_peer_instances() {
@@ -772,18 +831,25 @@ fn a_hook_reads_every_release_again_once_any_project_changes() {
     ] {
         registry.add(name, version, json!({}));
     }
+    registry.add("other", "1.0.0", json!({"dependencies":{"leaf":"*"}}));
     let generate =
         |old: &Lockfile, manifests: &_, checksum: &str, leaf, registry: &mut Registry| {
             locksmith::generate_with_hooks(
                 old,
-                &GenerateContext::new(manifests, &json!({"pnpmfileChecksum":checksum}))
-                    .with_pnpm_version(&node_semver::Version::from((10, 12, 4))),
+                &GenerateContext::new(
+                    manifests,
+                    &json!({
+                        "pnpmfileChecksum":checksum,
+                        "overrides":{"other>leaf":"1"}
+                    }),
+                )
+                .with_pnpm_version(&node_semver::Version::from((10, 12, 4))),
                 registry,
                 &mut Hook(leaf),
             )
             .unwrap()
         };
-    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1","other":"1"}}))]);
     let before = generate(
         &empty_workspace_lock(),
         &inputs,
@@ -803,6 +869,62 @@ fn a_hook_reads_every_release_again_once_any_project_changes() {
     inputs.insert("new".into(), json!({"dependencies":{"added":"1"}}));
     let added = generate(&before, &inputs, "first", "2", &mut registry);
     assert_eq!(leaf(&added), "2.0.0");
+    assert_eq!(
+        added.project().unwrap()["snapshots"]["other@1.0.0"]["dependencies"]["leaf"],
+        "1.0.0"
+    );
+}
+
+#[test]
+fn hook_changes_to_a_dependency_source_update_the_lock() {
+    struct Rewrite<'a>(&'a str);
+    impl locksmith::GenerationHooks for Rewrite<'_> {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin" {
+                raw["dependencies"]["leaf"] = self.0.into();
+            }
+            Ok(raw)
+        }
+    }
+
+    let first = "https://example.test/first.tgz";
+    let second = "https://example.test/second.tgz";
+    let mut registry = Registry::default();
+    for name in ["plugin", "leaf", "other"] {
+        registry.add(name, "1.0.0", json!({}));
+    }
+    let generate = |old: &Lockfile, manifests: &_, leaf, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(manifests, &json!({"pnpmfileChecksum":"stable"})),
+            registry,
+            &mut Rewrite(leaf),
+        )
+        .unwrap()
+    };
+    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let mut old = generate(&empty_workspace_lock(), &inputs, "1", &mut registry);
+    for (member, source, needs_fetch) in [
+        ("one", first, true),
+        ("two", first, false),
+        ("three", second, true),
+    ] {
+        inputs.insert(member.into(), json!({"dependencies":{"other":"1"}}));
+        registry.tarballs.clear();
+        if needs_fetch {
+            registry.tarballs.insert(source.into());
+        }
+        old = generate(&old, &inputs, source, &mut registry);
+        let doc = old.project().unwrap();
+        assert_eq!(
+            doc["snapshots"]["plugin@1.0.0"]["dependencies"]["leaf"],
+            source
+        );
+        assert_eq!(
+            doc["packages"][format!("leaf@{source}")]["resolution"]["tarball"],
+            source
+        );
+    }
 }
 
 #[test]
@@ -890,7 +1012,11 @@ fn a_changed_hook_rewrite_resolves_its_release_again() {
     }
     registry.add("host", "1.0.0", json!({}));
     registry.add("host", "2.0.0", json!({}));
-    let config = json!({"pnpmfileChecksum":"hook","autoInstallPeers":false});
+    let config = json!({
+        "pnpmfileChecksum":"hook",
+        "autoInstallPeers":false,
+        "overrides":{"unrelated>host":"^1"}
+    });
     let version = node_semver::Version::from((10, 12, 4));
     let mut generate = |old: &Lockfile, inputs: &BTreeMap<String, Value>, hook| {
         locksmith::generate_with_hooks(

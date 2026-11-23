@@ -109,6 +109,142 @@ fn write_empty_lock(root: &Path) {
 }
 
 #[test]
+fn update_config_reads_effective_registry_routes_and_redirects_metadata() {
+    for (version, field, body, dependency, falls_back) in [
+        (
+            "10.12.4",
+            "registries",
+            "return {...config, registries: {default: target}};",
+            "@acme/lib",
+            false,
+        ),
+        (
+            "11.22.0",
+            "registries",
+            "return {...config, registries: {default: target}};",
+            "lib",
+            false,
+        ),
+        (
+            "11.23.0",
+            "registriesByScope",
+            "return {...config, registriesByScope: {default: target}};",
+            "@acme/lib",
+            false,
+        ),
+        (
+            "11.23.0",
+            "registriesByScope",
+            "return {...config, registries: {default: target}};",
+            "lib",
+            true,
+        ),
+        (
+            "12.15.0",
+            "registriesByScope",
+            "return {...config, registries: {default: target}};",
+            "lib",
+            false,
+        ),
+        (
+            "12.15.0",
+            "registriesByScope",
+            "return {...config, registries: {default: target}};",
+            "@configured/lib",
+            true,
+        ),
+        (
+            "12.15.0",
+            "registriesByScope",
+            "return {...config, registriesByScope: {default: target}};",
+            "@acme/lib",
+            false,
+        ),
+        (
+            "12.15.0",
+            "registriesByScope",
+            "return {...config, registriesByScope: {'@acme': target}};",
+            "lib",
+            true,
+        ),
+    ] {
+        let project = tempdir().unwrap();
+        let root = project.path();
+        let manifest =
+            json!({"name":dependency,"versions":{"1.0.0":{}}, "dist-tags":{"latest":"1.0.0"}});
+        let old = Registry::serve(if falls_back {
+            BTreeMap::from([(dependency, manifest.clone())])
+        } else {
+            BTreeMap::new()
+        });
+        let new = Registry::serve(BTreeMap::from([(dependency, manifest)]));
+        write_empty_lock(root);
+        write(
+            root,
+            "package.json",
+            &json!({"dependencies":{(dependency):"1.0.0"}}),
+        );
+        write(
+            root,
+            "pnpm-workspace.yaml",
+            &json!({"minimumReleaseAge":0,"registries":{"@configured":old.base}}),
+        );
+        fs::write(
+            root.join(".npmrc"),
+            format!(
+                "registry={0}/\n@acme:registry={0}/\n{1}/:_authToken=previous-token\n",
+                old.base,
+                old.base.strip_prefix("http:").unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".pnpmfile.cjs"),
+            format!(
+                r#"exports.hooks = {{ updateConfig(config) {{
+                    const target = {target:?};
+                    if (config.registry !== {original:?} ||
+                        config.{field}['@acme'] !== {original:?} ||
+                        config.{field}['@jsr'] !== 'https://npm.jsr.io/') {{
+                        throw new Error('expected the effective registry routing');
+                    }}
+                    {body}
+                }} }};"#,
+                original = format!("{}/", old.base),
+                target = format!("{}/", new.base),
+            ),
+        )
+        .unwrap();
+        let result = output(run(
+            root,
+            CLI,
+            &[
+                "generate",
+                "--pnpm-version",
+                version,
+                "--allow-network",
+                "--stdout",
+            ],
+        ));
+        assert_eq!(
+            result["importers"]["."]["dependencies"][dependency]["version"],
+            "1.0.0"
+        );
+        let previous = old.finish();
+        let redirected = new.finish();
+        let (requested, idle, auth) = if falls_back {
+            (&previous, &redirected, Some("Bearer previous-token"))
+        } else {
+            (&redirected, &previous, None)
+        };
+        assert!(idle.is_empty());
+        assert_eq!(requested.len(), 1);
+        assert_eq!(requested[0].path, format!("/{dependency}"));
+        assert_eq!(requested[0].auth.as_deref(), auth);
+    }
+}
+
+#[test]
 fn generate_requires_a_lock_before_running_hooks_or_contacting_the_registry() {
     let project = tempdir().unwrap();
     let root = project.path();

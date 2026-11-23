@@ -238,8 +238,8 @@ fn declarations_match(
     record: &Value,
     bodies: &[&Value],
     snapshots: Option<&serde_json::Map<String, Value>>,
-    overridden: &BTreeSet<&str>,
-) -> bool {
+    rules: &manifest::Overrides<'_>,
+) -> Result<bool> {
     // pnpm records an optional peer declared only in peerDependenciesMeta as `*`.
     fn declared_peers(doc: &Value) -> BTreeMap<&str, (&str, bool)> {
         let optional = |name: &str| doc["peerDependenciesMeta"][name]["optional"] == true;
@@ -278,14 +278,19 @@ fn declarations_match(
         recorded.remove(dependency);
         evaluated.remove(dependency);
     }
-    // An override also rewrites the recorded peer range.
-    for (peer, (range, _)) in recorded.iter_mut().chain(evaluated.iter_mut()) {
-        if overridden.contains(peer) {
-            *range = "";
-        }
+    if recorded.len() != evaluated.len() {
+        return Ok(false);
     }
-    if recorded != evaluated {
-        return false;
+    for (peer, (range, optional)) in evaluated {
+        // A peer declared only in the optional metadata has no selector to override.
+        let effective = if manifest["peerDependencies"].get(peer).is_some() {
+            rules.apply(manifest, ".", peer, range)?
+        } else {
+            Some(std::borrow::Cow::Borrowed(range))
+        };
+        if recorded.get(peer).copied() != effective.as_deref().map(|range| (range, optional)) {
+            return Ok(false);
+        }
     }
     // pnpm installs bundled dependencies from the tarball and skips a
     // dependency on the package itself.
@@ -307,11 +312,16 @@ fn declarations_match(
                 } else {
                     "dependencies"
                 };
-                declared.insert(dependency.as_str(), (group, spec.as_str()));
+                let Some(spec) = spec.as_str() else {
+                    return Ok(false);
+                };
+                if let Some(spec) = rules.apply(manifest, ".", dependency, spec)? {
+                    declared.insert(dependency.as_str(), (group, spec));
+                }
             }
         }
     }
-    bodies.iter().all(|body| {
+    Ok(bodies.iter().all(|body| {
         ["dependencies", "optionalDependencies"]
             .into_iter()
             .flat_map(|group| graph::section(body, group).into_iter().flatten())
@@ -327,30 +337,40 @@ fn declarations_match(
                 if recorded_group != *group {
                     return false;
                 }
-                if overridden.contains(dependency) {
-                    return true;
-                }
-                let Some(spec) = spec else {
-                    return false;
-                };
                 // A workspace protocol resolves to a linked member.
                 if spec.starts_with("workspace:") {
                     return pin.starts_with("link:");
                 }
-                // Other sources keep their recorded locator.
-                let Some((package, range)) = RegistryPackage::selector(dependency, spec) else {
-                    return true;
-                };
                 let child = graph::snapshot_key(dependency, pin, snapshots);
-                RegistryPackage::from_key(&child).is_some_and(|(locked, version)| {
-                    locked.name == package.name
-                        // A dist-tag such as `next` names a release the lock already chose.
-                        && (range == "*"
-                            || range.parse::<node_semver::Range>().is_err()
-                            || manifest::matches_version(&range, Some(version)))
-                })
+                if let Some((package, range)) = RegistryPackage::selector(dependency, spec) {
+                    return RegistryPackage::from_key(&child).is_some_and(|(locked, version)| {
+                        locked.name == package.name
+                            // A dist-tag names a release the lock already chose.
+                            && (range == "*"
+                                || range.parse::<node_semver::Range>().is_err()
+                                || manifest::matches_version(&range, Some(version)))
+                    });
+                }
+                let locator = if pin.starts_with("link:") {
+                    pin
+                } else {
+                    manifest::selector(graph::package_key(&child))
+                        .1
+                        .unwrap_or_default()
+                };
+                // A non-registry declaration must identify the recorded source.
+                spec == locator
+                    || ["file:", "link:"].into_iter().any(|protocol| {
+                        spec.strip_prefix(protocol)
+                            .zip(locator.strip_prefix(protocol))
+                            .is_some_and(|(path, locked)| {
+                                !path.starts_with('/')
+                                    && path.as_bytes().get(1) != Some(&b':')
+                                    && graph::linked_importer(".", path) == locked
+                            })
+                    })
             })
-    })
+    }))
 }
 
 impl<'a> Build<'a, '_> {
@@ -372,11 +392,6 @@ impl<'a> Build<'a, '_> {
                 .or_default()
                 .push(body);
         }
-        let overridden: BTreeSet<&str> = graph::section(self.header, "overrides")
-            .into_iter()
-            .flatten()
-            .map(|(rule, _)| manifest::override_scope(rule).0)
-            .collect();
         let mut stale = BTreeSet::new();
         for (key, record) in graph::section(old, "packages").into_iter().flatten() {
             if !hooks && !self.base.compat_candidates.contains(key.as_str())
@@ -386,34 +401,8 @@ impl<'a> Build<'a, '_> {
             }
             let manifest = &Rc::clone(self.cache.release(key)?).manifest;
             let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
-            if !declarations_match(manifest, record, bodies, snapshots, &overridden) {
+            if !declarations_match(manifest, record, bodies, snapshots, &self.base.rules)? {
                 stale.insert(key.as_str());
-                if let Some(path) = std::env::var_os("LT_LOG") {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                        .unwrap();
-                    let pick = |d: &Value| {
-                        [
-                            "dependencies",
-                            "optionalDependencies",
-                            "peerDependencies",
-                            "peerDependenciesMeta",
-                            "bundledDependencies",
-                        ]
-                        .map(|k| (k, d.get(k).cloned()))
-                    };
-                    writeln!(
-                        f,
-                        "STALE {key}\n  manifest={:?}\n  record={:?}\n  bodies={:?}",
-                        pick(manifest),
-                        pick(record),
-                        bodies.iter().map(|b| b.to_string()).collect::<Vec<_>>()
-                    )
-                    .unwrap();
-                }
             }
         }
         Ok(stale)

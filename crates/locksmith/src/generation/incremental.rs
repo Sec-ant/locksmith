@@ -288,7 +288,14 @@ impl<'a> Partition<'a> {
                         if wanted.is_empty() {
                             return true;
                         }
-                        if !wanted.is_disjoint(&active) {
+                        // The draft root still carries provisional keys. Binding
+                        // a root provider may change its nested peer suffix.
+                        if !wanted.is_disjoint(&active)
+                            || inherit
+                                && wanted.iter().any(|name| {
+                                    root_changed.contains(name) && !after.contains_key(name)
+                                })
+                        {
                             return false;
                         }
                         let existing = witnesses.get_or_init(|| {

@@ -25,6 +25,8 @@ mod settings;
 mod trust;
 use settings::{apply_auth, copy_settings, env_config, project_rc};
 
+const JSR_REGISTRY: &str = "https://npm.jsr.io/";
+
 #[derive(Clone, Copy)]
 pub enum ProjectRc<'a> {
     Working,
@@ -367,6 +369,14 @@ impl Registry {
 
     fn registry(&self, name: &str) -> Result<String> {
         let scope = name.split_once('/').map(|(scope, _)| scope);
+        if let Some(routes) = self.config.get("registriesByScope") {
+            let base = scope
+                .and_then(|scope| routes.get(scope))
+                .unwrap_or(&routes["default"])
+                .as_str()
+                .ok_or("registriesByScope must contain registry URLs")?;
+            return Self::validated_base(base);
+        }
         let mut routes = BTreeMap::new();
         if let Some(registries) = self.config.get("registries") {
             for (key, entry) in registries
@@ -530,6 +540,9 @@ impl Registry {
 
 /// Public scope routing passed to hooks. Credentials stay in the registry client.
 pub(crate) fn hook_registries(config: &Value, major: u64) -> Result<Value> {
+    if let Some(routes) = config.get("registriesByScope") {
+        return Ok(routes.clone());
+    }
     let mut registry = Registry::new(config, Some(major), ProjectRc::Working)?;
     registry.generation_network = Some(false);
     let mut scopes = std::collections::BTreeSet::<&str>::new();
@@ -562,13 +575,29 @@ pub(crate) fn hook_registries(config: &Value, major: u64) -> Result<Value> {
                 .filter_map(Value::as_str),
         );
     }
-    let mut routes =
-        serde_json::json!({"default":registry.registry("")?, "@jsr":"https://npm.jsr.io/"});
+    let mut routes = serde_json::json!({"default":registry.registry("")?, "@jsr":JSR_REGISTRY});
     for scope in scopes
         .into_iter()
         .filter(|s| s.starts_with('@') && *s != "@")
     {
         routes[scope] = registry.registry(&format!("{scope}/package"))?.into();
+    }
+    Ok(routes)
+}
+
+pub(crate) fn updated_hook_registries(mut routes: Value, default: &Value) -> Result<Value> {
+    let map = routes
+        .as_object_mut()
+        .ok_or("updateConfig registriesByScope must be a mapping")?;
+    // A returned map replaces the scope routes. Keep the original fallback
+    // and the built-in JSR route when the hook omits them.
+    map.entry("default").or_insert_with(|| default.clone());
+    map.entry("@jsr").or_insert_with(|| JSR_REGISTRY.into());
+    for url in map.values_mut() {
+        let base = url
+            .as_str()
+            .ok_or("updateConfig registriesByScope must contain registry URLs")?;
+        *url = Registry::validated_base(base)?.into();
     }
     Ok(routes)
 }

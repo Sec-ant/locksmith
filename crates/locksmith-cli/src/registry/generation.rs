@@ -4,7 +4,7 @@ use locksmith::{LockfileError, PackageSource, RegistryPackage, SourceManifest};
 use node_semver::{Range, Version};
 use serde_json::Value;
 
-use super::{ProjectRc, Registry};
+use super::{JSR_REGISTRY, ProjectRc, Registry};
 
 pub struct GenerationSource<'a> {
     config: &'a Value,
@@ -71,8 +71,9 @@ impl<'a> GenerationSource<'a> {
             && base == default
             && !registry.rc.contains_key("@jsr:registry")
             && registry.config["registries"].get("@jsr").is_none()
+            && registry.config.get("registriesByScope").is_none()
         {
-            base = "https://npm.jsr.io/".into();
+            base = JSR_REGISTRY.into();
         }
         if base != default {
             // An alias in the specifier names its registry. A plain dependency

@@ -428,13 +428,13 @@ impl<'a> Overrides<'a> {
 
     /// Mirror pnpm's direct-dependency override selection. Parent-qualified rules
     /// take precedence; overlapping rules use pnpm's most-specific selection order.
-    pub(crate) fn apply(
-        &self,
+    pub(crate) fn apply<'spec>(
+        &'spec self,
         manifest: &Value,
         importer: &str,
         name: &str,
-        specifier: &'a str,
-    ) -> Result<Option<Cow<'a, str>>, LockfileError> {
+        specifier: &'spec str,
+    ) -> Result<Option<Cow<'spec, str>>, LockfileError> {
         match self.select(manifest, name, specifier)? {
             Some(value) => self.resolve(importer, name, value),
             None => Ok(Some(Cow::Borrowed(specifier))),
