@@ -234,97 +234,60 @@ impl Baseline<'_> {
 /// Whether a release's recorded peers and snapshot children still satisfy the
 /// declarations of its evaluated manifest.
 fn declarations_match(
+    key: &str,
     manifest: &Value,
     record: &Value,
     bodies: &[&Value],
-    snapshots: Option<&serde_json::Map<String, Value>>,
-    base: &Baseline<'_>,
-    cache: &mut Sources<'_>,
+    build: &mut Build<'_, '_>,
 ) -> Result<bool> {
-    // pnpm records an optional peer declared only in peerDependenciesMeta as `*`.
-    fn declared_peers(doc: &Value) -> BTreeMap<&str, (&str, bool)> {
-        let optional = |name: &str| doc["peerDependenciesMeta"][name]["optional"] == true;
-        graph::section(doc, "peerDependenciesMeta")
-            .into_iter()
-            .flatten()
-            .filter(|(name, _)| optional(name))
-            .map(|(name, _)| (name.as_str(), ("*", true)))
-            .chain(
-                graph::section(doc, "peerDependencies")
-                    .into_iter()
-                    .flatten()
-                    .map(|(name, range)| {
-                        (
-                            name.as_str(),
-                            (range.as_str().unwrap_or_default(), optional(name)),
-                        )
-                    }),
-            )
-            .collect()
-    }
-    let name = manifest["name"].as_str().unwrap_or_default();
+    let base = build.base;
+    let config = build.config;
+    let cache = &mut *build.cache;
+    let snapshots = graph::section(build.old, "snapshots");
     let mut peers = BTreeMap::new();
-    for (peer, (range, optional)) in declared_peers(manifest) {
-        // Optional metadata alone supplies a peer without a selector to override.
-        let effective = if manifest["peerDependencies"].get(peer).is_some() {
-            base.rules.apply(manifest, ".", peer, range)?
+    let mut declared = BTreeMap::new();
+    for (group, name, spec) in
+        super::published_declarations(manifest, key, ".", &base.rules, config)?
+    {
+        if group == "peerDependencies" {
+            peers.insert(
+                name,
+                (
+                    spec,
+                    manifest["peerDependenciesMeta"][name]["optional"] == true,
+                ),
+            );
         } else {
-            Some(std::borrow::Cow::Borrowed(range))
-        };
-        if let Some(range) = effective {
-            peers.insert(peer, (range, optional));
+            declared.insert(name, (group, spec));
         }
     }
-    let ordinary = |group: &str| {
-        graph::section(manifest, group)
-            .into_iter()
-            .flatten()
-            .map(|(dependency, _)| dependency.as_str())
-            .collect::<BTreeSet<_>>()
-    };
-    // Some pnpm releases omit a peer the package also lists as a dependency.
-    let dependencies = ordinary("dependencies");
-    // pnpm also drops a peer on the package itself.
-    let compared = |peer: &str| peer != name && !dependencies.contains(peer);
-    let recorded = declared_peers(record);
-    if !recorded
+    // Older pnpm releases omit the peer declaration when the package's own
+    // dependency supplies it. Other instances still record the peer's range.
+    if !peers::records_fallback_peers(config) {
+        peers.retain(|name, _| {
+            !declared.contains_key(name) || record["peerDependencies"].get(*name).is_some()
+        });
+    }
+    let recorded_optional = |name: &str| record["peerDependenciesMeta"][name]["optional"] == true;
+    let recorded_peers: BTreeMap<_, _> = graph::section(record, "peerDependenciesMeta")
         .into_iter()
-        .filter(|(peer, _)| compared(peer))
-        .eq(peers.iter().filter_map(|(&peer, (range, optional))| {
-            compared(peer).then_some((peer, (range.as_ref(), *optional)))
-        }))
+        .flat_map(|entries| entries.keys())
+        .filter(|name| recorded_optional(name))
+        .map(|name| (name.as_str(), (Some("*"), true)))
+        .chain(
+            graph::section(record, "peerDependencies")
+                .into_iter()
+                .flatten()
+                .map(|(name, range)| (name.as_str(), (range.as_str(), recorded_optional(name)))),
+        )
+        .collect();
+    if !recorded_peers.into_iter().eq(peers
+        .iter()
+        .map(|(&name, (range, optional))| (name, (Some(range.as_ref()), *optional))))
     {
         return Ok(false);
     }
-    // pnpm installs bundled dependencies from the tarball and skips a
-    // dependency on the package itself.
-    let bundled: BTreeSet<&str> = ["bundledDependencies", "bundleDependencies"]
-        .into_iter()
-        .flat_map(|field| manifest[field].as_array().into_iter().flatten())
-        .filter_map(Value::as_str)
-        .collect();
-    let optional = ordinary("optionalDependencies");
-    let mut declared = BTreeMap::new();
-    for group in ["dependencies", "optionalDependencies"] {
-        for (dependency, spec) in graph::section(manifest, group).into_iter().flatten() {
-            if !peers.contains_key(dependency.as_str())
-                && !bundled.contains(dependency.as_str())
-                && dependency != name
-            {
-                let group = if optional.contains(dependency.as_str()) {
-                    "optionalDependencies"
-                } else {
-                    "dependencies"
-                };
-                let Some(spec) = spec.as_str() else {
-                    return Ok(false);
-                };
-                if let Some(spec) = base.rules.apply(manifest, ".", dependency, spec)? {
-                    declared.insert(dependency.as_str(), (group, spec));
-                }
-            }
-        }
-    }
+    declared.retain(|name, _| !peers.contains_key(name) && manifest["name"].as_str() != Some(name));
     if !bodies.iter().all(|body| {
         ["dependencies", "optionalDependencies"]
             .into_iter()
@@ -347,18 +310,29 @@ fn declarations_match(
                 .map(|(_, pin)| pin)
         });
         if spec.starts_with("workspace:") {
-            let expected = base
+            let resolved = base
                 .links
-                .resolve_for_generation(dependency, &spec, ".", manifest, false)?
-                .map(|(target, _)| target);
-            let expected = expected
-                .as_deref()
-                .and_then(|target| target.strip_prefix("link:"));
-            if !pins.all(|pin| {
-                pin.and_then(|pin| pin.strip_prefix("link:"))
-                    .is_some_and(|path| {
-                        expected.is_some_and(|target| graph::linked_importer(".", path) == target)
+                .resolve_for_generation(dependency, &spec, ".", manifest, false)?;
+            let Some((target, member)) = resolved else {
+                return Ok(false);
+            };
+            let path = target.strip_prefix("link:").expect("workspace link");
+            if super::inject_workspace_dependency(dependency, manifest, &spec, config) {
+                let Some(name) = member.and_then(|member| member["name"].as_str()) else {
+                    return Ok(false);
+                };
+                let key = format!("{name}@file:{path}");
+                if !pins.all(|pin| {
+                    pin.is_some_and(|pin| {
+                        let child = graph::snapshot_key(dependency, pin, snapshots);
+                        graph::package_key(&child) == key
                     })
+                }) {
+                    return Ok(false);
+                }
+            } else if !pins.all(|pin| {
+                pin.and_then(|pin| pin.strip_prefix("link:"))
+                    .is_some_and(|linked| graph::linked_importer(".", linked) == path)
             }) {
                 return Ok(false);
             }
@@ -443,7 +417,7 @@ impl<'a> Build<'a, '_> {
             }
             let manifest = &Rc::clone(self.cache.release(key)?).manifest;
             let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
-            if !declarations_match(manifest, record, bodies, snapshots, self.base, self.cache)? {
+            if !declarations_match(key, manifest, record, bodies, self)? {
                 stale.insert(key.as_str());
             }
         }

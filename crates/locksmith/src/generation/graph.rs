@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
@@ -15,6 +16,99 @@ use crate::{
 };
 
 mod history;
+
+fn inject_workspace_dependency(
+    name: &str,
+    manifest: &Value,
+    specifier: &str,
+    config: &WorkspaceConfig,
+) -> bool {
+    !specifier.starts_with("link:") && crate::workspace_links::injected(name, manifest, config)
+}
+
+fn published_declarations<'a>(
+    raw: &'a Value,
+    key: &str,
+    dir: &str,
+    rules: &'a manifest::Overrides<'_>,
+    config: &WorkspaceConfig,
+) -> Result<Vec<(&'static str, &'a str, Cow<'a, str>)>> {
+    let bundle = raw
+        .get("bundledDependencies")
+        .or_else(|| raw.get("bundleDependencies"));
+    // pnpm 9.15.1 removed a package's own name from its peer requirements.
+    let exclude_self = config
+        .pnpm_version
+        .as_ref()
+        .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
+    let own_name = raw["name"].as_str();
+    let ignored = config
+        .resolution
+        .ignored_optional_dependencies
+        .as_ref()
+        .and_then(Value::as_array);
+    let mut declarations = Vec::new();
+    for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        let Some(entries) = raw.get(group) else {
+            continue;
+        };
+        for (name, value) in entries
+            .as_object()
+            .ok_or_else(|| reconcile::missing(&[key, group], "expected a dependency mapping"))?
+        {
+            let value = value.as_str().ok_or_else(|| {
+                reconcile::missing(&[key, group, name], "expected a dependency selector")
+            })?;
+            let replacement = rules.select(raw, name, value)?;
+            let spec = match replacement {
+                Some(value) => rules.resolve(dir, name, value)?,
+                None => Some(Cow::Borrowed(value)),
+            };
+            let Some(spec) = spec else {
+                continue;
+            };
+            if group == "peerDependencies"
+                && (replacement.is_none() || manifest::valid_peer_range(&spec))
+            {
+                if !exclude_self || own_name != Some(name) {
+                    declarations.push((group, name.as_str(), spec));
+                }
+                continue;
+            }
+            if (group == "dependencies" && raw["optionalDependencies"].get(name).is_some())
+                || (group == "optionalDependencies"
+                    && ignored.is_some_and(|a| a.iter().any(|v| v == name)))
+                || bundle.is_some_and(|v| {
+                    v == true || v.as_array().is_some_and(|a| a.iter().any(|v| v == name))
+                })
+            {
+                continue;
+            }
+            let group = if group == "peerDependencies" {
+                "dependencies"
+            } else {
+                group
+            };
+            declarations.push((group, name.as_str(), spec));
+        }
+    }
+    // Optional metadata alone can declare a peer without a selector.
+    let fallback = super::peers::records_fallback_peers(config);
+    for (name, meta) in graph::section(raw, "peerDependenciesMeta")
+        .into_iter()
+        .flatten()
+    {
+        if meta["optional"] == true
+            && raw["peerDependencies"].get(name).is_none()
+            && (!exclude_self || own_name != Some(name))
+            && raw["optionalDependencies"].get(name).is_none()
+            && (fallback || raw["dependencies"].get(name).is_none())
+        {
+            declarations.push(("peerDependencies", name, Cow::Borrowed("*")));
+        }
+    }
+    Ok(declarations)
+}
 
 pub(super) struct Sources<'a> {
     source: &'a mut dyn PackageSource,
@@ -533,13 +627,12 @@ impl<'a, 's> Build<'a, 's> {
         let old_key = old_key
             .as_deref()
             .filter(|k| self.old["snapshots"].get(*k).is_some());
-        let injected = crate::workspace_links::injected(name, parent, self.config);
         if let Some((target, package)) = self
             .base
             .links
             .resolve_for_generation(name, spec, dir, parent, direct)?
         {
-            if !injected || spec.starts_with("link:") {
+            if !inject_workspace_dependency(name, parent, spec, self.config) {
                 return Ok(target);
             }
             let path = target.strip_prefix("link:").expect("workspace link");
@@ -1083,110 +1176,35 @@ impl<'a, 's> Build<'a, 's> {
                     .get(base)
                     .cloned()
                     .unwrap_or_else(|| ".".into());
-                let bundle = raw
-                    .get("bundledDependencies")
-                    .or_else(|| raw.get("bundleDependencies"));
-                // pnpm 9.15.1 removed a package's own name from its peer requirements.
-                let exclude_self = self
-                    .config
-                    .pnpm_version
-                    .as_ref()
-                    .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
-                let own_name = raw["name"].as_str();
-                for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
-                    let Some(entries) = raw.get(group) else {
-                        continue;
-                    };
-                    for (name, value) in entries.as_object().ok_or_else(|| {
-                        reconcile::missing(&[base, group], "expected a dependency mapping")
-                    })? {
-                        let value = value.as_str().ok_or_else(|| {
-                            reconcile::missing(
-                                &[base, group, name],
-                                "expected a dependency selector",
-                            )
-                        })?;
-                        let replacement = self.base.rules.select(raw, name, value)?;
-                        let spec = match replacement {
-                            Some(value) => self.base.rules.resolve(&dir, name, value)?,
-                            None => Some(std::borrow::Cow::Borrowed(value)),
-                        };
-                        let Some(spec) = spec else {
-                            continue;
-                        };
-                        if group == "peerDependencies"
-                            && (replacement.is_none() || manifest::valid_peer_range(&spec))
-                        {
-                            if exclude_self && own_name == Some(name) {
-                                continue;
-                            }
-                            record[group][name] = spec.as_ref().into();
-                            if raw["peerDependenciesMeta"][name]["optional"] == true {
-                                record["peerDependenciesMeta"][name] = json!({"optional":true});
-                            }
-                            continue;
-                        }
-                        if (group == "dependencies"
-                            && raw["optionalDependencies"].get(name).is_some())
-                            || (group == "optionalDependencies"
-                                && self
-                                    .config
-                                    .resolution
-                                    .ignored_optional_dependencies
-                                    .as_ref()
-                                    .and_then(Value::as_array)
-                                    .is_some_and(|a| a.iter().any(|v| v == name)))
-                            || bundle.is_some_and(|v| {
-                                v == true
-                                    || v.as_array().is_some_and(|a| a.iter().any(|v| v == name))
-                            })
-                        {
-                            continue;
-                        }
-                        let group = if group == "peerDependencies" {
-                            "dependencies"
-                        } else {
-                            group
-                        };
-                        let old =
-                            graph::dependency(original, name).map(|(_, v)| json!({"version":v}));
-                        let target = self.select(
-                            Owner::Snapshot(key.clone()),
-                            &dir,
-                            raw,
-                            name,
-                            &spec,
-                            old.as_ref(),
-                        )?;
-                        edges.insert(
-                            name.clone(),
-                            Dependency {
-                                group,
-                                target,
-                                locked: false,
-                            },
-                        );
-                    }
-                }
-                // pnpm interprets optional metadata without a declared peer range
-                // as "*", unless the package installs that name itself. Releases
-                // that record fallback peers keep the name when it is an ordinary
-                // dependency, and drop it only for an optional dependency.
-                let fallback = super::peers::records_fallback_peers(self.config);
-                for (name, meta) in graph::section(raw, "peerDependenciesMeta")
-                    .into_iter()
-                    .flatten()
+                for (group, name, spec) in
+                    published_declarations(raw, base, &dir, &self.base.rules, self.config)?
                 {
-                    if meta["optional"] == true
-                        && raw["peerDependencies"].get(name).is_none()
-                        && !(exclude_self && own_name == Some(name))
-                        && raw["optionalDependencies"].get(name).is_none()
-                        && (fallback || raw["dependencies"].get(name).is_none())
-                    {
-                        record["peerDependencies"][name] = "*".into();
-                        record["peerDependenciesMeta"][name] = json!({"optional":true});
+                    if group == "peerDependencies" {
+                        record[group][name] = spec.as_ref().into();
+                        if raw["peerDependenciesMeta"][name]["optional"] == true {
+                            record["peerDependenciesMeta"][name] = json!({"optional":true});
+                        }
+                        continue;
                     }
+                    let old = graph::dependency(original, name).map(|(_, v)| json!({"version":v}));
+                    let target = self.select(
+                        Owner::Snapshot(key.clone()),
+                        &dir,
+                        raw,
+                        name,
+                        &spec,
+                        old.as_ref(),
+                    )?;
+                    edges.insert(
+                        name.to_owned(),
+                        Dependency {
+                            group,
+                            target,
+                            locked: false,
+                        },
+                    );
                 }
+                let fallback = super::peers::records_fallback_peers(self.config);
                 // Before pnpm recorded fallback peers, a release's own dependency
                 // served a peer unless pnpm first reached the release under a
                 // provider. The previous record shows that outcome for a release

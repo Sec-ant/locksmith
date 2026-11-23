@@ -272,7 +272,10 @@ fn an_identity_update_config_preserves_the_configured_scope_routes() {
     );
     fs::write(
         root.join(".pnpmfile.cjs"),
-        "exports.hooks = { updateConfig: config => config };",
+        "exports.hooks = { updateConfig(config) {
+            require('node:fs').writeFileSync('update-config-ran', '');
+            return config;
+        } };",
     )
     .unwrap();
     let result = output(run(
@@ -285,6 +288,7 @@ fn an_identity_update_config_preserves_the_configured_scope_routes() {
             "--stdout",
         ],
     ));
+    assert!(root.join("update-config-ran").is_file());
     assert_eq!(
         result["importers"]["."]["dependencies"]["lib"]["version"],
         "1.0.0"

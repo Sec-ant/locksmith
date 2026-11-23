@@ -906,6 +906,8 @@ fn hook_changes_to_a_dependency_source_or_tag_update_the_lock() {
         fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
             if raw["name"] == "plugin" {
                 raw["dependencies"]["leaf"] = self.0.into();
+                raw["dependenciesMeta"]["leaf"]["injected"] =
+                    (self.0 == "workspace:*" || self.0.starts_with("link:")).into();
             }
             Ok(raw)
         }
@@ -931,7 +933,7 @@ fn hook_changes_to_a_dependency_source_or_tag_update_the_lock() {
     let mut inputs = workspace(&[
         (".", json!({"dependencies":{"plugin":"1"}})),
         ("packages/a", json!({"name":"a","version":"1.0.0"})),
-        ("packages/b", json!({"name":"b","version":"1.0.0"})),
+        ("packages/b", json!({"name":"leaf","version":"1.0.0"})),
     ]);
     let mut old = generate(&empty_workspace_lock(), &inputs, "mirror:1", &mut registry);
     let leaf = |lock: &Lockfile| {
@@ -944,6 +946,8 @@ fn hook_changes_to_a_dependency_source_or_tag_update_the_lock() {
         ("tag", "beta", "2.0.0"),
         ("workspace-a", "workspace:./packages/a", "link:packages/a"),
         ("workspace-b", "workspace:./packages/b", "link:packages/b"),
+        ("injected", "workspace:*", "file:packages/b"),
+        ("explicit-link", "link:./packages/b", "link:packages/b"),
     ] {
         inputs.insert(member.into(), json!({"dependencies":{"other":"1"}}));
         old = generate(&old, &inputs, selector, &mut registry);
@@ -991,9 +995,15 @@ fn overrides_remove_peers_before_the_old_graph_is_reused() {
     let config = json!({
         "pnpmfileChecksum":"stable",
         "autoInstallPeers":false,
-        "overrides":{"plugin>host":"-"}
+        "overrides":{"plugin>host":"-","plugin>promoted":"link:packages/provider"}
     });
-    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let mut inputs = workspace(&[
+        (".", json!({"dependencies":{"plugin":"1"}})),
+        (
+            "packages/provider",
+            json!({"name":"provider","version":"1.0.0"}),
+        ),
+    ]);
     let generate = |old: &Lockfile, manifests: &_, peer, registry: &mut Registry| {
         locksmith::generate_with_hooks(
             old,
@@ -1020,6 +1030,127 @@ fn overrides_remove_peers_before_the_old_graph_is_reused() {
     assert_eq!(
         unchanged.project().unwrap()["packages"]["plugin@1.0.0"],
         *record
+    );
+
+    registry.tarballs.insert(archive.into());
+    inputs.insert("three".into(), json!({}));
+    let promoted = generate(&unchanged, &inputs, "promoted", &mut registry);
+    let project = promoted.project().unwrap();
+    assert!(
+        project["packages"]["plugin@1.0.0"]
+            .get("peerDependencies")
+            .is_none()
+    );
+    assert_eq!(
+        project["snapshots"]["plugin@1.0.0"]["dependencies"]["promoted"],
+        "link:packages/provider"
+    );
+    // An ordinary link introduced by a peer override is sufficient evidence on reuse.
+    registry.tarballs.clear();
+    inputs.insert("four".into(), json!({}));
+    let again = generate(&promoted, &inputs, "promoted", &mut registry);
+    assert_eq!(again.project().unwrap()["snapshots"], project["snapshots"]);
+}
+
+#[test]
+fn history_keeps_the_optional_group_and_ignores_bundled_dependencies() {
+    struct Identity;
+    impl locksmith::GenerationHooks for Identity {
+        fn read_package(&mut self, _: &str, raw: Value) -> Result<Value> {
+            Ok(raw)
+        }
+    }
+
+    let archive = "https://example.test/leaf.tgz";
+    let mut registry = Registry::default();
+    registry.tarballs.insert(archive.into());
+    registry.add("optional", "1.0.0", json!({}));
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({
+            "dependencies":{"leaf":archive,"optional":"2","ignored":"1","removed":"1","bundled":"1"},
+            "optionalDependencies":{"optional":"1","ignored":"1","removed":"2"},
+            "bundledDependencies":["bundled"],
+            "bundleDependencies":["leaf"]
+        }),
+    );
+    registry.add(
+        "all-bundled",
+        "1.0.0",
+        json!({"dependencies":{"bundled":"1"},"bundledDependencies":true,"bundleDependencies":[]}),
+    );
+    let config = json!({
+        "pnpmfileChecksum":"stable",
+        "ignoredOptionalDependencies":["ignored"],
+        "overrides":{"plugin>removed@2":"-"}
+    });
+    let mut inputs = workspace(&[(
+        ".",
+        json!({"dependencies":{"plugin":"1","all-bundled":"1"}}),
+    )]);
+    let generate = |old: &Lockfile, manifests: &_, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(manifests, &config),
+            registry,
+            &mut Identity,
+        )
+        .unwrap()
+    };
+    let old = generate(&empty_workspace_lock(), &inputs, &mut registry);
+    let graph = &old.project().unwrap()["snapshots"];
+    assert_eq!(
+        graph["plugin@1.0.0"]["dependencies"],
+        json!({"leaf":archive})
+    );
+    assert_eq!(
+        graph["plugin@1.0.0"]["optionalDependencies"],
+        json!({"optional":"1.0.0"})
+    );
+    assert!(graph["all-bundled@1.0.0"].get("dependencies").is_none());
+    registry.tarballs.clear();
+    inputs.insert("added".into(), json!({}));
+    let next = generate(&old, &inputs, &mut registry);
+    assert_eq!(next.project().unwrap()["snapshots"], *graph);
+}
+
+#[test]
+fn history_updates_a_peer_range_even_when_the_package_provides_that_peer() {
+    struct Rewrite(&'static str);
+    impl locksmith::GenerationHooks for Rewrite {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] == "plugin" {
+                raw["peerDependencies"]["host"] = self.0.into();
+            }
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add("plugin", "1.0.0", json!({"dependencies":{"host":"1"}}));
+    registry.add("host", "1.0.0", json!({}));
+    let config = json!({"pnpmfileChecksum":"stable","autoInstallPeers":false});
+    let version = node_semver::Version::from((12, 15, 0));
+    let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let generate = |old: &Lockfile, manifests: &_, range, registry: &mut Registry| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(manifests, &config).with_pnpm_version(&version),
+            registry,
+            &mut Rewrite(range),
+        )
+        .unwrap()
+    };
+    let old = generate(&empty_workspace_lock(), &inputs, "^1", &mut registry);
+    assert_eq!(
+        old.project().unwrap()["packages"]["plugin@1.0.0"]["peerDependencies"]["host"],
+        "^1"
+    );
+    inputs.insert("added".into(), json!({}));
+    let next = generate(&old, &inputs, "*", &mut registry);
+    assert_eq!(
+        next.project().unwrap()["packages"]["plugin@1.0.0"]["peerDependencies"]["host"],
+        "*"
     );
 }
 
