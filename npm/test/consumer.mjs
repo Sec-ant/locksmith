@@ -84,7 +84,8 @@ mkdirSync(hooked);
 writeFileSync(join(hooked, 'package.json'), JSON.stringify({ name: 'consumer', packageManager: 'pnpm@10.34.9' }));
 writeFileSync(join(hooked, 'local-choice.json'), '"link:./local"');
 writeFileSync(join(hooked, '.pnpmfile.cjs'), `module.exports = { hooks: { async readPackage(pkg) {
-  if (process.cwd() !== __dirname) throw new Error('hook did not run in the workspace directory');
+  const realpath = require('node:fs').realpathSync.native;
+  if (realpath(process.cwd()) !== realpath(__dirname)) throw new Error('hook did not run in the workspace directory');
   if (process.execPath !== ${JSON.stringify(process.execPath)}) throw new Error('hook did not run with the calling Node executable');
   pkg.dependencies = { local: require('./local-choice.json') };
   return pkg;
