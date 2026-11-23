@@ -61,36 +61,7 @@ pub(crate) fn resolve(
             .collect(),
     );
     let config = context.configuration;
-    if output
-        .get("settings")
-        .is_some_and(|value| !value.is_object())
-    {
-        return Err(missing(&["settings"], "expected mapping"));
-    }
-    if output.get("settings").is_none() {
-        output["settings"] = json!({});
-    }
-    output["settings"]["autoInstallPeers"] = json!(config.resolution.lock.auto_install_peers);
-    if config.resolution.lock.project_scoped_optional_peers
-        && config.resolution.dedupe_peer_dependents
-    {
-        output["settings"]["projectScopedOptionalPeers"] = json!(true);
-    } else {
-        output["settings"]
-            .as_object_mut()
-            .unwrap()
-            .remove("projectScopedOptionalPeers");
-    }
-    if config.resolution.lock.dedupe_peers {
-        output["settings"]["dedupePeers"] = json!(true);
-    } else {
-        output["settings"]
-            .as_object_mut()
-            .unwrap()
-            .remove("dedupePeers");
-    }
-    output["settings"]["excludeLinksFromLockfile"] =
-        json!(config.resolution.lock.exclude_links_from_lockfile);
+    settings(&mut output, config)?;
     for (field, lock_field, value, source_values) in [
         (
             "packageExtensions",
@@ -237,10 +208,56 @@ pub(crate) fn resolve(
     if let Some(rules) = effective_overrides(config, context.manifests.get("."))? {
         output["overrides"] = rules;
     }
+    patches(&mut output, config, context.patches)?;
+    Ok(output)
+}
+
+pub(crate) fn settings(
+    output: &mut Value,
+    config: &crate::WorkspaceConfig,
+) -> Result<(), LockfileError> {
+    if output
+        .get("settings")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(missing(&["settings"], "expected mapping"));
+    }
+    if output.get("settings").is_none() {
+        output["settings"] = json!({});
+    }
+    output["settings"]["autoInstallPeers"] = json!(config.resolution.lock.auto_install_peers);
+    if config.resolution.lock.project_scoped_optional_peers
+        && config.resolution.dedupe_peer_dependents
+    {
+        output["settings"]["projectScopedOptionalPeers"] = json!(true);
+    } else {
+        output["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("projectScopedOptionalPeers");
+    }
+    if config.resolution.lock.dedupe_peers {
+        output["settings"]["dedupePeers"] = json!(true);
+    } else {
+        output["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dedupePeers");
+    }
+    output["settings"]["excludeLinksFromLockfile"] =
+        json!(config.resolution.lock.exclude_links_from_lockfile);
+    Ok(())
+}
+
+pub(crate) fn patches(
+    output: &mut Value,
+    config: &crate::WorkspaceConfig,
+    contents_by_path: &std::collections::BTreeMap<String, String>,
+) -> Result<(), LockfileError> {
     if let Some(patches) = &config.patches {
         for (name, path) in patches {
             let path = path.as_str();
-            let contents = context.patches.get(path).ok_or_else(|| {
+            let contents = contents_by_path.get(path).ok_or_else(|| {
                 missing(
                     &["patchedDependencies", name],
                     format!("missing patch contents: {path}"),
@@ -255,7 +272,7 @@ pub(crate) fn resolve(
             };
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 /// pnpm records publication times for direct dependency locators only.
@@ -274,7 +291,7 @@ pub(crate) fn publication_times<const N: usize>(
     }
     let major = config
         .and_then(|c| c.pnpm_version.as_ref())
-        .map(|v| v.major);
+        .map(|v| v.major());
     let snapshots = graph::section(project, "snapshots");
     for (_, importer) in graph::section(project, "importers").into_iter().flatten() {
         for group in crate::manifest::GROUPS {

@@ -25,6 +25,8 @@ jobs:
         with:
           just-version: "1.59.0"
       - run: just check
+      # Hook tests select both runtimes when the embedded feature is built.
+      - run: cargo test --locked -p locksmith-cli --features pnpmfile --test registry
 
   pnpm:
     runs-on: ubuntu-latest

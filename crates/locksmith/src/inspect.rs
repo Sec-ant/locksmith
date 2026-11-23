@@ -4,7 +4,7 @@ mod impact;
 use crate::{
     Disposition, Lockfile, LockfileError, PeerRules, PeerStatus, Value, diagnostics, graph,
 };
-use nodejs_semver::Version;
+use node_semver::Version;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 

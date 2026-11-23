@@ -135,15 +135,10 @@ impl RegistryMetadata {
             }
             value.to_owned()
         } else {
-            let sha = dist["shasum"]
+            dist["shasum"]
                 .as_str()
-                .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-                .ok_or_else(|| invalid("missing distribution integrity"))?;
-            let bytes: Vec<_> = (0..40)
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&sha[i..i + 2], 16).expect("hex digest"))
-                .collect();
-            format!("sha1-{}", STANDARD.encode(bytes))
+                .and_then(sha1_integrity)
+                .ok_or_else(|| invalid("missing distribution integrity"))?
         };
         let mut resolution = json!({"integrity":integrity});
         let tarball = dist["tarball"]
@@ -190,6 +185,17 @@ impl RegistryMetadata {
         });
         Ok(())
     }
+}
+
+pub(crate) fn sha1_integrity(shasum: &str) -> Option<String> {
+    if shasum.len() != 40 || !shasum.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes: Vec<_> = (0..40)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&shasum[i..i + 2], 16).expect("hex digest"))
+        .collect();
+    Some(format!("sha1-{}", STANDARD.encode(bytes)))
 }
 
 fn valid_digest(token: &str) -> bool {

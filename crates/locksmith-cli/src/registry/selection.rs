@@ -5,12 +5,20 @@ use node_semver::{Range, Version};
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Deserialize)]
-struct ReleaseStatus<'a> {
-    deprecated: Option<&'a str>,
+fn deprecated(publication: &serde_json::value::RawValue) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Status {
+        deprecated: Option<Value>,
+    }
+    match serde_json::from_str::<Status>(publication.get())?.deprecated {
+        None => Ok(false),
+        Some(Value::Bool(flag)) => Ok(flag),
+        Some(Value::String(message)) => Ok(!message.is_empty()),
+        Some(_) => Err("expected a deprecation message or boolean in registry metadata".into()),
+    }
 }
 
-fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
+pub(super) fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
     if policy.is_null() {
         return Ok(false);
     }
@@ -35,7 +43,24 @@ fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
 }
 
 impl Registry {
-    fn old_enough(&self, doc: &Packument, version: &str) -> Result<bool> {
+    pub(super) fn before_cutoff<R>(
+        &self,
+        doc: &Packument<R>,
+        v: &str,
+        direct: bool,
+    ) -> Result<bool> {
+        if !direct && let Some(ceiling) = self.transitive_cutoff {
+            let time = doc
+                .time
+                .get(v)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("missing publish time for {}@{v}", doc.name))?;
+            return Ok(time.parse::<Timestamp>()?.as_millisecond() <= ceiling);
+        }
+        Ok(true)
+    }
+
+    pub(super) fn old_enough<R>(&self, doc: &Packument<R>, version: &str) -> Result<bool> {
         if self.min_age == 0
             || excluded(&self.config["minimumReleaseAgeExclude"], &doc.name, version)?
         {
@@ -56,19 +81,26 @@ impl Registry {
         doc: &'p Packument,
         specifier: &str,
         direct: bool,
-    ) -> Result<&'p str> {
+    ) -> Result<Option<&'p str>> {
         let mode = self.config["resolutionMode"].as_str().unwrap_or("highest");
-        if !matches!(mode, "highest" | "lowest-direct") {
+        if !(matches!(mode, "highest" | "lowest-direct")
+            || self.generation_network.is_some() && mode == "time-based")
+        {
             return Err(format!(
                 "registry resolutionMode {mode} requires additional resolution context"
             )
             .into());
         }
         let range = specifier.parse::<Range>().ok();
-        let lowest = direct && mode == "lowest-direct" && range.is_some();
-        let pick = |age_filter: bool| -> Result<Option<&'p str>> {
-            let eligible =
-                |v: &str| -> Result<bool> { Ok(!age_filter || self.old_enough(doc, v)?) };
+        let lowest = direct && matches!(mode, "lowest-direct" | "time-based") && range.is_some();
+        let pick = |age_filter: bool, cutoff: bool, lowest: bool| -> Result<Option<&'p str>> {
+            let eligible = |v: &str| -> Result<bool> {
+                Ok(
+                    (!cutoff || range.is_none() || self.before_cutoff(doc, v, direct)?)
+                        && (!age_filter || self.old_enough(doc, v)?)
+                        && (self.generation_network.is_none() || self.trusted(doc, v)?),
+                )
+            };
             let tag = if range.is_some() { "latest" } else { specifier };
             if !lowest
                 && let Some(version) = doc.tags.get(tag)
@@ -102,11 +134,7 @@ impl Registry {
                     {
                         continue;
                     }
-                    if skip_deprecated
-                        && serde_json::from_str::<ReleaseStatus>(manifest.get())?
-                            .deprecated
-                            .is_some_and(|s| !s.is_empty())
-                    {
+                    if skip_deprecated && deprecated(manifest)? {
                         continue;
                     }
                     result = Some((parsed, version));
@@ -116,28 +144,33 @@ impl Registry {
             let chosen = best(false)?;
             if let Some(version) = chosen
                 && !lowest
-                && serde_json::from_str::<ReleaseStatus>(doc.versions[version].get())?
-                    .deprecated
-                    .is_some_and(|s| !s.is_empty())
+                && deprecated(&doc.versions[version])?
             {
                 return Ok(best(true)?.or(chosen));
             }
             Ok(chosen)
         };
-        let mut selected = pick(self.min_age > 0)?;
+        // pnpm's time-based mode installs the lowest matching release when no
+        // release published before the transitive cutoff satisfies the range.
+        let outside_cutoff = !direct && self.transitive_cutoff.is_some();
+        let select = |age_filter: bool| -> Result<Option<&'p str>> {
+            match pick(age_filter, true, lowest)? {
+                None if outside_cutoff => pick(age_filter, false, true),
+                selected => Ok(selected),
+            }
+        };
+        let mut selected = select(self.min_age > 0)?;
         let strict = self.config["minimumReleaseAgeStrict"]
             .as_bool()
             .unwrap_or(self.config.get("minimumReleaseAge").is_some());
         if selected.is_none() && self.min_age > 0 && !strict {
-            selected = pick(false)?;
+            selected = select(false)?;
         }
-        let selected = selected.ok_or_else(|| {
-            format!(
-                "no eligible registry version of {} satisfies {specifier}",
-                doc.name
-            )
-        })?;
-        if let Some(policy) = self.config["trustPolicy"].as_str()
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        if self.generation_network.is_none()
+            && let Some(policy) = self.config["trustPolicy"].as_str()
             && policy != "off"
             && !excluded(&self.config["trustPolicyExclude"], &doc.name, selected)?
         {
@@ -147,6 +180,6 @@ impl Registry {
             )
             .into());
         }
-        Ok(selected)
+        Ok(Some(selected))
     }
 }

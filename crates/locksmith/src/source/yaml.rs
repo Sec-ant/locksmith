@@ -52,14 +52,42 @@ const ROOT_KEYS: [&str; 10] = [
     "packages",
 ];
 
+// pnpm 9 used its root sort order recursively within each importer.
+const PNPM9_KEYS: [&str; 13] = [
+    "lockfileVersion",
+    "settings",
+    "catalogs",
+    "overrides",
+    "packageExtensionsChecksum",
+    "pnpmfileChecksum",
+    "patchedDependencies",
+    "dependencies",
+    "optionalDependencies",
+    "devDependencies",
+    "dependenciesMeta",
+    "importers",
+    "packages",
+];
+
+pub(super) fn importer_order(left: &str, right: &str, pnpm9: bool) -> Ordering {
+    priority_cmp(if pnpm9 { &PNPM9_KEYS } else { &ROOT_KEYS }, left, right)
+}
+
 pub(super) fn root_order(left: &str, right: &str) -> Ordering {
     priority_cmp(&ROOT_KEYS, left, right)
 }
 
-pub(super) fn write_entry(output: &mut String, section: Option<&str>, key: &str, value: &Value) {
+pub(super) fn write_entry(
+    output: &mut String,
+    section: Option<&str>,
+    key: &str,
+    value: &Value,
+    pnpm9: bool,
+) {
     // Render one edited block at a time. Unmodified sections and records retain
     // their source bytes and do not require sorting or serializing a second time.
     let priority: Option<&[&str]> = match (section, key) {
+        (Some("importers"), _) if pnpm9 => Some(&PNPM9_KEYS),
         (Some("importers"), _) => Some(&ROOT_KEYS),
         (Some("packages" | "snapshots"), _) => Some(&ORDERED_KEYS),
         (None, "settings" | "catalogs" | "time" | "patchedDependencies") => Some(&[]),

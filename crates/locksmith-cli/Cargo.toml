@@ -1,6 +1,6 @@
 [package]
 name = "locksmith-cli"
-description = "Command-line interface for merging and converging pnpm lockfiles"
+description = "Command-line interface for merging, generating, converging, repairing and inspecting pnpm lockfiles"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,10 @@ workspace = true
 name = "locksmith"
 path = "src/main.rs"
 doc = false
+
+[features]
+default = []
+pnpmfile = ["dep:llrt_modules", "dep:rquickjs", "dep:tokio"]
 
 [dependencies]
 bpaf = { version = "0.9.29", features = ["derive"] }
@@ -28,6 +32,14 @@ tempfile.workspace = true
 ureq = "3"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 base64.workspace = true
+sha2.workspace = true
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+llrt_modules = { version = "0.8.1-beta", optional = true, default-features = false, features = ["buffer", "fs", "path", "timers"] }
+rquickjs = { version = "0.11", optional = true, default-features = false, features = ["futures", "loader"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "time"] }
+fluent-uri = "0.4.1"
+ring = "0.17.14"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 mimalloc = { version = "0.1.52", features = ["v2", "no_thp"] }

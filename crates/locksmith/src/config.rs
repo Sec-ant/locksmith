@@ -122,6 +122,8 @@ impl Default for ResolutionSettings {
 /// decode settings for a particular pnpm release with `from_pnpm_version`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfig {
+    /// Absolute workspace directory for links between members outside the lockfile folder.
+    pub lockfile_dir: Option<String>,
     pub auto_dedupe: bool,
     pub resolution: ResolutionSettings,
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
@@ -143,29 +145,29 @@ impl WorkspaceConfig {
     ) -> Result<Self, LockfileError> {
         let mut config = Self::from_pnpm(value)?;
         config.pnpm_version = Some(v.clone());
-        config.extension_checksum = Some(if v.major < 10 {
+        config.extension_checksum = Some(if v.major() < 10 {
             ExtensionChecksum::Md5
         } else {
             ExtensionChecksum::Sha256
         });
-        config.override_tie_break = if v.major >= 12 {
+        config.override_tie_break = if v.major() >= 12 {
             OverrideTieBreak::First
         } else {
             OverrideTieBreak::Last
         };
-        config.patch_encoding = match v.major {
+        config.patch_encoding = match v.major() {
             0..=9 => PatchEncoding::Md5Base32WithPath,
             10 => PatchEncoding::Sha256WithPath,
             _ => PatchEncoding::Sha256,
         };
-        config.linked_peer_encoding = if v.major >= 11 {
+        config.linked_peer_encoding = if v.major() >= 11 {
             LinkedPeerEncoding::Path
         } else {
             LinkedPeerEncoding::Filename
         };
-        if v.major < 11
-            || (v.major == 11 && v < &node_semver::Version::new(11, 28, 12))
-            || (v.major == 12 && v < &node_semver::Version::new(12, 19, 0))
+        if v.major() < 11
+            || (v.major() == 11 && v < &node_semver::Version::from((11, 28, 12)))
+            || (v.major() == 12 && v < &node_semver::Version::from((12, 19, 0)))
         {
             config.resolution.optional_peer_scope = OptionalPeerScope::Workspace;
         }
@@ -173,17 +175,17 @@ impl WorkspaceConfig {
     }
 
     pub(crate) fn matches_catalog_ranges(&self) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major {
-            11 => v >= &node_semver::Version::new(11, 28, 12),
-            12 => v >= &node_semver::Version::new(12, 20, 0),
+        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
+            11 => v >= &node_semver::Version::from((11, 28, 12)),
+            12 => v >= &node_semver::Version::from((12, 20, 0)),
             major => major > 12,
         })
     }
 
     pub(crate) fn records_link_directory(&self) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major {
-            11 => v >= &node_semver::Version::new(11, 26, 0),
-            12 => v >= &node_semver::Version::new(12, 3, 2),
+        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
+            11 => v >= &node_semver::Version::from((11, 26, 0)),
+            12 => v >= &node_semver::Version::from((12, 3, 2)),
             major => major > 12,
         })
     }
@@ -193,7 +195,7 @@ impl WorkspaceConfig {
         self.pnpm_version
             .as_ref()
             .zip(other.pnpm_version.as_ref())
-            .is_some_and(|(a, b)| a.major != b.major)
+            .is_some_and(|(a, b)| a.major() != b.major())
     }
 
     pub(crate) fn matches_pnpm(&self, target: &Self) -> bool {
@@ -249,6 +251,7 @@ impl WorkspaceConfig {
                 .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
                 .collect(),
             },
+            lockfile_dir: decode(value, "lockfileDir")?,
             catalogs,
             overrides: string_rules(value, "overrides")?,
             override_tie_break: OverrideTieBreak::default(),

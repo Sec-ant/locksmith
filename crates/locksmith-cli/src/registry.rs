@@ -1,8 +1,9 @@
 //! Metadata transport and registry selection. Constructed only after a local miss.
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{BufReader, ErrorKind},
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -11,13 +12,21 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jiff::Timestamp;
 use locksmith::{RegistryMetadata, RegistryRequest};
 use serde::Deserialize;
-use serde_json::{Value, value::RawValue};
+use serde_json::Value;
 use ureq::{Agent, http::Uri};
 
 use crate::Result;
+mod generation;
+pub use generation::GenerationSource;
+mod metadata;
+mod publication;
+pub(crate) use publication::RESOLUTION_FIELDS;
 mod selection;
 mod settings;
+mod trust;
 use settings::{apply_auth, copy_settings, env_config, project_rc};
+
+const JSR_REGISTRY: &str = "https://npm.jsr.io/";
 
 #[derive(Clone, Copy)]
 pub enum ProjectRc<'a> {
@@ -28,25 +37,44 @@ pub enum ProjectRc<'a> {
     },
 }
 
-#[derive(Deserialize)]
-struct Packument {
+#[derive(Deserialize, serde::Serialize)]
+struct Packument<Release = Box<serde_json::value::RawValue>> {
+    #[serde(default, rename = "_locksmithFreshUntil")]
+    fresh_until: i64,
+    #[serde(
+        default,
+        rename = "_locksmithETag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    etag: Option<String>,
     name: String,
-    versions: BTreeMap<String, Box<RawValue>>,
+    versions: BTreeMap<String, Release>,
     #[serde(rename = "dist-tags", default)]
     tags: BTreeMap<String, String>,
     #[serde(default)]
     time: BTreeMap<String, Value>,
+    #[serde(skip)]
+    downgrades: std::cell::OnceCell<BTreeSet<String>>,
 }
+
+type ScopeRoutes = BTreeMap<String, (String, bool)>;
 
 struct Registry {
     agent: Agent,
+    network_concurrency: usize,
     rc: BTreeMap<String, String>,
     config: Value,
-    packages: BTreeMap<String, Packument>,
+    scopes: OnceCell<ScopeRoutes>,
+    registry_env: Option<String>,
+    packages: BTreeMap<(String, String), Packument>,
+    pinned: BTreeMap<(String, String), Packument<u8>>,
+    failed: BTreeMap<(String, String), String>,
     global_auth_routes: BTreeMap<String, String>,
     env_auth_routes: BTreeMap<String, String>,
     min_age: u64,
     now: i64,
+    generation_network: Option<bool>,
+    transitive_cutoff: Option<i64>,
 }
 
 fn read(path: &Path) -> Result<Option<String>> {
@@ -129,7 +157,11 @@ pub fn resolve(
                 let fetched = (|| {
                     let client = match &mut registry {
                         Some(client) => client,
-                        None => registry.insert(Registry::new(config, root, project)?),
+                        None => registry.insert(Registry::new(
+                            config,
+                            crate::workspace::pnpm_version(root).map(|v| v.major()),
+                            project,
+                        )?),
                     };
                     client.satisfy(
                         request,
@@ -161,7 +193,7 @@ pub fn resolve(
 }
 
 impl Registry {
-    fn new(workspace: &Value, root: &Value, project: ProjectRc<'_>) -> Result<Self> {
+    fn new(workspace: &Value, major: Option<u64>, project: ProjectRc<'_>) -> Result<Self> {
         let mut rc = BTreeMap::new();
         let home = env::var_os("HOME").map(PathBuf::from);
         let user = env::var_os("PNPM_CONFIG_NPMRC_AUTH_FILE")
@@ -239,6 +271,7 @@ impl Registry {
             None => BTreeMap::new(),
         };
         for (key, field) in [
+            ("network_concurrency", "networkConcurrency"),
             ("minimum_release_age", "minimumReleaseAge"),
             ("minimum_release_age_strict", "minimumReleaseAgeStrict"),
             ("minimum_release_age_exclude", "minimumReleaseAgeExclude"),
@@ -248,6 +281,7 @@ impl Registry {
             ),
             ("resolution_mode", "resolutionMode"),
             ("trust_policy", "trustPolicy"),
+            ("trust_policy_ignore_after", "trustPolicyIgnoreAfter"),
             ("trust_policy_exclude", "trustPolicyExclude"),
             ("lockfile_include_tarball_url", "lockfileIncludeTarballUrl"),
         ] {
@@ -263,10 +297,12 @@ impl Registry {
                 config[field] = serde_json::from_str(v).unwrap_or_else(|_| Value::from(v));
             }
         }
-        let major = root["packageManager"]
-            .as_str()
-            .and_then(|s| s.strip_prefix("pnpm@"))
-            .and_then(|s| s.split('.').next()?.parse::<u64>().ok());
+        // pnpm 11 skips undated metadata unless the project opts out.
+        if major.is_some_and(|v| v >= 11)
+            && config.get("minimumReleaseAgeIgnoreMissingTime").is_none()
+        {
+            config["minimumReleaseAgeIgnoreMissingTime"] = true.into();
+        }
         let min_age = match config.get("minimumReleaseAge") {
             Some(v) => v
                 .as_u64()
@@ -281,7 +317,23 @@ impl Registry {
                     0
                 }),
         };
+        // pnpm's package requester sizes its connection pool for registry
+        // latency. Honor the project's override for shared or local registries.
+        let parallelism = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let network_concurrency = match config.get("networkConcurrency") {
+            Some(v) => v
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n > 0)
+                .ok_or("networkConcurrency must be a positive integer")?,
+            None => parallelism
+                .saturating_sub(1)
+                .saturating_mul(3)
+                .clamp(64, 96),
+        };
         let mut builder = Agent::config_builder()
+            .max_idle_connections(network_concurrency)
+            .max_idle_connections_per_host(network_concurrency)
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(30)));
         if let Some(path) =
@@ -305,54 +357,82 @@ impl Registry {
         }
         Ok(Self {
             agent: Agent::new_with_config(builder.build()),
+            network_concurrency,
             config,
             rc,
+            scopes: OnceCell::new(),
+            registry_env: env_config("pnpm", "registry").or_else(|| env_config("npm", "registry")),
             packages: BTreeMap::new(),
+            pinned: BTreeMap::new(),
+            failed: BTreeMap::new(),
             global_auth_routes,
             env_auth_routes,
             min_age,
             now: Timestamp::now().as_second(),
+            generation_network: None,
+            transitive_cutoff: None,
         })
     }
 
-    fn registry(&self, name: &str) -> Result<String> {
-        let scope = name.split_once('/').map(|(scope, _)| scope);
-        let mut routes = BTreeMap::new();
-        if let Some(registries) = self.config.get("registries") {
-            for (key, entry) in registries
-                .as_object()
-                .ok_or("registries must be a mapping")?
-            {
-                if let Some(url) = entry.as_str() {
-                    routes.insert(key.as_str(), (url, false));
-                } else {
-                    let scopes = entry
-                        .get("scopes")
-                        .map(|v| v.as_array().ok_or("registry scopes must be a list"))
-                        .transpose()?;
-                    for route in scopes.into_iter().flatten() {
-                        let route = route.as_str().ok_or("invalid registry scope")?;
-                        let route = if route == "@" { "default" } else { route };
-                        if routes
-                            .insert(route, (key, entry.get("prefix").is_some()))
-                            .is_some()
-                        {
-                            return Err(
-                                format!("multiple registries configured for {route}").into()
-                            );
+    fn configured_scope_routes(&self) -> Result<&ScopeRoutes> {
+        if self.scopes.get().is_none() {
+            let mut routes = BTreeMap::new();
+            if let Some(registries) = self.config.get("registries") {
+                for (key, entry) in registries
+                    .as_object()
+                    .ok_or("registries must be a mapping")?
+                {
+                    if let Some(url) = entry.as_str() {
+                        routes.insert(key.clone(), (url.to_owned(), false));
+                    } else {
+                        let scopes = entry
+                            .get("scopes")
+                            .map(|v| v.as_array().ok_or("registry scopes must be a list"))
+                            .transpose()?;
+                        for route in scopes.into_iter().flatten() {
+                            let route = route.as_str().ok_or("invalid registry scope")?;
+                            let route = if route == "@" { "default" } else { route };
+                            if routes
+                                .insert(
+                                    route.to_owned(),
+                                    (key.clone(), entry.get("prefix").is_some()),
+                                )
+                                .is_some()
+                            {
+                                return Err(
+                                    format!("multiple registries configured for {route}").into()
+                                );
+                            }
                         }
                     }
                 }
             }
+            let _ = self.scopes.set(routes);
         }
+        Ok(self.scopes.get().expect("configured scope routes"))
+    }
+
+    fn registry(&self, name: &str) -> Result<String> {
+        let scope = name.split_once('/').map(|(scope, _)| scope);
+        if let Some(routes) = self.config.get("registriesByScope") {
+            let base = scope
+                .and_then(|scope| routes.get(scope))
+                .unwrap_or(&routes["default"])
+                .as_str()
+                .ok_or("registriesByScope must contain registry URLs")?;
+            return Self::validated_base(base);
+        }
+        let routes = self.configured_scope_routes()?;
         let scoped = scope.and_then(|scope| {
-            routes.get(scope).copied().or_else(|| {
-                self.rc
-                    .get(&format!("{scope}:registry"))
-                    .map(|url| (url.as_str(), false))
-            })
+            routes
+                .get(scope)
+                .map(|(url, qualified)| (url.as_str(), *qualified))
+                .or_else(|| {
+                    self.rc
+                        .get(&format!("{scope}:registry"))
+                        .map(|url| (url.as_str(), false))
+                })
         });
-        let registry_env = env_config("pnpm", "registry").or_else(|| env_config("npm", "registry"));
         let environment_route = scope
             .and_then(|scope| self.env_auth_routes.get(scope))
             .or_else(|| self.env_auth_routes.get("default"));
@@ -364,8 +444,12 @@ impl Registry {
                     .and_then(|s| self.global_auth_routes.get(s))
                     .map(|v| (v.as_str(), false))
             })
-            .or_else(|| registry_env.as_deref().map(|v| (v, false)))
-            .or_else(|| routes.get("default").copied())
+            .or_else(|| self.registry_env.as_deref().map(|v| (v, false)))
+            .or_else(|| {
+                routes
+                    .get("default")
+                    .map(|(url, qualified)| (url.as_str(), *qualified))
+            })
             .or_else(|| self.config["registry"].as_str().map(|v| (v, false)))
             .or_else(|| self.rc.get("registry").map(|v| (v.as_str(), false)))
             .or_else(|| {
@@ -374,9 +458,13 @@ impl Registry {
                     .map(|v| (v.as_str(), false))
             })
             .unwrap_or(("https://registry.npmjs.org/", false));
-        if qualified {
+        if qualified && self.generation_network.is_none() {
             return Err(format!("registry-qualified lock identity required for {name}").into());
         }
+        Self::validated_base(base)
+    }
+
+    fn validated_base(base: &str) -> Result<String> {
         let uri: Uri = base.parse().map_err(|_| "invalid registry URL")?;
         if !matches!(uri.scheme_str(), Some("https" | "http"))
             || uri.authority().is_none_or(|a| a.as_str().contains('@'))
@@ -422,6 +510,25 @@ impl Registry {
         Ok(None)
     }
 
+    fn load(&mut self, name: &str) -> Result<String> {
+        let base = self.registry(name)?;
+        self.load_at(name, &base)?;
+        Ok(base)
+    }
+
+    fn load_at(&mut self, name: &str, base: &str) -> Result<()> {
+        let key = (base.to_owned(), name.to_owned());
+        if let Some(message) = self.failed.get(&key) {
+            return Err(message.clone().into());
+        }
+        if !self.packages.contains_key(&key) {
+            let request = self.metadata_request(name, base)?;
+            let doc = request.read(&self.agent)?;
+            self.packages.insert(key, doc);
+        }
+        Ok(())
+    }
+
     fn satisfy(
         &mut self,
         req: &RegistryRequest,
@@ -429,45 +536,15 @@ impl Registry {
         direct: bool,
     ) -> Result<()> {
         let name = req.name();
-        if self
-            .config
-            .get("pnprServer")
-            .is_some_and(|value| !value.is_null() && value != false)
-        {
-            return Err("registry metadata lookup requires the configured pnprServer".into());
-        }
-        let base = self.registry(name)?;
-        if !self.packages.contains_key(name) {
-            let url = format!("{base}{}", name.replace('/', "%2f"));
-            let mut request = self.agent.get(&url).header(
-                "Accept",
-                if self.min_age > 0 {
-                    "application/json"
-                } else {
-                    "application/vnd.npm.install-v1+json, application/json"
-                },
-            );
-            if let Some(auth) = self.auth(&url, name)? {
-                request = request.header("Authorization", &auth);
-            }
-            let mut res = request
-                .call()
-                .map_err(|e| format!("registry metadata for {name}: {e}"))?;
-            if !res.status().is_success() {
-                return Err(format!("registry metadata for {name}: HTTP {}", res.status()).into());
-            }
-            let doc: Packument =
-                serde_json::from_reader(BufReader::new(res.body_mut().as_reader()))
-                    .map_err(|e| format!("registry metadata for {name}: {e}"))?;
-            if doc.name != name {
-                return Err(format!("registry returned a different package for {name}").into());
-            }
-            self.packages.insert(name.to_owned(), doc);
-        }
-        let doc = &self.packages[name];
+        let base = self.load(name)?;
+        let doc = &self.packages[&(base.clone(), name.to_owned())];
         let selected = match req {
             RegistryRequest::Manifest { version, .. } => version.as_str(),
-            RegistryRequest::Version { selector, .. } => self.select(doc, selector, direct)?,
+            RegistryRequest::Version { selector, .. } => {
+                self.select(doc, selector, direct)?.ok_or_else(|| {
+                    format!("no eligible registry version of {name} satisfies {selector}")
+                })?
+            }
         };
         let raw = doc
             .versions
@@ -483,4 +560,58 @@ impl Registry {
         )?;
         Ok(())
     }
+}
+
+/// Public scope routing passed to hooks. Credentials stay in the registry client.
+pub(crate) fn hook_registries(config: &Value, major: u64) -> Result<Value> {
+    if let Some(routes) = config.get("registriesByScope") {
+        return Ok(routes.clone());
+    }
+    let mut registry = Registry::new(config, Some(major), ProjectRc::Working)?;
+    registry.generation_network = Some(false);
+    let mut scopes = std::collections::BTreeSet::<&str>::new();
+    scopes.extend(
+        registry
+            .rc
+            .keys()
+            .filter_map(|k| k.strip_suffix(":registry")),
+    );
+    scopes.extend(
+        registry
+            .env_auth_routes
+            .keys()
+            .chain(registry.global_auth_routes.keys())
+            .map(String::as_str),
+    );
+    scopes.extend(
+        registry
+            .configured_scope_routes()?
+            .keys()
+            .map(String::as_str),
+    );
+    let mut routes = serde_json::json!({"default":registry.registry("")?, "@jsr":JSR_REGISTRY});
+    for scope in scopes
+        .into_iter()
+        .filter(|s| s.starts_with('@') && *s != "@")
+    {
+        routes[scope] = registry.registry(&format!("{scope}/package"))?.into();
+    }
+    Ok(routes)
+}
+
+pub(crate) fn updated_hook_registries(mut routes: Value, default: &Value) -> Result<Value> {
+    let map = routes
+        .as_object_mut()
+        .ok_or("updateConfig registriesByScope must be a mapping")?;
+    // A returned map replaces the scope routes. Keep the original fallback
+    // and the built-in JSR route when the hook omits them.
+    map.entry("default").or_insert_with(|| default.clone());
+    map.entry("@jsr").or_insert_with(|| JSR_REGISTRY.into());
+    for url in map.values_mut() {
+        let base = url
+            .as_str()
+            .ok_or("updateConfig registriesByScope must contain registry URLs")?;
+        *url = Registry::validated_base(base)?.into();
+    }
+    Ok(routes)
 }

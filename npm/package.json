@@ -1,7 +1,7 @@
 {
   "name": "es-locksmith",
   "version": "0.3.4",
-  "description": "Merge, converge and repair pnpm lockfiles with Rust",
+  "description": "Merge, generate, converge, repair and inspect pnpm lockfiles with Rust",
   "license": "MIT",
   "repository": {
     "type": "git",

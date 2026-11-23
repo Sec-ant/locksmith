@@ -62,7 +62,7 @@ pub(crate) fn from_edges(
     }
     let docs = std::mem::take(&mut base.documents);
     let mut result = Lockfile::with_documents(docs, &[&base, donor]);
-    result.preserve_baseline = true;
+    result.output_order = crate::source::OutputOrder::Baseline;
     // Projection already owns this graph. Only a borrowed input needs a copy.
     let output = std::sync::Arc::make_mut(
         result

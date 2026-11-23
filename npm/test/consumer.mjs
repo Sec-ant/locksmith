@@ -79,6 +79,26 @@ git('worktree', 'add', '--detach', repo, 'HEAD');
 assert.deepEqual((await api.inspectWorkspace({ cwd: repo })).peers, []);
 assert.equal(await api.convergeWorkspace('HEAD', { cwd: repo }), yaml);
 assert.equal(await api.repairWorkspace('HEAD', { cwd: repo }), yaml);
+const hooked = join(repo, 'hooked');
+mkdirSync(hooked);
+writeFileSync(join(hooked, 'package.json'), JSON.stringify({ name: 'consumer', packageManager: 'pnpm@10.34.9' }));
+writeFileSync(join(hooked, 'local-choice.json'), '"link:./local"');
+writeFileSync(join(hooked, '.pnpmfile.cjs'), `module.exports = { hooks: { async readPackage(pkg) {
+  const realpath = require('node:fs').realpathSync.native;
+  if (realpath(process.cwd()) !== realpath(__dirname)) throw new Error('hook did not run in the workspace directory');
+  if (process.execPath !== ${JSON.stringify(process.execPath)}) throw new Error('hook did not run with the calling Node executable');
+  pkg.dependencies = { local: require('./local-choice.json') };
+  return pkg;
+} } };`);
+await assert.rejects(api.generateWorkspace({ cwd: hooked }), error => error.code === 'CLI_FAILED' && error.message.includes('existing pnpm-lock.yaml'));
+writeFileSync(join(hooked, 'pnpm-lock.yaml'), yaml);
+const generated = await api.generateWorkspace({ cwd: hooked });
+const document = await (await parse(generated)).document('project');
+assert.equal(document.importers['.'].dependencies.local.version, 'link:local');
+writeFileSync(join(hooked, 'local-choice.json'), '"link:./edited"');
+const edited = await (await parse(await api.generateWorkspace({ cwd: hooked }))).document('project');
+assert.equal(edited.importers['.'].dependencies.local.version, 'link:edited');
+await assert.rejects(api.generateWorkspace({ cwd: hooked, hookRuntime: 'off' }), { code: 'CLI_FAILED' });
 await assert.rejects(api.convergeWorkspace('missing-ref', {cwd: repo}), { code: 'CLI_FAILED' });
 if (process.platform !== 'win32') {
   // A separate process can exhaust its file descriptors without affecting other tests.

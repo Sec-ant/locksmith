@@ -786,7 +786,7 @@ fn newly_introduced_optional_peers_follow_workspace_sharing_settings() {
     let root = tempfile::tempdir().unwrap();
     let store = root.path().join("store");
     for (dedupe, scoped) in [(true, false), (false, false), (true, true)] {
-        if scoped && pnpm_version() < &node_semver::Version::new(12, 19, 0) {
+        if scoped && pnpm_version() < &node_semver::Version::from((12, 19, 0)) {
             continue; // projectScopedOptionalPeers was added in pnpm 12.19.
         }
         let prepare = |name: &str, zustand: &str, wrapper: bool| {
