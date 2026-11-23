@@ -54,8 +54,8 @@ impl Extensions {
                 }
             }
         }
-        let separate_projects = version.is_none_or(|v| v >= &Version::new(11, 28, 1));
-        let merge_selectors = version.is_none_or(|v| v >= &Version::new(11, 7, 0));
+        let separate_projects = version.is_none_or(|v| v >= &Version::from((11, 28, 1)));
+        let merge_selectors = version.is_none_or(|v| v >= &Version::from((11, 7, 0)));
         let mut projects = separate_projects.then(Rules::new);
         for (selector, extension) in config
             .resolution

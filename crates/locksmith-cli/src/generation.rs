@@ -37,7 +37,7 @@ pub fn run(
     }
     let selected = explicit.or(declared);
     if let Some(v) = &selected
-        && !(9..=12).contains(&v.major)
+        && !(9..=12).contains(&v.major())
     {
         return Err(format!("expected pnpm 9 through 12, got {v}").into());
     }
@@ -65,7 +65,7 @@ pub fn run(
     }
     let mut registry = GenerationSource::new(
         &project.config,
-        version.as_ref().map(|v| v.major),
+        version.as_ref().map(|v| v.major()),
         allow_network,
         hooks.as_ref().is_some_and(hooks::Hooks::reads_packages),
     );
@@ -75,7 +75,7 @@ pub fn run(
     };
     let text = match project.config["lockfile"]["format"].as_str() {
         None | Some("v9") => result.to_yaml()?,
-        Some("v13") if version.as_ref().is_some_and(|v| v.major == 12) => result.to_pnpm_v13()?,
+        Some("v13") if version.as_ref().is_some_and(|v| v.major() == 12) => result.to_pnpm_v13()?,
         Some(format) => {
             return Err(format!(
                 "lockfile.format {format} requires a supported pnpm version and format"
@@ -94,18 +94,12 @@ pub fn run(
             return Err("pnpm-lock.yaml changed during generation; run generate again".into());
         }
         if previous != text {
-            #[cfg(unix)]
-            let mut file = {
-                use std::os::unix::fs::PermissionsExt;
-                tempfile::Builder::new()
-                    .permissions(std::fs::Permissions::from_mode(0o666))
-                    .tempfile_in(".")?
-            };
-            #[cfg(not(unix))]
+            // The private temporary file takes the lockfile's mode only after
+            // its contents are written.
             let mut file = tempfile::NamedTempFile::new_in(".")?;
+            file.write_all(text.as_bytes())?;
             file.as_file()
                 .set_permissions(path.metadata()?.permissions())?;
-            file.write_all(text.as_bytes())?;
             if working_file("pnpm-lock.yaml")?.as_deref() != Some(previous.as_str()) {
                 return Err("pnpm-lock.yaml changed during generation; run generate again".into());
             }

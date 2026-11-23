@@ -40,33 +40,11 @@ impl<'a> GenerationSource<'a> {
         name: &str,
         spec: &str,
     ) -> crate::Result<Option<(RegistryPackage, String)>> {
+        let built_in = self.major.is_none_or(|v| v >= 11);
         let registry = self.client()?;
-        let mut named = std::collections::BTreeMap::new();
-        for (prefix, url) in registry.config["namedRegistries"]
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
-            named.insert(
-                prefix.as_str(),
-                url.as_str().ok_or("expected named registry URL")?,
-            );
-        }
-        for (url, entry) in registry.config["registries"]
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
-            if let Some(prefix) = entry["prefix"].as_str()
-                && named
-                    .insert(prefix, url)
-                    .is_some_and(|old| old.trim_end_matches('/') != url.trim_end_matches('/'))
-            {
-                return Err(format!("conflicting URLs for registry {prefix}").into());
-            }
-        }
+        let named = named_registries(&registry.config, built_in)?;
         let (prefix, selector) = spec.split_once(':').unwrap_or(("", spec));
-        let explicit = named.get(prefix).copied();
+        let explicit = named.get(prefix).map(String::as_str);
         let request = if prefix == "jsr" || explicit.is_some() {
             let (actual, range) = selector
                 .rsplit_once('@')
@@ -97,10 +75,16 @@ impl<'a> GenerationSource<'a> {
             base = "https://npm.jsr.io/".into();
         }
         if base != default {
-            package.prefix = named
-                .iter()
-                .find(|(_, url)| url.trim_end_matches('/') == base.trim_end_matches('/'))
-                .map(|(p, _)| p.to_string());
+            // An alias in the specifier names its registry. A plain dependency
+            // routed to another registry takes a declared prefix for that URL.
+            package.prefix = if explicit.is_some() {
+                Some(prefix.to_owned())
+            } else {
+                named_registries(&registry.config, false)?
+                    .into_iter()
+                    .find(|(_, url)| url.trim_end_matches('/') == base.trim_end_matches('/'))
+                    .map(|(p, _)| p)
+            };
         }
         if self
             .routes
@@ -117,26 +101,20 @@ impl<'a> GenerationSource<'a> {
     }
     fn package_base(&mut self, package: &RegistryPackage) -> crate::Result<String> {
         let route = self.routes.get(package).cloned();
+        let built_in = self.major.is_none_or(|v| v >= 11);
         let client = self.client()?;
         Ok(match route {
             Some(url) => url,
-            None => {
-                if let Some(prefix) = &package.prefix {
-                    let url = client.config["namedRegistries"][prefix]
-                        .as_str()
-                        .or_else(|| {
-                            client.config["registries"]
-                                .as_object()?
-                                .iter()
-                                .find(|(_, v)| v["prefix"] == prefix.as_str())
-                                .map(|(k, _)| k.as_str())
-                        })
+            None => match &package.prefix {
+                Some(prefix) => {
+                    let named = named_registries(&client.config, built_in)?;
+                    let url = named
+                        .get(prefix)
                         .ok_or_else(|| format!("missing registry {prefix}"))?;
                     Registry::validated_base(url)?
-                } else {
-                    client.registry(&package.name)?
                 }
-            }
+                None => client.registry(&package.name)?,
+            },
         })
     }
     fn load(&mut self, package: &RegistryPackage) -> crate::Result<(&Registry, (String, String))> {
@@ -145,6 +123,29 @@ impl<'a> GenerationSource<'a> {
         client.load_at(&package.name, &base)?;
         Ok((client, (base, package.name.clone())))
     }
+}
+
+/// Registry aliases by prefix. A `registries` declaration takes a prefix from a
+/// `namedRegistries` entry, which overrides pnpm's built-in `gh` and `npmjs`.
+fn named_registries(
+    config: &Value,
+    built_in: bool,
+) -> crate::Result<std::collections::BTreeMap<String, String>> {
+    let mut named = std::collections::BTreeMap::new();
+    if built_in {
+        named.insert("gh".to_owned(), "https://npm.pkg.github.com/".to_owned());
+        named.insert("npmjs".to_owned(), "https://registry.npmjs.org/".to_owned());
+    }
+    for (prefix, url) in config["namedRegistries"].as_object().into_iter().flatten() {
+        let url = url.as_str().ok_or("expected named registry URL")?;
+        named.insert(prefix.clone(), url.to_owned());
+    }
+    for (url, entry) in config["registries"].as_object().into_iter().flatten() {
+        if let Some(prefix) = entry["prefix"].as_str() {
+            named.insert(prefix.to_owned(), url.clone());
+        }
+    }
+    Ok(named)
 }
 fn error(path: &[&str], error: impl ToString) -> LockfileError {
     LockfileError::ResolutionRequired {
@@ -199,7 +200,7 @@ impl PackageSource for GenerationSource<'_> {
                 || (client.config["trustPolicy"]
                     .as_str()
                     .is_none_or(|s| s == "off")
-                    && client.config["minimumReleaseAge"].as_u64().unwrap_or(0) == 0
+                    && client.min_age == 0
                     && client.config["resolutionMode"] != "time-based")
             {
                 return Ok(());
@@ -236,11 +237,13 @@ impl PackageSource for GenerationSource<'_> {
             if let Ok(range) = selector.parse::<Range>() {
                 let mut choices = Vec::new();
                 let age_filter = registry.min_age > 0 && registry.old_enough(doc, preferred)?;
+                // A time-based fallback outside the cutoff also lifts it for alternatives.
+                let cutoff = registry.before_cutoff(doc, preferred, direct)?;
                 for version in doc.versions.keys().filter(|v| v.as_str() != preferred) {
                     if let Ok(parsed) = version.parse::<Version>()
                         && parsed.satisfies(&range)
                         && (!age_filter || registry.old_enough(doc, version)?)
-                        && registry.before_cutoff(doc, version, direct)?
+                        && (!cutoff || registry.before_cutoff(doc, version, direct)?)
                         && registry.trusted(doc, version)?
                     {
                         choices.push((parsed, version));
@@ -307,7 +310,7 @@ impl PackageSource for GenerationSource<'_> {
                 || (client.config["trustPolicy"]
                     .as_str()
                     .is_none_or(|s| s == "off")
-                    && client.config["minimumReleaseAge"].as_u64().unwrap_or(0) == 0
+                    && client.min_age == 0
                     && (direct || client.transitive_cutoff.is_none()))
             {
                 return Ok(true);
@@ -354,10 +357,11 @@ impl PackageSource for GenerationSource<'_> {
                         .ok_or_else(|| format!("missing publish time for {}@{v}", package.name))?
                         .to_owned()
                 };
-                newest = newest.max(Some(stamp.parse::<jiff::Timestamp>()?.as_second()));
+                newest = newest.max(Some(stamp.parse::<jiff::Timestamp>()?.as_millisecond()));
                 times.insert(key, stamp);
             }
-            self.client()?.transitive_cutoff = newest.map(|t| t.saturating_add(3600));
+            // The cutoff and publish times keep their milliseconds.
+            self.client()?.transitive_cutoff = newest.map(|t| t.saturating_add(3_600_000));
             Ok(Some(times))
         };
         query().map_err(|e| error(&["time"], e))

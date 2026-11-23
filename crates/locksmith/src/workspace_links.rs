@@ -39,7 +39,8 @@ pub(crate) fn member_target(from: &str, path: &str, config: &WorkspaceConfig) ->
         && (from.starts_with("..") || path.starts_with(".."))
     {
         let target = graph::linked_importer(&graph::linked_importer(root, from), path);
-        let id = relative(root, &target);
+        // The target is normalized, so the root must be too (`/repo/sub/..`).
+        let id = relative(&graph::linked_importer(root, "."), &target);
         if id.is_empty() { ".".into() } else { id }
     } else {
         graph::linked_importer(from, path)

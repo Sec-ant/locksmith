@@ -16,11 +16,14 @@ use crate::{Value, WorkspaceConfig, graph, manifest, reconcile};
 // ordinary dependency supplied it in the resolved graph (pnpm issue #17056).
 pub(super) fn records_fallback_peers(config: &WorkspaceConfig) -> bool {
     use node_semver::Version;
-    config.pnpm_version.as_ref().is_none_or(|v| match v.major {
-        11 => v >= &Version::new(11, 28, 7),
-        12 => v >= &Version::new(12, 15, 0),
-        major => major > 12,
-    })
+    config
+        .pnpm_version
+        .as_ref()
+        .is_none_or(|v| match v.major() {
+            11 => v >= &Version::from((11, 28, 7)),
+            12 => v >= &Version::from((12, 15, 0)),
+            major => major > 12,
+        })
 }
 
 type Requirements = BTreeMap<String, Vec<usize>>;
@@ -317,7 +320,7 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Va
                                     .config
                                     .pnpm_version
                                     .as_ref()
-                                    .is_some_and(|v| v.major == 9 && v.minor == 0))
+                                    .is_some_and(|v| v.major() == 9 && v.minor() == 0))
                     {
                         continue;
                     }
@@ -387,7 +390,10 @@ pub(super) fn project(draft: &mut Draft, build: &mut Build<'_, '_>) -> Result<Va
     let mut root_scope = Scope::new();
     let mut root_context = None;
     let mut root_slots = BTreeMap::new();
-    for (id, deps) in &draft.roots {
+    // Members inherit the root's peers, so the root binds first even when an
+    // importer id such as `-app` sorts before `.`.
+    let roots = draft.roots.iter().filter(|(id, _)| *id == ".");
+    for (id, deps) in roots.chain(draft.roots.iter().filter(|(id, _)| *id != ".")) {
         let context = instances.history.as_ref().and_then(|h| {
             h.root(
                 id,

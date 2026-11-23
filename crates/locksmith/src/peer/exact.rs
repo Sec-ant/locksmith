@@ -53,11 +53,7 @@ impl Merger<'_> {
                 let fits = declared
                     .and_then(|d| d.get(peer_name))
                     .and_then(Value::as_str)
-                    .zip(
-                        graph::package_key(pin)
-                            .parse::<nodejs_semver::Version>()
-                            .ok(),
-                    )
+                    .zip(graph::package_key(pin).parse::<node_semver::Version>().ok())
                     .is_some_and(|(range, v)| {
                         crate::diagnostics::PeerRange::new(
                             range,

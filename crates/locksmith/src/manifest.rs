@@ -98,7 +98,8 @@ pub(crate) fn declarations<'a>(
                         .pnpm_version
                         .as_ref()
                         .is_none_or(|version| {
-                            version.major >= 10 && version < &node_semver::Version::new(12, 17, 0)
+                            version.major() >= 10
+                                && version < &node_semver::Version::from((12, 17, 0))
                         });
                 if (!promoted && !settings.auto_install_peers)
                     || (!replaces_dev && result.contains_key(name.as_str()))

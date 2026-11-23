@@ -231,17 +231,147 @@ impl Baseline<'_> {
     }
 }
 
+/// Whether a release's recorded peers and snapshot children still satisfy the
+/// declarations of its evaluated manifest.
+fn declarations_match(
+    manifest: &Value,
+    record: &Value,
+    bodies: &[&Value],
+    snapshots: Option<&serde_json::Map<String, Value>>,
+    overridden: &BTreeSet<&str>,
+) -> bool {
+    // pnpm records an optional peer declared only in peerDependenciesMeta as `*`.
+    fn declared_peers(doc: &Value) -> BTreeMap<&str, (&str, bool)> {
+        let optional = |name: &str| doc["peerDependenciesMeta"][name]["optional"] == true;
+        graph::section(doc, "peerDependenciesMeta")
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| optional(name))
+            .map(|(name, _)| (name.as_str(), ("*", true)))
+            .chain(
+                graph::section(doc, "peerDependencies")
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, range)| {
+                        (
+                            name.as_str(),
+                            (range.as_str().unwrap_or_default(), optional(name)),
+                        )
+                    }),
+            )
+            .collect()
+    }
+    let name = manifest["name"].as_str().unwrap_or_default();
+    let peers = declared_peers(manifest);
+    let ordinary = |group: &str| {
+        graph::section(manifest, group)
+            .into_iter()
+            .flatten()
+            .map(|(dependency, _)| dependency.as_str())
+            .collect::<BTreeSet<_>>()
+    };
+    // Some pnpm releases omit a peer the package also lists as a dependency.
+    let dependencies = ordinary("dependencies");
+    let (mut recorded, mut evaluated) = (declared_peers(record), peers.clone());
+    // pnpm also drops a peer on the package itself.
+    for dependency in dependencies.iter().chain([&name]) {
+        recorded.remove(dependency);
+        evaluated.remove(dependency);
+    }
+    // An override also rewrites the recorded peer range.
+    for (peer, (range, _)) in recorded.iter_mut().chain(evaluated.iter_mut()) {
+        if overridden.contains(peer) {
+            *range = "";
+        }
+    }
+    if recorded != evaluated {
+        return false;
+    }
+    // pnpm installs bundled dependencies from the tarball and skips a
+    // dependency on the package itself.
+    let bundled: BTreeSet<&str> = ["bundledDependencies", "bundleDependencies"]
+        .into_iter()
+        .flat_map(|field| manifest[field].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    let optional = ordinary("optionalDependencies");
+    let mut declared = BTreeMap::new();
+    for group in ["dependencies", "optionalDependencies"] {
+        for (dependency, spec) in graph::section(manifest, group).into_iter().flatten() {
+            if !peers.contains_key(dependency.as_str())
+                && !bundled.contains(dependency.as_str())
+                && dependency != name
+            {
+                let group = if optional.contains(dependency.as_str()) {
+                    "optionalDependencies"
+                } else {
+                    "dependencies"
+                };
+                declared.insert(dependency.as_str(), (group, spec.as_str()));
+            }
+        }
+    }
+    bodies.iter().all(|body| {
+        ["dependencies", "optionalDependencies"]
+            .into_iter()
+            .flat_map(|group| graph::section(body, group).into_iter().flatten())
+            .all(|(child, _)| {
+                declared.contains_key(child.as_str())
+                    || peers.contains_key(child.as_str())
+                    || record["peerDependencies"].get(child).is_some()
+            })
+            && declared.iter().all(|(dependency, (group, spec))| {
+                let Some((recorded_group, pin)) = graph::dependency(body, dependency) else {
+                    return false;
+                };
+                if recorded_group != *group {
+                    return false;
+                }
+                if overridden.contains(dependency) {
+                    return true;
+                }
+                let Some(spec) = spec else {
+                    return false;
+                };
+                // A workspace protocol resolves to a linked member.
+                if spec.starts_with("workspace:") {
+                    return pin.starts_with("link:");
+                }
+                // Other sources keep their recorded locator.
+                let Some((package, range)) = RegistryPackage::selector(dependency, spec) else {
+                    return true;
+                };
+                let child = graph::snapshot_key(dependency, pin, snapshots);
+                RegistryPackage::from_key(&child).is_some_and(|(locked, version)| {
+                    locked.name == package.name
+                        // A dist-tag such as `next` names a release the lock already chose.
+                        && (range == "*"
+                            || range.parse::<node_semver::Range>().is_err()
+                            || manifest::matches_version(&range, Some(version)))
+                })
+            })
+    })
+}
+
 impl<'a> Build<'a, '_> {
     /// pnpm reads every manifest again once it resolves, then applies the
     /// compatibility database and readPackage. The lockfile records neither
-    /// `ignoreCompatibilityDb` nor what a hook read outside its checksummed file.
-    /// A release is stale when those evaluated declarations no longer match its
-    /// record: different peers, or recorded children that no longer satisfy them.
-    /// Only database rules and hook rewrites can make a publication disagree.
+    /// `ignoreCompatibilityDb` nor what a hook read outside its checksummed file,
+    /// so a hook can stop, start or change a rewrite with the same checksum.
+    /// A release is stale when its evaluated declarations no longer match its
+    /// record: different peers, or recorded children that no longer satisfy
+    /// them. Without hooks, only database rules can make a publication disagree.
     fn stale_releases(&mut self) -> Result<BTreeSet<&'a str>> {
         let old: &'a Value = self.old;
         let hooks = self.cache.reads_packages();
         let snapshots = graph::section(old, "snapshots");
+        let mut occurrences = BTreeMap::<&str, Vec<&Value>>::new();
+        for (snapshot, body) in snapshots.into_iter().flatten() {
+            occurrences
+                .entry(graph::package_key(snapshot))
+                .or_default()
+                .push(body);
+        }
         let overridden: BTreeSet<&str> = graph::section(self.header, "overrides")
             .into_iter()
             .flatten()
@@ -249,89 +379,41 @@ impl<'a> Build<'a, '_> {
             .collect();
         let mut stale = BTreeSet::new();
         for (key, record) in graph::section(old, "packages").into_iter().flatten() {
-            let candidate = self.base.compat_candidates.contains(key.as_str());
-            if !hooks && !candidate || RegistryPackage::from_key(key).is_none() {
+            if !hooks && !self.base.compat_candidates.contains(key.as_str())
+                || RegistryPackage::from_key(key).is_none()
+            {
                 continue;
             }
             let manifest = &Rc::clone(self.cache.release(key)?).manifest;
-            if !candidate && !self.cache.hook_changed.contains(key) {
-                continue;
-            }
-            // pnpm records an optional peer declared only in peerDependenciesMeta.
-            fn declared_peers(doc: &Value) -> BTreeMap<&str, bool> {
-                let optional = |name: &str| doc["peerDependenciesMeta"][name]["optional"] == true;
-                graph::section(doc, "peerDependencies")
-                    .into_iter()
-                    .flatten()
-                    .map(|(name, _)| (name.as_str(), optional(name)))
-                    .chain(
-                        graph::section(doc, "peerDependenciesMeta")
-                            .into_iter()
-                            .flatten()
-                            .filter(|(name, _)| optional(name))
-                            .map(|(name, _)| (name.as_str(), true)),
+            let bodies = occurrences.get(key.as_str()).map_or(&[][..], Vec::as_slice);
+            if !declarations_match(manifest, record, bodies, snapshots, &overridden) {
+                stale.insert(key.as_str());
+                if let Some(path) = std::env::var_os("LT_LOG") {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .unwrap();
+                    let pick = |d: &Value| {
+                        [
+                            "dependencies",
+                            "optionalDependencies",
+                            "peerDependencies",
+                            "peerDependenciesMeta",
+                            "bundledDependencies",
+                        ]
+                        .map(|k| (k, d.get(k).cloned()))
+                    };
+                    writeln!(
+                        f,
+                        "STALE {key}\n  manifest={:?}\n  record={:?}\n  bodies={:?}",
+                        pick(manifest),
+                        pick(record),
+                        bodies.iter().map(|b| b.to_string()).collect::<Vec<_>>()
                     )
-                    .collect()
-            }
-            let peers = declared_peers(manifest);
-            // Some pnpm releases omit a peer the package also lists as a dependency.
-            let (mut recorded, mut evaluated) = (declared_peers(record), peers.clone());
-            for name in graph::section(manifest, "dependencies")
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n)
-            {
-                recorded.remove(name.as_str());
-                evaluated.remove(name.as_str());
-            }
-            if recorded != evaluated {
-                stale.insert(key.as_str());
-                continue;
-            }
-            let declared: BTreeMap<&str, Option<&str>> = ["dependencies", "optionalDependencies"]
-                .into_iter()
-                .flat_map(|group| graph::section(manifest, group).into_iter().flatten())
-                .filter(|(name, _)| !peers.contains_key(name.as_str()))
-                .map(|(name, spec)| (name.as_str(), spec.as_str()))
-                .collect();
-            let satisfied = |body: &Value| {
-                let recorded_children = ["dependencies", "optionalDependencies"]
-                    .into_iter()
-                    .flat_map(|group| graph::section(body, group).into_iter().flatten())
-                    .all(|(name, _)| {
-                        declared.contains_key(name.as_str())
-                            || peers.contains_key(name.as_str())
-                            || record["peerDependencies"].get(name).is_some()
-                    });
-                recorded_children
-                    && declared.iter().all(|(name, spec)| {
-                        let Some((_, pin)) = graph::dependency(body, name) else {
-                            return false;
-                        };
-                        if overridden.contains(name) {
-                            return true;
-                        }
-                        // A workspace protocol resolves to a linked member.
-                        if spec.is_some_and(|spec| spec.starts_with("workspace:")) {
-                            return pin.starts_with("link:");
-                        }
-                        let child = graph::snapshot_key(name, pin, snapshots);
-                        let Some((_, version)) = RegistryPackage::from_key(&child) else {
-                            return false;
-                        };
-                        spec.and_then(|spec| RegistryPackage::selector(name, spec))
-                            .is_some_and(|(_, range)| {
-                                range == "*" || manifest::matches_version(&range, Some(version))
-                            })
-                    })
-            };
-            if !snapshots
-                .into_iter()
-                .flatten()
-                .filter(|(snapshot, _)| graph::package_key(snapshot) == key)
-                .all(|(_, body)| satisfied(body))
-            {
-                stale.insert(key.as_str());
+                    .unwrap();
+                }
             }
         }
         Ok(stale)

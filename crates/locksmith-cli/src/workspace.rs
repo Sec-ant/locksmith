@@ -108,9 +108,14 @@ impl Project {
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
-        for name in hook_candidates(&config, version.as_ref().map(|v| v.major))? {
+        let candidates = if config["ignorePnpmfile"] == true {
+            Vec::new()
+        } else {
+            hook_candidates(&config, version.as_ref().map(|v| v.major()))?
+        };
+        for name in candidates {
             if let Some(contents) = read(&name)? {
-                if config["ignorePnpmfile"] == true || contents.trim().is_empty() {
+                if contents.trim().is_empty() {
                     continue;
                 }
                 hooks.insert(name, Value::String(contents));
@@ -150,7 +155,7 @@ pub fn settings(
         }
         None => json!({}),
     };
-    if version.is_none_or(|v| v.major < 11)
+    if version.is_none_or(|v| v.major() < 11)
         && let Some(resolutions) = root.get("resolutions")
     {
         let mut overrides = resolutions
@@ -167,7 +172,7 @@ pub fn settings(
         }
         config["overrides"] = overrides.into();
     }
-    if version.as_ref().is_none_or(|v| v.major < 11)
+    if version.as_ref().is_none_or(|v| v.major() < 11)
         && let Some(text) = read(".npmrc")?
     {
         legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
@@ -177,7 +182,7 @@ pub fn settings(
         let settings: Option<serde_json::Map<String, Value>> =
             serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
         if let Some(mut settings) = settings {
-            if version.as_ref().is_some_and(|v| v.major == 9) {
+            if version.as_ref().is_some_and(|v| v.major() == 9) {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [
                     "peersSuffixMaxLength",
@@ -188,7 +193,7 @@ pub fn settings(
                     settings.remove(key);
                 }
             }
-            if version.is_none_or(|v| *v >= node_semver::Version::new(12, 15, 0)) {
+            if version.is_none_or(|v| *v >= node_semver::Version::from((12, 15, 0))) {
                 include_settings(&mut settings, &mut read)?;
             }
             config.as_object_mut().unwrap().extend(settings);
@@ -211,7 +216,8 @@ const PATH_SETTINGS: &[&str] = &[
     "virtualStoreDir",
 ];
 
-/// Each catalog has one owner. Other settings are owned by name.
+/// Each catalog has one owner. Other settings are owned by name, and pnpm
+/// gives the spellings of one setting a single owner.
 fn owned_units(key: &str, value: &Value) -> Vec<String> {
     match key {
         "catalog" => vec!["catalogs.default".into()],
@@ -221,7 +227,15 @@ fn owned_units(key: &str, value: &Value) -> Vec<String> {
             .flatten()
             .map(|(name, _)| format!("catalogs.{name}"))
             .collect(),
-        _ => vec![key.into()],
+        _ => vec![setting_owner(key).into()],
+    }
+}
+
+fn setting_owner(key: &str) -> &str {
+    match key {
+        "catalog" => "catalogs.default",
+        "enableGlobalVirtualStore" => "virtualStoreType",
+        _ => key,
     }
 }
 
@@ -239,6 +253,24 @@ fn holds_local_path(value: &Value) -> bool {
         .any(|prefix| s.starts_with(prefix)),
         Value::Object(map) => map.values().any(holds_local_path),
         Value::Array(items) => items.iter().any(holds_local_path),
+        _ => false,
+    }
+}
+
+/// pnpm keeps absolute paths and paths that start with `~` or an environment
+/// variable as written. A `scriptShell` without a slash is a command name.
+fn holds_relative_path(key: &str, value: &Value) -> bool {
+    match value {
+        Value::String(s) => {
+            let absolute = s.starts_with(['/', '\\', '~', '$'])
+                || s.as_bytes().get(1) == Some(&b':')
+                    && s.as_bytes()
+                        .get(2)
+                        .is_some_and(|c| matches!(c, b'/' | b'\\'));
+            !absolute && (key != "scriptShell" || s.contains('/'))
+        }
+        Value::Object(map) => map.values().any(|v| holds_relative_path(key, v)),
+        Value::Array(items) => items.iter().any(|v| holds_relative_path(key, v)),
         _ => false,
     }
 }
@@ -299,8 +331,7 @@ fn include_settings(
                 items
                     .iter()
                     .map(|item| match item.as_str() {
-                        Some("catalog") => Ok("catalogs.default".to_owned()),
-                        Some(setting) => Ok(setting.to_owned()),
+                        Some(setting) => Ok(setting_owner(setting).to_owned()),
                         None => Err(invalid("expects a list of setting names or '*'")),
                     })
                     .collect::<Result<BTreeSet<_>>>()?,
@@ -308,6 +339,15 @@ fn include_settings(
             _ => return Err(invalid("expects a list of setting names or '*'")),
         };
         for unit in permitted.iter().flatten() {
+            // `catalogs` delegates every catalog, so it overlaps any single one.
+            let overlap = owners.iter().find(|(owned, owner)| {
+                *owner != source
+                    && (unit == "catalogs" && owned.starts_with("catalogs.")
+                        || owned.as_str() == "catalogs" && unit.starts_with("catalogs."))
+            });
+            if let Some((_, other)) = overlap {
+                return Err(format!("{unit} overlaps catalogs delegated to {other}").into());
+            }
             if let Some(other) = owners.insert(unit.clone(), source.clone()) {
                 return Err(format!("{unit} is delegated to both {other} and {source}").into());
             }
@@ -361,7 +401,7 @@ fn include_settings(
             }
             // pnpm resolves relative paths against the included file.
             if nested
-                && (PATH_SETTINGS.contains(&key.as_str())
+                && (PATH_SETTINGS.contains(&key.as_str()) && holds_relative_path(&key, &value)
                     || ["catalog", "catalogs", "overrides"].contains(&key.as_str())
                         && holds_local_path(&value))
             {
@@ -565,6 +605,8 @@ impl Members {
             return Ok(this);
         }
         let patterns: Vec<String> = match project.config.get("packages") {
+            // pnpm 10 and 12 resolve only the root when the workspace file lists no packages.
+            None if external => Vec::new(),
             None => vec!["**".into()],
             Some(v) => serde_json::from_value(v.clone())?,
         };
@@ -618,6 +660,14 @@ impl Members {
             require_literal_separator: true,
             require_literal_leading_dot: true,
         };
+        // An exclusion ending in `/**` removes the whole subtree, so the walk
+        // need not read it.
+        let excluded_trees = self
+            .exclude
+            .iter()
+            .filter_map(|p| p.as_str().strip_suffix("/**/package.json"))
+            .map(Pattern::new)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         for pattern in &self.include {
             let directory = pattern
                 .as_str()
@@ -667,7 +717,17 @@ impl Members {
                     {
                         continue;
                     }
-                    pending.push((dir.join(name), if recursive { depth } else { depth + 1 }));
+                    let child = dir.join(name);
+                    let id = child
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    if excluded_trees
+                        .iter()
+                        .any(|tree| tree.matches_with(&id, options))
+                    {
+                        continue;
+                    }
+                    pending.push((child, if recursive { depth } else { depth + 1 }));
                 }
             }
         }

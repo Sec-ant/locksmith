@@ -3,6 +3,7 @@ use std::{
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     str::FromStr,
+    time::Duration,
 };
 
 use locksmith::{GenerateContext, GenerationHooks, LockfileError};
@@ -53,14 +54,16 @@ impl FromStr for Runtime {
 
 /// A Node process that evaluates the pnpmfile in the workspace directory.
 /// `LOCKSMITH_NODE` selects the executable; the Node API passes its own.
+/// A reader thread forwards response lines so a request can time out.
 struct Channel {
-    read: BufReader<ChildStdout>,
+    replies: std::sync::mpsc::Receiver<io::Result<String>>,
     write: Option<BufWriter<ChildStdin>>,
     child: Child,
+    timeout: Option<Duration>,
 }
 
 impl Channel {
-    fn node() -> Result<Self> {
+    fn node(timeout: Option<Duration>) -> Result<Self> {
         let node = std::env::var_os("LOCKSMITH_NODE").unwrap_or_else(|| "node".into());
         let script = [HOOKS, NODE_SERVER].join("\n");
         let mut child = Command::new(&node)
@@ -70,10 +73,21 @@ impl Channel {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("cannot start {} for pnpmfile: {e}", node.display()))?;
+        let stdout: ChildStdout = child.stdout.take().expect("piped stdout");
+        let (send, replies) = std::sync::mpsc::channel();
+        // The thread ends when the child closes stdout, including after Drop kills it.
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Ok(Self {
-            read: BufReader::new(child.stdout.take().expect("piped stdout")),
+            replies,
             write: Some(BufWriter::new(child.stdin.take().expect("piped stdin"))),
             child,
+            timeout,
         })
     }
     fn call(&mut self, request: &impl Serialize) -> Result<Value> {
@@ -81,10 +95,18 @@ impl Channel {
         serde_json::to_writer(&mut *writer, request)?;
         writer.write_all(b"\n")?;
         writer.flush()?;
-        let mut line = String::new();
-        if self.read.read_line(&mut line)? == 0 {
-            return Err("Node hook host closed its response channel".into());
-        }
+        let closed = || -> Box<dyn std::error::Error> {
+            "Node hook host closed its response channel".into()
+        };
+        let line = match self.timeout {
+            Some(limit) => self.replies.recv_timeout(limit).map_err(|e| match e {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    format!("pnpmfile hook did not respond within {}s", limit.as_secs()).into()
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => closed(),
+            })?,
+            None => self.replies.recv().map_err(|_| closed())?,
+        }?;
         let mut reply: Value = serde_json::from_str(&line)?;
         if let Some(e) = reply["error"].as_str() {
             return Err(e.to_owned().into());
@@ -144,29 +166,39 @@ impl Hooks {
         config: &mut Value,
         version: Option<&Version>,
     ) -> Result<Option<Self>> {
-        let mut files = workspace::hook_paths(config)?;
-        let has_global = config.get("globalPnpmfile").is_some();
-        if let Some(global) = config.get("globalPnpmfile") {
-            files.insert(
-                0,
-                global
-                    .as_str()
-                    .ok_or("globalPnpmfile expects a path")?
-                    .into(),
-            );
+        if config["ignorePnpmfile"] == true {
+            return Ok(None);
         }
-        if files.is_empty() || config["ignorePnpmfile"] == true {
+        let mut files: Vec<(String, bool)> = workspace::hook_paths(config)?
+            .into_iter()
+            .map(|path| (path, false))
+            .collect();
+        if let Some(global) = config.get("globalPnpmfile") {
+            let global = global.as_str().ok_or("globalPnpmfile expects a path")?;
+            files.insert(0, (global.into(), true));
+        }
+        // pnpm 9 and 10 run without a configured pnpmfile that does not exist.
+        if version.is_some_and(|v| v.major() < 11) {
+            files.retain(|(path, _)| Path::new(path).exists());
+        }
+        if files.is_empty() {
             return Ok(None);
         }
         let mut host = match runtime {
             Runtime::Off => {
+                let names: Vec<_> = files.iter().map(|(path, _)| path.as_str()).collect();
                 return Err(format!(
                     "{} requires pnpmfile evaluation; --hook-runtime off is selected",
-                    files.join(", ")
+                    names.join(", ")
                 )
                 .into());
             }
-            Runtime::Node => Host::Node(Channel::node()?),
+            // pnpm 12 gives each hook call 30 seconds.
+            Runtime::Node => Host::Node(Channel::node(
+                version
+                    .is_none_or(|v| v.major() >= 12)
+                    .then_some(Duration::from_secs(30)),
+            )?),
             #[cfg(feature = "pnpmfile")]
             Runtime::Embedded => Host::Embedded(embedded::Engine::new()?),
             #[cfg(not(feature = "pnpmfile"))]
@@ -178,17 +210,19 @@ impl Hooks {
         };
         let paths = files
             .iter()
-            .enumerate()
-            .map(|(i, p)| Ok((Path::new(p).canonicalize()?, i == 0 && has_global)))
+            .map(|(path, global)| Ok((Path::new(path).canonicalize()?, *global)))
             .collect::<io::Result<Vec<_>>>()?;
-        let pre = match version.map(|v| (v.major, v.minor)) {
+        let pre = match version.map(|v| (v.major(), v.minor())) {
             Some((9, _) | (10, 0..=9)) => "global",
             Some((10, 10..=12)) => "single",
             _ => "all",
         };
+        // pnpm 10 takes updateConfig only from the project pnpmfile.
+        let global_update_config = version.is_none_or(|v| v.major() >= 11);
         let operations: Operations = serde_json::from_value(host.call(
             "open",
-            &json!({"files":paths,"pre":pre,"releaseFields":crate::registry::RESOLUTION_FIELDS}),
+            &json!({"files":paths,"pre":pre,"globalUpdateConfig":global_update_config,
+                "releaseFields":crate::registry::RESOLUTION_FIELDS}),
         )?)?;
         if !operations.active {
             config
@@ -196,6 +230,11 @@ impl Hooks {
                 .expect("workspace configuration")
                 .remove("pnpmfileChecksum");
             return Ok(None);
+        }
+        // pnpm 12 records the digest of an empty project pnpmfile list when
+        // only a global pnpmfile is active.
+        if version.is_none_or(|v| v.major() >= 12) && config.get("pnpmfileChecksum").is_none() {
+            config["pnpmfileChecksum"] = json!({});
         }
         if operations.update_config {
             let checksum = config.get("pnpmfileChecksum").cloned();

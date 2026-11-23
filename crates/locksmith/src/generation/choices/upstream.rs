@@ -117,21 +117,23 @@ pub(in crate::generation) fn reuse_children(
                         None => Some(std::borrow::Cow::Borrowed(spec)),
                     };
                     let Some(range) = range else { continue };
-                    let observed =
-                        RegistryPackage::selector(name, &range).and_then(|(pkg, selector)| {
-                            Some(
-                                live.get(&pkg)?
-                                    .iter()
-                                    .filter(|v| manifest::matches_version(&selector, Some(v)))
-                                    .map(|v| (*v).to_owned())
-                                    .collect::<Vec<_>>(),
-                            )
-                        });
+                    let target = RegistryPackage::selector(name, &range);
+                    let observed = target.as_ref().and_then(|(pkg, selector)| {
+                        Some(
+                            live.get(pkg)?
+                                .iter()
+                                .filter(|v| manifest::matches_version(selector, Some(v)))
+                                .map(|v| (*v).to_owned())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
                     let optional_peer = group == "peerDependencies"
                         && raw["peerDependenciesMeta"][name]["optional"] == true;
                     shape.push((
                         group,
                         name.clone(),
+                        // An alias can name a different package with the same versions.
+                        target.map(|(pkg, _)| pkg.name),
                         // Without a locked witness, different selectors can lead
                         // to different grandchildren, even for the same child name.
                         observed

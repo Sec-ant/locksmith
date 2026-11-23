@@ -310,7 +310,10 @@ fn header(config: &WorkspaceConfig, input: &GenerateContext<'_>) -> Result<Value
         let digest = checksum
             .as_str()
             .map(str::to_owned)
-            .or_else(|| crate::checksum::hook_digest(checksum, input.pnpm_version?.major == 9))
+            .or_else(|| {
+                let major = input.pnpm_version?.major();
+                crate::checksum::hook_digest(checksum, major == 9, major >= 12)
+            })
             .ok_or_else(|| {
                 reconcile::missing(&["pnpmfile"], "select a pnpm version for the hook checksum")
             })?;
@@ -354,7 +357,7 @@ fn generate_inner<'s>(
         None => None,
     };
     if let Some(v) = input.pnpm_version
-        && !(9..=12).contains(&v.major)
+        && !(9..=12).contains(&v.major())
     {
         return Err(reconcile::missing(
             &["packageManager"],
@@ -452,7 +455,7 @@ fn generate_inner<'s>(
     }
     let mut result = Lockfile::with_documents(documents, &[previous]);
     result.output_order = crate::source::OutputOrder::Generated {
-        pnpm9: input.pnpm_version.is_some_and(|v| v.major == 9),
+        pnpm9: input.pnpm_version.is_some_and(|v| v.major() == 9),
     };
     result.validate_with_config(Some(&config))?;
     Ok(result)
@@ -465,7 +468,7 @@ fn environment(
     cache: &mut graph::Sources<'_>,
 ) -> Result<Option<Value>> {
     let old = previous.environment().unwrap_or(&Value::Null);
-    let major = input.pnpm_version.map_or(0, |v| v.major);
+    let major = input.pnpm_version.map_or(0, |v| v.major());
     let manager = root["packageManager"]
         .as_str()
         .and_then(|s| s.strip_prefix("pnpm@"))

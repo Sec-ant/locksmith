@@ -372,14 +372,18 @@ impl MetadataRequest {
             .into());
         }
         let headers = response.headers();
-        let cache_control = headers
-            .get("cache-control")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
+        // A response can split its directives across several header fields.
+        let directives: Vec<&str> = headers
+            .get_all("cache-control")
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .flat_map(|h| h.split(','))
+            .map(str::trim)
+            .collect();
         let mut max_age: i64 = 0;
         let mut no_cache = false;
         let mut no_store = false;
-        for directive in cache_control.split(',').map(str::trim) {
+        for directive in directives {
             if directive.eq_ignore_ascii_case("no-cache") {
                 no_cache = true;
             }

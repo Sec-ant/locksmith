@@ -402,7 +402,9 @@ pub(super) fn lower_bound(
                 if let Some(d) = demands.get(&edge)
                     && (pkg != d.package
                         || pins.get(&edge).is_some_and(|v| v != version)
-                        || d.selector.parse::<node_semver::Range>().is_ok()
+                        // The resolver keeps any locked release for `*`, prereleases included.
+                        || d.selector != "*"
+                            && d.selector.parse::<node_semver::Range>().is_ok()
                             && !manifest::matches_version(&d.selector, Some(version)))
                 {
                     edits += 1;

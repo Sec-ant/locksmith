@@ -94,15 +94,21 @@ impl Registry {
             history.sort_unstable();
             let (mut all, mut stable) = (0, 0);
             let mut downgrades = BTreeSet::new();
-            for (_, semver, version, rank) in history {
-                let is_stable = semver.pre_release.is_empty();
-                if rank < if is_stable { stable } else { all } {
-                    downgrades.insert(version.clone());
+            // Releases published at the same instant are compared only with
+            // strictly earlier publications.
+            for group in history.chunk_by(|a, b| a.0 == b.0) {
+                let (mut group_all, mut group_stable) = (all, stable);
+                for (_, semver, version, rank) in group {
+                    let is_stable = semver.pre_release().is_empty();
+                    if *rank < if is_stable { stable } else { all } {
+                        downgrades.insert((*version).clone());
+                    }
+                    group_all = group_all.max(*rank);
+                    if is_stable {
+                        group_stable = group_stable.max(*rank);
+                    }
                 }
-                all = all.max(rank);
-                if is_stable {
-                    stable = stable.max(rank);
-                }
+                (all, stable) = (group_all, group_stable);
             }
             let _ = doc.downgrades.set(downgrades);
         }

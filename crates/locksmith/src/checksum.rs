@@ -39,13 +39,23 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
     let Some(hash) = recorded.as_str() else {
         return false;
     };
-    hook_digest(input, !hash.starts_with("sha256-")).as_deref() == Some(hash)
+    let legacy = !hash.starts_with("sha256-");
+    [false, true]
+        .into_iter()
+        .any(|path_order| hook_digest(input, legacy, path_order).as_deref() == Some(hash))
 }
 
-pub(crate) fn hook_digest(input: &Value, legacy: bool) -> Option<String> {
+/// pnpm 12 hashes the project pnpmfiles in `Path` order and records the digest
+/// of an empty list when only a global pnpmfile is active. Earlier releases sort
+/// the paths as JavaScript strings.
+pub(crate) fn hook_digest(input: &Value, legacy: bool, path_order: bool) -> Option<String> {
     let files = input.as_object()?;
     let mut files: Vec<_> = files.iter().collect();
-    files.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+    if path_order {
+        files.sort_by(|(a, _), (b, _)| std::path::Path::new(a).cmp(std::path::Path::new(b)));
+    } else {
+        files.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+    }
     if legacy {
         let [(_, content)] = files.as_slice() else {
             return None;
@@ -66,6 +76,7 @@ pub(crate) fn hook_digest(input: &Value, legacy: bool) -> Option<String> {
         .map(|(_, v)| Some(digest(&v.as_str()?.replace("\r\n", "\n"))))
         .collect::<Option<Vec<_>>>()?;
     Some(match hashes.as_slice() {
+        [] if path_order => digest(""),
         [] => return None,
         [only] => only.clone(),
         many => digest(&many.join(",")),

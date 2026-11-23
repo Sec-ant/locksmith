@@ -113,7 +113,7 @@ fn run(
     generate(
         old,
         &GenerateContext::new(inputs, &config)
-            .with_pnpm_version(&node_semver::Version::new(12, 21, 0)),
+            .with_pnpm_version(&node_semver::Version::from((12, 21, 0))),
         source,
     )
 }
@@ -388,6 +388,32 @@ fn optional_peer_introduced_in_one_consumer_splits_the_transitive_snapshot() {
         lock.project()
     );
 }
+
+#[test]
+fn the_v13_format_keeps_an_ordinary_edge_for_an_unbound_peer() {
+    // The plugin installs its own `child` and also declares it as a peer that
+    // the app does not supply.
+    let mut registry = Registry::default();
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({"dependencies":{"child":"1"},"peerDependencies":{"child":"1"}}),
+    );
+    registry.add("child", "1.0.0", json!({}));
+    let inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
+    let lock = run(
+        &empty_workspace_lock(),
+        &inputs,
+        json!({"autoInstallPeers":false}),
+        &mut registry,
+    )
+    .unwrap();
+    let v13 = lock.to_pnpm_v13().unwrap();
+    assert_eq!(
+        Lockfile::parse_generation_input(v13).unwrap().project(),
+        lock.project()
+    );
+}
 #[test]
 fn strict_peers_can_change_the_declaring_release_with_or_without_an_incumbent() {
     let mut registry = Registry::default();
@@ -434,7 +460,7 @@ fn a_workspace_can_change_a_grandparent_to_share_a_transitive_release() {
         let lock = generate(
             &empty_workspace_lock(),
             &GenerateContext::new(&manifests, &json!({}))
-                .with_pnpm_version(&node_semver::Version::new(10, 34, 9))
+                .with_pnpm_version(&node_semver::Version::from((10, 34, 9)))
                 .with_exhaustive(exhaustive),
             &mut registry,
         )
@@ -751,7 +777,7 @@ fn a_hook_reads_every_release_again_once_any_project_changes() {
             locksmith::generate_with_hooks(
                 old,
                 &GenerateContext::new(manifests, &json!({"pnpmfileChecksum":checksum}))
-                    .with_pnpm_version(&node_semver::Version::new(10, 12, 4)),
+                    .with_pnpm_version(&node_semver::Version::from((10, 12, 4))),
                 registry,
                 &mut Hook(leaf),
             )
@@ -802,7 +828,7 @@ fn a_hook_rewrite_that_the_lock_still_satisfies_keeps_its_releases() {
     registry.add("leaf", "1.0.0", json!({}));
     registry.add("added", "1.0.0", json!({}));
     let config = json!({"pnpmfileChecksum":"hook"});
-    let version = node_semver::Version::new(10, 12, 4);
+    let version = node_semver::Version::from((10, 12, 4));
     let mut inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1"}}))]);
     let generate = |old: &Lockfile, inputs: &BTreeMap<String, Value>, registry: &mut Registry| {
         locksmith::generate_with_hooks(
@@ -830,7 +856,85 @@ fn a_hook_rewrite_that_the_lock_still_satisfies_keeps_its_releases() {
 }
 
 #[test]
-fn an_automatic_required_peer_reuses_a_release_in_the_previous_lock() {
+fn a_changed_hook_rewrite_resolves_its_release_again() {
+    struct Rewrite(&'static str);
+    impl locksmith::GenerationHooks for Rewrite {
+        fn read_package(&mut self, _: &str, mut raw: Value) -> Result<Value> {
+            if raw["name"] != "plugin" {
+                return Ok(raw);
+            }
+            match self.0 {
+                "added" => raw["dependencies"]["extra"] = "1".into(),
+                "optional" => {
+                    raw["dependencies"].as_object_mut().unwrap().remove("leaf");
+                    raw["optionalDependencies"] = json!({"leaf":"1"});
+                }
+                "alias" => raw["dependencies"]["tool"] = "npm:other@^1".into(),
+                "peer" => raw["peerDependencies"]["host"] = "^2".into(),
+                _ => {}
+            }
+            Ok(raw)
+        }
+    }
+    let mut registry = Registry::default();
+    registry.add(
+        "plugin",
+        "1.0.0",
+        json!({
+            "dependencies":{"leaf":"1","tool":"npm:first@^1"},
+            "peerDependencies":{"host":"^1"}
+        }),
+    );
+    for name in ["leaf", "extra", "first", "other", "added"] {
+        registry.add(name, "1.0.0", json!({}));
+    }
+    registry.add("host", "1.0.0", json!({}));
+    registry.add("host", "2.0.0", json!({}));
+    let config = json!({"pnpmfileChecksum":"hook","autoInstallPeers":false});
+    let version = node_semver::Version::from((10, 12, 4));
+    let mut generate = |old: &Lockfile, inputs: &BTreeMap<String, Value>, hook| {
+        locksmith::generate_with_hooks(
+            old,
+            &GenerateContext::new(inputs, &config).with_pnpm_version(&version),
+            &mut registry,
+            &mut Rewrite(hook),
+        )
+        .unwrap()
+    };
+    let inputs = workspace(&[(".", json!({"dependencies":{"plugin":"1","host":"1"}}))]);
+    let mut edited = inputs.clone();
+    edited.insert("new".into(), json!({"dependencies":{"added":"1"}}));
+    let plugin = |lock: &Lockfile| {
+        let doc = lock.project().unwrap();
+        let key = doc["snapshots"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|key| key.starts_with("plugin@"))
+            .unwrap()
+            .clone();
+        (
+            doc["packages"]["plugin@1.0.0"].clone(),
+            doc["snapshots"][&key].clone(),
+        )
+    };
+    // The hook stops adding a dependency.
+    let before = generate(&empty_workspace_lock(), &inputs, "added");
+    let (_, body) = plugin(&generate(&before, &edited, "none"));
+    assert!(body["dependencies"].get("extra").is_none());
+    // The hook moves a dependency to the optional group, retargets an alias
+    // and changes a peer range, each with the same pnpmfile checksum.
+    let before = generate(&empty_workspace_lock(), &inputs, "none");
+    let (_, body) = plugin(&generate(&before, &edited, "optional"));
+    assert_eq!(body["optionalDependencies"]["leaf"], "1.0.0");
+    let (_, body) = plugin(&generate(&before, &edited, "alias"));
+    assert_eq!(body["dependencies"]["tool"], "other@1.0.0");
+    let (record, _) = plugin(&generate(&before, &edited, "peer"));
+    assert_eq!(record["peerDependencies"]["host"], "^2");
+}
+
+#[test]
+fn an_automatic_required_peer_follows_the_pnpm_release_rule() {
     let mut registry = Registry::default();
     registry.add("host", "1.0.0", json!({}));
     registry.add("host", "2.0.0", json!({}));
@@ -848,17 +952,31 @@ fn an_automatic_required_peer_reuses_a_release_in_the_previous_lock() {
     )
     .unwrap();
     manifests.insert("new".into(), json!({"dependencies":{"plugin":"1"}}));
-    let after = run(&before, &manifests, cfg, &mut registry).unwrap();
+    // pnpm 12 resolves a release in the peer's range.
+    let after = run(&before, &manifests, cfg.clone(), &mut registry).unwrap();
     let doc = after.project().unwrap();
+    assert_eq!(
+        doc["importers"]["new"]["dependencies"]["plugin"]["version"],
+        "1.0.0(host@2.0.0)"
+    );
+    assert_eq!(
+        before.dependency_closure("existing").unwrap(),
+        after.dependency_closure("existing").unwrap()
+    );
+    // pnpm 9 and 10 reuse the newest locked release whatever the range.
+    let legacy = generate(
+        &before,
+        &GenerateContext::new(&manifests, &cfg)
+            .with_pnpm_version(&node_semver::Version::from((10, 12, 4))),
+        &mut registry,
+    )
+    .unwrap();
+    let doc = legacy.project().unwrap();
     assert_eq!(
         doc["importers"]["new"]["dependencies"]["plugin"]["version"],
         "1.0.0(host@1.0.0)"
     );
     assert!(doc["packages"].get("host@2.0.0").is_none());
-    assert_eq!(
-        before.dependency_closure("existing").unwrap(),
-        after.dependency_closure("existing").unwrap()
-    );
 }
 
 #[test]
@@ -1007,7 +1125,7 @@ fn the_builtin_database_extends_published_manifests_before_the_project_hook() {
     manifests.get_mut(".").unwrap()["dependencies"]["babel-plugin-transform-typescript-metadata"] =
         "0.3.2".into();
     for ignored in [false, true] {
-        let version = node_semver::Version::new(10, 12, 4);
+        let version = node_semver::Version::from((10, 12, 4));
         let lock = locksmith::generate_with_hooks(
             &old,
             &GenerateContext::new(
@@ -1224,7 +1342,7 @@ fn a_link_override_preserves_the_declared_dev_group_with_pnpm_12_17() {
         let lock = generate(
             &previous,
             &GenerateContext::new(&manifests, &json!({"overrides":{"sdk":"link:sdk"}}))
-                .with_pnpm_version(&node_semver::Version::new(major, minor, patch)),
+                .with_pnpm_version(&node_semver::Version::from((major, minor, patch))),
             &mut Registry::default(),
         )
         .unwrap();

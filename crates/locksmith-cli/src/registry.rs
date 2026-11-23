@@ -152,7 +152,7 @@ pub fn resolve(
                         Some(client) => client,
                         None => registry.insert(Registry::new(
                             config,
-                            crate::workspace::pnpm_version(root).map(|v| v.major),
+                            crate::workspace::pnpm_version(root).map(|v| v.major()),
                             project,
                         )?),
                     };
@@ -289,6 +289,12 @@ impl Registry {
             }) {
                 config[field] = serde_json::from_str(v).unwrap_or_else(|_| Value::from(v));
             }
+        }
+        // pnpm 11 skips undated metadata unless the project opts out.
+        if major.is_some_and(|v| v >= 11)
+            && config.get("minimumReleaseAgeIgnoreMissingTime").is_none()
+        {
+            config["minimumReleaseAgeIgnoreMissingTime"] = true.into();
         }
         let min_age = match config.get("minimumReleaseAge") {
             Some(v) => v

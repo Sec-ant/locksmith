@@ -27,8 +27,6 @@ pub(super) struct Sources<'a> {
     other: BTreeMap<(String, String, String), String>,
     times: Option<BTreeMap<String, String>>,
     policy_epoch: u64,
-    // Releases whose resolver declarations the readPackage hook rewrote.
-    hook_changed: BTreeSet<String>,
 }
 impl<'a> Sources<'a> {
     pub fn new(
@@ -47,7 +45,6 @@ impl<'a> Sources<'a> {
             other: BTreeMap::new(),
             times: None,
             policy_epoch: 0,
-            hook_changed: BTreeSet::new(),
         }
     }
     fn reads_packages(&self) -> bool {
@@ -66,30 +63,9 @@ impl<'a> Sources<'a> {
             release.manifest = extended;
         }
         if let Some(hooks) = &mut self.hooks {
-            const FIELDS: [&str; 4] = [
-                "dependencies",
-                "optionalDependencies",
-                "peerDependencies",
-                "peerDependenciesMeta",
-            ];
-            let declared = |manifest: &Value, field: &str| {
-                manifest
-                    .get(field)
-                    .filter(|v| !v.is_null())
-                    .cloned()
-                    .unwrap_or_else(|| json!({}))
-            };
-            let before = FIELDS.map(|field| declared(&release.manifest, field));
             release.manifest = hooks.read_dependency(&release.key, release.manifest)?;
             if !release.manifest.is_object() {
                 return Err(LockfileError::InvalidManifest(release.key));
-            }
-            if FIELDS
-                .iter()
-                .zip(&before)
-                .any(|(field, value)| declared(&release.manifest, field) != *value)
-            {
-                self.hook_changed.insert(release.key.clone());
             }
         }
         self.releases.insert(release.key.clone(), Rc::new(release));
@@ -117,7 +93,11 @@ impl<'a> Sources<'a> {
         Ok(match self.versions.entry(key) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(self.source.versions(package, selector, direct)?)
+                // A custom source may repeat a release. Keep its first position.
+                let mut seen = BTreeSet::new();
+                let mut versions = self.source.versions(package, selector, direct)?;
+                versions.retain(|v| seen.insert(v.clone()));
+                entry.insert(versions)
             }
         })
     }
@@ -145,8 +125,10 @@ impl<'a> Sources<'a> {
         let req = (dir.to_owned(), name.to_owned(), spec.to_owned());
         if !self.other.contains_key(&req) {
             let release = self.source.other(dir, name, spec)?;
-            self.other.insert(req.clone(), release.key.clone());
+            let key = release.key.clone();
+            // Remember the request only once its hook evaluation has succeeded.
             self.insert_release(release)?;
+            self.other.insert(req.clone(), key);
         }
         Ok(self.other[&req].clone())
     }
@@ -415,8 +397,8 @@ impl<'a, 's> Build<'a, 's> {
                     };
                     let declared = &self.config.catalogs[catalog][name];
                     let version = match (target.starts_with("link:"), &self.config.pnpm_version) {
-                        (true, Some(v)) if v.major == 12 => {
-                            (v.minor >= 6).then_some(declared.as_str())
+                        (true, Some(v)) if v.major() == 12 => {
+                            (v.minor() >= 6).then_some(declared.as_str())
                         }
                         (true, _) => Some(
                             self.base
@@ -464,7 +446,7 @@ impl<'a, 's> Build<'a, 's> {
                 .config
                 .pnpm_version
                 .as_ref()
-                .is_some_and(|v| v.major <= 10);
+                .is_some_and(|v| v.major() <= 10);
             let times: serde_json::Map<_, _> = times
                 .into_iter()
                 .map(|(k, v)| (if legacy { format!("/{k}") } else { k }, Value::from(v)))
@@ -724,7 +706,7 @@ impl<'a, 's> Build<'a, 's> {
             .config
             .pnpm_version
             .as_ref()
-            .is_some_and(|v| v.major <= 10)
+            .is_some_and(|v| v.major() <= 10)
             && !spec.contains(':')
             && !manifest::valid_peer_range(spec)
             && RegistryPackage::selector(name, spec).is_none()
@@ -807,23 +789,27 @@ impl<'a, 's> Build<'a, 's> {
                 let (pkg, version) = RegistryPackage::from_key(&key)?;
                 (pkg == package).then(|| version.to_owned())
             });
+        // pnpm 9 and 10 fill a required peer with the newest locked release
+        // whatever its range. Later releases and optional peers need a match.
+        let any_range = !optional
+            && self
+                .config
+                .pnpm_version
+                .as_ref()
+                .is_some_and(|v| v.major() <= 10);
+        let fits =
+            |v: &node_semver::Version| parsed.iter().flatten().all(|range| v.satisfies(range));
         if let Some(version) = observed
-            && (!optional
+            && (any_range
                 || version
                     .parse::<node_semver::Version>()
-                    .is_ok_and(|v| parsed.iter().flatten().all(|range| v.satisfies(range))))
+                    .is_ok_and(|v| fits(&v)))
             && self.cache.accepts_pin(&package, &version, false)?
         {
             return Ok(Some(version));
         }
         for (version, raw) in self.historical_releases(name) {
-            if (!optional
-                || parsed
-                    .iter()
-                    .flatten()
-                    .all(|range| version.satisfies(range)))
-                && self.cache.accepts_pin(&package, &raw, false)?
-            {
+            if (any_range || fits(&version)) && self.cache.accepts_pin(&package, &raw, false)? {
                 return Ok(Some(raw));
             }
         }
@@ -834,11 +820,17 @@ impl<'a, 's> Build<'a, 's> {
     /// release that satisfies most of them instead of leaving every consumer
     /// without a provider. Releases already in the lockfile win ties.
     pub fn covering_peer(&mut self, name: &str, ranges: &[&str]) -> Result<Option<String>> {
-        let mut candidates: Vec<_> = self
-            .historical_releases(name)
-            .into_iter()
-            .map(|(version, raw)| (version, raw, true))
-            .collect();
+        let package = RegistryPackage {
+            name: name.to_owned(),
+            prefix: None,
+        };
+        // A locked release the publication policy now rejects cannot win a tie.
+        let mut candidates = Vec::new();
+        for (version, raw) in self.historical_releases(name) {
+            if self.cache.accepts_pin(&package, &raw, false)? {
+                candidates.push((version, raw, true));
+            }
+        }
         for range in ranges.iter().copied().collect::<BTreeSet<_>>() {
             let Some((package, selector)) = self.cache.source.registry_selector(name, range)?
             else {
@@ -921,16 +913,18 @@ impl<'a, 's> Build<'a, 's> {
             let mut body = json!({});
             let locator = manifest::selector(base).1.unwrap_or_default();
             let local = locator.strip_prefix("file:");
-            if let Some(path) = local
-                && !self.cache.releases.contains_key(base)
-            {
-                let key = self.cache.other(".", manifest::selector(base).0, locator)?;
-                if key != base {
-                    return Err(reconcile::missing(
-                        &[base],
-                        format!("local manifest now identifies {key}"),
-                    ));
+            if let Some(path) = local {
+                if !self.cache.releases.contains_key(base) {
+                    let key = self.cache.other(".", manifest::selector(base).0, locator)?;
+                    if key != base {
+                        return Err(reconcile::missing(
+                            &[base],
+                            format!("local manifest now identifies {key}"),
+                        ));
+                    }
                 }
+                // Another candidate may have loaded the release. Each build
+                // still needs the directory its local children resolve from.
                 if self.cache.releases[base].resolution["type"] == "directory" {
                     self.local_dirs.insert(base.to_owned(), path.to_owned());
                 }
@@ -1081,7 +1075,7 @@ impl<'a, 's> Build<'a, 's> {
                     .config
                     .pnpm_version
                     .as_ref()
-                    .is_none_or(|v| v >= &node_semver::Version::new(9, 15, 1));
+                    .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
                 let own_name = raw["name"].as_str();
                 for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
                     let Some(entries) = raw.get(group) else {

@@ -55,7 +55,7 @@ impl Registry {
                 .get(v)
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("missing publish time for {}@{v}", doc.name))?;
-            return Ok(time.parse::<Timestamp>()?.as_second() <= ceiling);
+            return Ok(time.parse::<Timestamp>()?.as_millisecond() <= ceiling);
         }
         Ok(true)
     }
@@ -93,9 +93,9 @@ impl Registry {
         }
         let range = specifier.parse::<Range>().ok();
         let lowest = direct && matches!(mode, "lowest-direct" | "time-based") && range.is_some();
-        let pick = |age_filter: bool| -> Result<Option<&'p str>> {
+        let pick = |age_filter: bool, cutoff: bool, lowest: bool| -> Result<Option<&'p str>> {
             let eligible = |v: &str| -> Result<bool> {
-                Ok(self.before_cutoff(doc, v, direct)?
+                Ok((!cutoff || self.before_cutoff(doc, v, direct)?)
                     && (!age_filter || self.old_enough(doc, v)?)
                     && (self.generation_network.is_none() || self.trusted(doc, v)?))
             };
@@ -148,12 +148,21 @@ impl Registry {
             }
             Ok(chosen)
         };
-        let mut selected = pick(self.min_age > 0)?;
+        // pnpm's time-based mode installs the lowest matching release when no
+        // release published before the transitive cutoff satisfies the range.
+        let outside_cutoff = !direct && self.transitive_cutoff.is_some();
+        let select = |age_filter: bool| -> Result<Option<&'p str>> {
+            match pick(age_filter, true, lowest)? {
+                None if outside_cutoff => pick(age_filter, false, true),
+                selected => Ok(selected),
+            }
+        };
+        let mut selected = select(self.min_age > 0)?;
         let strict = self.config["minimumReleaseAgeStrict"]
             .as_bool()
             .unwrap_or(self.config.get("minimumReleaseAge").is_some());
         if selected.is_none() && self.min_age > 0 && !strict {
-            selected = pick(false)?;
+            selected = select(false)?;
         }
         let Some(selected) = selected else {
             return Ok(None);

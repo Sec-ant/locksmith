@@ -1,7 +1,7 @@
 //! Peer ranges use npm comparator sets. pnpm policies also allow prereleases
 //! against their release core and, from pnpm 11, ranges inside scheme specs.
 use super::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
-use nodejs_semver::{Range, Version};
+use node_semver::{Range, Version};
 use std::borrow::Cow;
 
 pub(crate) struct PeerRange(Vec<ParsedRange>);

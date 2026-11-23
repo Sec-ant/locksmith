@@ -25,7 +25,8 @@ pub(super) fn resolve(
         .or_else(|| spec.starts_with(['.', '/']).then_some(spec));
     if let Some(path) = path {
         let path = Path::new(from).join(path).canonicalize()?;
-        let relative = relative(&std::env::current_dir()?, &path);
+        // Both sides use the canonical form, which on Windows carries the verbatim prefix.
+        let relative = relative(&std::env::current_dir()?.canonicalize()?, &path);
         let locator = format!("file:{relative}");
         if path.is_dir() {
             let raw = workspace::read_manifest(&relative, workspace::working_file)?
@@ -47,15 +48,42 @@ pub(super) fn resolve(
             return Err(format!("missing tarball manifest for {name}; use --allow-network").into());
         }
         let client = source.client()?;
-        let mut request = client.agent.get(spec);
-        if let Some(auth) = client.auth(spec, name)? {
-            request = request.header("Authorization", &auth);
+        // Tarball hosts commonly redirect to a CDN. Follow a bounded chain and
+        // send registry credentials only to the original origin.
+        let origin = |url: &str| url.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
+        let mut url = spec.to_owned();
+        for _ in 0..10 {
+            let mut request = client.agent.get(&url);
+            if origin(&url) == origin(spec)
+                && let Some(auth) = client.auth(&url, name)?
+            {
+                request = request.header("Authorization", &auth);
+            }
+            let mut response = request.call()?;
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or("tarball redirect without a location")?;
+                url = if location.starts_with("https://") || location.starts_with("http://") {
+                    location.to_owned()
+                } else if location.starts_with('/') {
+                    format!("{}{location}", origin(&url))
+                } else {
+                    format!(
+                        "{}/{location}",
+                        url.rsplit_once('/').map_or(&*url, |(dir, _)| dir)
+                    )
+                };
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(format!("tarball source returned HTTP {}", response.status()).into());
+            }
+            return archive(name, spec, response.body_mut().as_reader());
         }
-        let mut response = request.call()?;
-        if !response.status().is_success() {
-            return Err(format!("tarball source returned HTTP {}", response.status()).into());
-        }
-        return archive(name, spec, response.body_mut().as_reader());
+        return Err(format!("too many redirects for tarball {spec}").into());
     }
     Err(format!("source manifest and resolution required for {spec}").into())
 }

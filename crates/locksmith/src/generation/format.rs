@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, sync::Arc};
 /// pnpm annotates immutable Git-hosted tarballs when importing older locks.
 pub(super) fn mark_git_archives(doc: &mut Value, version: Option<&node_semver::Version>) {
     use node_semver::Version;
-    let supported = version.is_some_and(|v| match v.major {
-        10 => v >= &Version::new(10, 33, 4),
-        11 => v >= &Version::new(11, 1, 0),
+    let supported = version.is_some_and(|v| match v.major() {
+        10 => v >= &Version::from((10, 33, 4)),
+        11 => v >= &Version::from((11, 1, 0)),
         major => major >= 12,
     });
     if !supported {
@@ -74,7 +74,10 @@ const SETTINGS: [&str; 6] = [
 
 impl Lockfile {
     pub fn parse_generation_input(text: String) -> Result<Self> {
-        if let Some(first) = text
+        // pnpm drops a byte order mark before it detects the document format.
+        // The v9 parser keeps the original bytes.
+        let view = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        if let Some(first) = view
             .lines()
             .next()
             .and_then(|s| s.strip_prefix("lockfileVersion:"))
@@ -86,11 +89,11 @@ impl Lockfile {
         {
             return Err(LockfileError::UnsupportedVersion { version });
         }
-        let ranges = source::document_ranges(&text);
+        let ranges = source::document_ranges(view);
         let Some(last) = ranges.last() else {
             return Self::try_from(text);
         };
-        let part = &text[last.clone()];
+        let part = &view[last.clone()];
         let first = part.trim_start();
         let json = first.starts_with('{');
         if !json
@@ -118,7 +121,7 @@ impl Lockfile {
             ));
         }
         let mut result = if ranges.len() == 2 {
-            let env = Self::parse(&format!("---\n{}", &text[ranges[0].clone()]))?;
+            let env = Self::parse(&format!("---\n{}", &view[ranges[0].clone()]))?;
             if env.environment().is_none() {
                 return Err(LockfileError::InvalidDocument(
                     "expected bootstrap document before v13 project".into(),
@@ -234,10 +237,18 @@ fn encode(doc: &Value) -> Result<Value> {
     for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
         let base = graph::package_key(key);
         let package = &doc["packages"][base];
+        // A declared peer the instance does not bind can still be an ordinary
+        // dependency. Only an explicit peer suffix shows which names are bound.
+        let bound = crate::peer::explicit_bindings(key);
         let mut snapshot = body.clone();
         for group in ["dependencies", "optionalDependencies"] {
             if let Some(children) = snapshot.get_mut(group).and_then(Value::as_object_mut) {
-                children.retain(|name, _| package["peerDependencies"].get(name).is_none());
+                children.retain(|name, _| {
+                    package["peerDependencies"].get(name).is_none()
+                        || bound
+                            .as_ref()
+                            .is_some_and(|b| !b.contains_key(name.as_str()))
+                });
                 for (name, value) in children.iter_mut() {
                     *value = wire.reference(
                         name,
@@ -348,5 +359,5 @@ fn raw_ref(value: &Value) -> &str {
 }
 
 fn policy(doc: &Value) -> Result<WorkspaceConfig> {
-    WorkspaceConfig::from_pnpm_version(&doc["settings"], &node_semver::Version::new(12, 21, 0))
+    WorkspaceConfig::from_pnpm_version(&doc["settings"], &node_semver::Version::from((12, 21, 0)))
 }

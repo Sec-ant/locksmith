@@ -79,12 +79,18 @@ pub(super) fn restore(next: &Value) -> Result<Value> {
         .as_object_mut()
         .ok_or_else(|| reconcile::missing(&[], "expected a project mapping"))?;
     for field in ["packages", "projects"] {
-        map.remove(field);
+        if map
+            .remove(field)
+            .is_some_and(|section| !section.is_object())
+        {
+            return Err(reconcile::missing(&[field], "expected a mapping"));
+        }
     }
     doc["lockfileVersion"] = "9.0".into();
     for field in SETTINGS {
-        if let Some(v) = doc["settings"]
-            .as_object_mut()
+        if let Some(v) = doc
+            .get_mut("settings")
+            .and_then(Value::as_object_mut)
             .and_then(|s| s.remove(field))
         {
             doc[field] = v;
@@ -124,6 +130,12 @@ pub(super) fn restore(next: &Value) -> Result<Value> {
             fields.remove(field);
         }
         if let Some(hash) = record.get("integrity") {
+            if raw.get("resolution").is_some_and(|r| !r.is_object()) {
+                return Err(reconcile::missing(
+                    &["packages", base, "resolution"],
+                    "expected a mapping",
+                ));
+            }
             raw["resolution"]["integrity"] = hash.clone();
         }
         if raw.get("resolution").is_none()

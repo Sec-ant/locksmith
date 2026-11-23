@@ -589,12 +589,13 @@ fn generate_resolves_a_publication_whose_registry_readme_was_truncated() {
         stream.write_all(&publication).unwrap();
     });
     let result = run(root, CLI, &["generate", "--allow-network", "--stdout"]);
-    server.join().unwrap();
+    // A failed run may never connect, which would leave the server waiting.
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    server.join().unwrap();
     let lock = locksmith::Lockfile::parse(std::str::from_utf8(&result.stdout).unwrap()).unwrap();
     assert_eq!(
         lock.project().unwrap()["packages"]["lib@1.0.0"]["resolution"]["integrity"],

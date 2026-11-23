@@ -78,7 +78,7 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 
 ## Generate a lockfile from the workspace
 
-From the workspace root, run `locksmith generate` after editing a manifest. It requires the existing `pnpm-lock.yaml`, reuses compatible pins and peer bindings, and writes the updated lockfile atomically. If another tool replaces the lockfile while generation runs, the command fails and leaves that file in place.
+From the workspace root, run `locksmith generate` after editing a manifest. It requires the existing `pnpm-lock.yaml`, reuses compatible pins and peer bindings, and writes the updated lockfile atomically. Just before the replacement, it checks the lockfile again and fails if another tool changed it during generation.
 
 Generation preserves the dependencies of unchanged projects and keeps existing releases and peer bindings wherever the edit allows. It reuses releases from the lockfile when resolving new dependencies. When an edit introduces duplicate releases, it can compare alternatives on the affected paths. Use `converge` to deduplicate the rest of the graph. A workspace with `strictPeerDependencies` still requires peer compatibility.
 
@@ -104,6 +104,8 @@ Workspaces with an active pnpmfile can select a JavaScript host for `readPackage
 The default build omits the embedded runtime. A workspace without a pnpmfile needs no JavaScript host. The Node API returns the generated YAML as a string.
 
 Generation currently requires a shared workspace lockfile and pnpm's built-in resolvers and fetchers. A `runtime:` or `tool:` dependency on Node, Bun or Deno requires a compatible entry in the previous lockfile. Settings that pnpm-workspace.yaml delegates with `include` must come from local files; a file outside the workspace root directory cannot hold settings with relative paths, and settings from config dependencies are rejected.
+
+Generation reads pnpm settings from `package.json`, `pnpm-workspace.yaml` and `.npmrc`. It cannot see options that a wrapper passes to pnpm on its command line. Rush, for example, runs pnpm with `--config.ignoreCompatibilityDb` and `--no-strict-peer-dependencies`. Add such settings to the `.npmrc` that Rush copies next to the generated workspace, such as `common/config/subspaces/<name>/.npmrc`. Otherwise generation applies a different compatibility database and peer policy than the install.
 
 ```js
 import { generateWorkspace } from 'es-locksmith'

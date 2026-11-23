@@ -19,7 +19,6 @@ serde_json.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 node-semver.workspace = true
-nodejs-semver = "7"
 petgraph = { version = "0.8", default-features = false, features = ["std"] }
 sha2.workspace = true
 md-5.workspace = true

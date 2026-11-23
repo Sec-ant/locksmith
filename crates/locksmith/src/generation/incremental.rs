@@ -234,7 +234,11 @@ impl<'a> Partition<'a> {
         let mut root_changed = BTreeSet::new();
         let mut prune = scopes.keys().any(|id| !draft.roots.contains_key(id));
         let witnesses = std::cell::OnceCell::new();
-        for (id, deps) in &mut draft.roots {
+        // Members compare their inherited peers with the root's changes, so the
+        // root goes first even when an importer id such as `-app` sorts before it.
+        let (root, members): (Vec<_>, Vec<_>) =
+            draft.roots.iter_mut().partition(|(id, _)| *id == ".");
+        for (id, deps) in root.into_iter().chain(members) {
             let before = scopes.get(id.as_str()).unwrap_or(&empty);
             let after: Scope = deps
                 .iter()

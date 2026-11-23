@@ -11,7 +11,7 @@ pub(super) fn context(previous: &Value, input: &GenerateContext<'_>) -> Result<V
     let major = input
         .pnpm_version
         .ok_or("select a pnpm version to evaluate preResolution")?
-        .major;
+        .major();
     let cfg = input.configuration;
     let root = env::current_dir()?;
     let modules = root.join(cfg["modulesDir"].as_str().unwrap_or("node_modules"));
@@ -19,8 +19,15 @@ pub(super) fn context(previous: &Value, input: &GenerateContext<'_>) -> Result<V
     let current_path = virtual_store
         .map_or_else(|| modules.join(".pnpm"), |path| root.join(path))
         .join("lock.yaml");
+    // Like pnpm, warn and continue without an unreadable installed-state lockfile.
     let current = match fs::read_to_string(&current_path) {
-        Ok(raw) => Some(Lockfile::parse_generation_input(raw)?),
+        Ok(raw) => match Lockfile::parse_generation_input(raw) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("warning: ignoring {}: {e}", current_path.display());
+                None
+            }
+        },
         Err(e) if e.kind() == ErrorKind::NotFound => None,
         Err(e) => return Err(format!("{}: {e}", current_path.display()).into()),
     };

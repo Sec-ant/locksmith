@@ -22,10 +22,13 @@ fn resolve(ctx: Ctx<'_>, name: String, parent: String) -> rquickjs::Result<Strin
     let path = std::fs::canonicalize(resolved.as_ref())?;
     let path = path.to_string_lossy();
     #[cfg(windows)]
-    let path = path
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&path)
-        .replace('\\', "/");
+    let path = match path.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!("//{}", share.replace('\\', "/")),
+        None => path
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&path)
+            .replace('\\', "/"),
+    };
     Ok(path.to_string())
 }
 

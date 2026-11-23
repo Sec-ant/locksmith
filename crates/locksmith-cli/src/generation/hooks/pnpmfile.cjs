@@ -56,7 +56,9 @@ function createHookHost(load, log) {
     if (op === 'open') {
       releaseFields = value.releaseFields;
       for (const [path, global] of value.files) {
-        const mod = await load(path);
+        const loaded = await load(path);
+        // An ES module may export its hooks as the default export.
+        const mod = 'hooks' in loaded || loaded.default == null ? loaded : loaded.default;
         const hooks = mod.hooks;
         for (const name of ['resolvers', 'fetchers']) {
           if (hooks?.[name] || mod[name]) throw new Error(`${path}: unsupported pnpmfile hook ${name}`);
@@ -66,10 +68,12 @@ function createHookHost(load, log) {
           if (value.pre === 'single') preResolution = [];
           preResolution.push({ hooks, path });
         }
-        entries.push({ hooks, context: { log }, path });
+        const skip = global && !value.globalUpdateConfig ? ['updateConfig'] : [];
+        entries.push({ hooks, context: { log }, path, skip });
       }
-      return { active: entries.length > 0, readPackage: entries.some(e => !!e.hooks.readPackage),
-        updateConfig: entries.some(e => !!e.hooks.updateConfig), afterAllResolved: entries.some(e => !!e.hooks.afterAllResolved),
+      const provides = op => entries.some(e => !!e.hooks[op] && !e.skip.includes(op));
+      return { active: entries.length > 0, readPackage: provides('readPackage'),
+        updateConfig: provides('updateConfig'), afterAllResolved: provides('afterAllResolved'),
         preResolution: preResolution.length > 0 };
     }
     if (op === 'preResolution') {
@@ -103,8 +107,8 @@ function createHookHost(load, log) {
       return modern ? next : pack(next);
     }
     let result = op === 'afterAllResolved' ? unpack(value) : value;
-    for (const { hooks, context, path } of entries) {
-      if (!hooks[op]) continue;
+    for (const { hooks, context, path, skip } of entries) {
+      if (!hooks[op] || skip.includes(op)) continue;
       if (op === 'readPackage') {
         for (const group of [...groups, 'peerDependencies']) result[group] ??= {};
       }
