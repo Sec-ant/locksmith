@@ -1,3 +1,15 @@
+## 0.3.4 (2026-11-22)
+
+### Features
+
+- Inspect peer bindings, their workspace paths, and packages installed in multiple versions or instances with `locksmith inspect` and the Rust and Node.js APIs.
+- Expose lockfile merging, convergence, repair, and inspection to Node.js and distribute the Locksmith CLI through the `es-locksmith` npm package.
+
+### Fixes
+
+- Follow workspace links from package snapshots when tracing dependency closures.
+- Validate peer ranges and project exceptions against locked provider versions, including prereleases and local packages, and reject malformed peer declarations.
+
 ## 0.3.3 (2026-11-21)
 
 ### Fixes
