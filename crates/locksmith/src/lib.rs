@@ -1,14 +1,15 @@
-//! Merge pnpm lockfiles, repair a committed graph or converge an installed candidate.
+//! Generate, merge, repair and converge pnpm lockfiles.
 //!
 //! [`merge`] accepts the ancestor and both branch locks. Pass `None` for a three-way
 //! comparison or `Some(&context)` to select records using the final workspace settings
 //! and manifests. [`converge`] retains changes required by manifest and workspace edits and
 //! restores unrelated baseline pins. [`repair`] fixes broken records against final workspace inputs.
+//! [`generate`] updates a previous lockfile from workspace manifests and a [`PackageSource`].
 //! Call [`inspect`] for peer bindings, workspace reachability and package instances.
 //!
 //! Supports the default `lockfileVersion: '9.0'` format written by pnpm 9–12,
-//! including pnpm 11/12's separate environment document. Experimental lockfile
-//! formats are rejected by their format version, independently of pnpm's version.
+//! including pnpm 11/12's separate environment document. Generation also supports
+//! pnpm 12's v13 project format through [`Lockfile::parse_generation_input`] and [`Lockfile::to_pnpm_v13`].
 //! The library performs no filesystem, network, Git, or package-manager operations.
 //!
 //! ```
@@ -27,6 +28,7 @@ mod config;
 mod diagnostics;
 mod error;
 mod extensions;
+mod generation;
 mod graph;
 mod inspect;
 mod lockfile;
@@ -51,6 +53,10 @@ pub use diagnostics::{
     inspect_peers,
 };
 pub use error::{Conflict, ConflictKind, LockfileError, ValidationIssue};
+pub use generation::{
+    GenerateContext, GenerationHooks, PackageSource, RegistryPackage, SourceManifest, generate,
+    generate_with_hooks,
+};
 pub use graph::DependencyClosure;
 pub use inspect::{
     ExternalLink, Inspection, InspectionSummary, LinkSource, LockedRelease, PackageInstances,

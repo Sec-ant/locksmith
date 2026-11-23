@@ -350,7 +350,7 @@ fn insert(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str,
 fn write(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str) {
     let mut entry = String::new();
     if path.len() <= 1 {
-        yaml::write_entry(&mut entry, path.first().copied(), name, value);
+        yaml::write_entry(&mut entry, path.first().copied(), name, value, false);
     } else {
         entry.push_str(&"  ".repeat(path.len()));
         yaml::render_entry_into(&mut entry, name, value, path.len());

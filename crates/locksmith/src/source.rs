@@ -371,13 +371,69 @@ impl Source {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutputOrder {
+    Canonical,
+    Baseline,
+    Generated { pnpm9: bool },
+}
+
+impl OutputOrder {
+    fn pnpm9(self) -> bool {
+        self == Self::Generated { pnpm9: true }
+    }
+    fn importer_sorted(self, value: &Value) -> bool {
+        let compare = |a: &&String, b: &&String| yaml::importer_order(a, b, self.pnpm9()).is_le();
+        value
+            .as_object()
+            .is_none_or(|m| m.keys().is_sorted_by(compare))
+            && crate::manifest::GROUPS.into_iter().all(|g| {
+                value[g]
+                    .as_object()
+                    .is_none_or(|m| m.keys().is_sorted_by(compare))
+            })
+    }
+    fn generated_record_sorted(self, section: &str, record: &Value) -> bool {
+        match section {
+            "importers" => self.importer_sorted(record),
+            // Older hand-edited snapshots can spell an empty mapping value
+            // as a bare key. pnpm emits the explicit YAML null on a frozen write.
+            "snapshots" => record
+                .as_object()
+                .is_none_or(|m| m.values().all(|v| !v.is_null())),
+            _ => true,
+        }
+    }
+    /// pnpm writes these maps in key order, even on a frozen install. Other
+    /// unchanged sections may retain their source spelling and comments.
+    pub(crate) fn generated_field_sorted(
+        self,
+        source: &Source,
+        kind: DocumentKind,
+        key: &str,
+    ) -> bool {
+        let Some(map) = source.documents[&kind][key].as_object() else {
+            return true;
+        };
+        match key {
+            "importers" | "snapshots" | "packages" => {
+                map.keys().is_sorted() && map.values().all(|v| self.generated_record_sorted(key, v))
+            }
+            "catalogs" => source.reusable_field(kind, key, true, false),
+            "time" | "patchedDependencies" if !self.pnpm9() => map.keys().is_sorted(),
+            _ => true,
+        }
+    }
+}
+
 pub(crate) fn render(
     kind: DocumentKind,
     document: &Value,
     sources: &[Arc<Source>],
-    preserve_baseline: bool,
+    output_order: OutputOrder,
     output: &mut String,
 ) {
+    let preserve_baseline = output_order != OutputOrder::Canonical;
     if kind == DocumentKind::Environment
         && let Some(layout) = sources.iter().find_map(|source| {
             (source.documents.get(&kind)?.as_ref() == document)
@@ -400,14 +456,18 @@ pub(crate) fn render(
         .iter()
         .collect();
     fields.sort_unstable_by(|(a, _), (b, _)| yaml::root_order(a, b));
-    let order = preserve_baseline
+    let order = (output_order == OutputOrder::Baseline)
         .then(|| importer_order(sources, kind, document))
         .flatten();
     for (key, value) in fields {
         let original = sources.iter().enumerate().find_map(|(i, source)| {
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
-                || !source.reusable_field(kind, key, preserve_baseline && i == 0, order.is_some())
+                || !(if matches!(output_order, OutputOrder::Generated { .. }) && i == 0 {
+                    output_order.generated_field_sorted(source, kind, key)
+                } else {
+                    source.reusable_field(kind, key, preserve_baseline && i == 0, order.is_some())
+                })
                 || (key == "overrides" && !crate::manifest::same_override_order(original, document))
             {
                 return None;
@@ -433,7 +493,12 @@ pub(crate) fn render(
             for (entry, value) in entries {
                 let original = sources.iter().enumerate().find_map(|(i, source)| {
                     let record = source.documents.get(&kind)?.get(key)?.get(entry)?;
-                    if record != value || (key == "importers" && !ordered_importer(record)) {
+                    let ordered = if matches!(output_order, OutputOrder::Generated { .. }) {
+                        output_order.generated_record_sorted(key, record)
+                    } else {
+                        key != "importers" || ordered_importer(record)
+                    };
+                    if record != value || !ordered {
                         return None;
                     }
                     let layout = source.layouts.get(&kind)?;
@@ -454,12 +519,12 @@ pub(crate) fn render(
                     output.push_str(original.trim_end_matches('\n'));
                     output.push_str("\n\n");
                 } else {
-                    yaml::write_entry(output, Some(key), entry, value);
+                    yaml::write_entry(output, Some(key), entry, value, output_order.pnpm9());
                     output.push_str("\n\n");
                 }
             }
         } else {
-            yaml::write_entry(output, None, key, value);
+            yaml::write_entry(output, None, key, value, output_order.pnpm9());
             output.push_str("\n\n");
         }
     }

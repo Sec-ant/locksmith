@@ -228,7 +228,7 @@ pub(super) fn link_peer_id(path: &str, encoding: LinkedPeerEncoding) -> String {
     String::from_utf16_lossy(&units)
 }
 
-pub(super) fn token_matches(name: &str, reference: &str, token_name: &str, token: &str) -> bool {
+pub(crate) fn token_matches(name: &str, reference: &str, token_name: &str, token: &str) -> bool {
     if let Some(path) = reference.strip_prefix("link:") {
         return name == token_name
             && [LinkedPeerEncoding::Filename, LinkedPeerEncoding::Path]
@@ -301,6 +301,22 @@ pub(crate) fn projected_identity(
         }
     }
     identity(target)
+}
+
+pub(crate) fn generated_identity(
+    package: &str,
+    bindings: &BTreeMap<String, String>,
+    config: &crate::WorkspaceConfig,
+    limit: u64,
+) -> String {
+    let flat = config.resolution.lock.dedupe_peers;
+    let encoding = config.linked_peer_encoding;
+    let long = peer_text(bindings, flat, encoding).encode_utf16().count() as u64 > limit;
+    let style = match config.extension_checksum {
+        Some(crate::ExtensionChecksum::Md5) => HashStyle::Md5Base32,
+        _ => HashStyle::Sha256,
+    };
+    encode(package, bindings, long.then_some(style), flat, encoding)
 }
 
 pub(super) fn encode(

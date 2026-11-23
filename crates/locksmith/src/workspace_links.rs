@@ -5,6 +5,47 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashMap};
 
+pub(crate) fn relative(from: &str, to: &str) -> String {
+    let a: Vec<_> = from
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let b: Vec<_> = to
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    std::iter::repeat_n("..", a.len() - common)
+        .chain(b[common..].iter().copied())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn member_relative(from: &str, to: &str, config: &WorkspaceConfig) -> String {
+    if let Some(root) = config.lockfile_dir.as_deref()
+        && (from.starts_with("..") || to.starts_with(".."))
+    {
+        relative(
+            &graph::linked_importer(root, from),
+            &graph::linked_importer(root, to),
+        )
+    } else {
+        relative(from, to)
+    }
+}
+
+pub(crate) fn member_target(from: &str, path: &str, config: &WorkspaceConfig) -> String {
+    if let Some(root) = config.lockfile_dir.as_deref()
+        && (from.starts_with("..") || path.starts_with(".."))
+    {
+        let target = graph::linked_importer(&graph::linked_importer(root, from), path);
+        let id = relative(root, &target);
+        if id.is_empty() { ".".into() } else { id }
+    } else {
+        graph::linked_importer(from, path)
+    }
+}
+
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
     manifest
         .get("dependenciesMeta")
@@ -45,6 +86,29 @@ impl<'a> WorkspaceLinks<'a> {
         importer: &str,
         manifest: &Value,
     ) -> Result<Option<(String, Option<&'a Value>)>, LockfileError> {
+        self.select(name, specifier, importer, manifest, false, true)
+    }
+
+    pub(crate) fn resolve_for_generation(
+        &self,
+        name: &str,
+        specifier: &str,
+        importer: &str,
+        manifest: &Value,
+        direct: bool,
+    ) -> Result<Option<(String, Option<&'a Value>)>, LockfileError> {
+        self.select(name, specifier, importer, manifest, true, direct)
+    }
+
+    fn select(
+        &self,
+        name: &str,
+        specifier: &str,
+        importer: &str,
+        manifest: &Value,
+        include_injected: bool,
+        direct: bool,
+    ) -> Result<Option<(String, Option<&'a Value>)>, LockfileError> {
         let specifier = if let Some(catalog) = specifier.strip_prefix("catalog:") {
             let catalog = if catalog.is_empty() {
                 "default"
@@ -74,18 +138,18 @@ impl<'a> WorkspaceLinks<'a> {
             .get("linkWorkspacePackages");
         if workspace.is_none()
             && explicit_link.is_none()
-            && !link_local.is_some_and(|v| v == true || v == "deep")
+            && !link_local.is_some_and(|v| (direct && v == true) || v == "deep")
         {
             return Ok(None);
         }
-        if injected(name, manifest, self.config) && explicit_link.is_none() {
+        if !include_injected && injected(name, manifest, self.config) && explicit_link.is_none() {
             return Ok(None);
         }
         let relative = explicit_link
             .filter(|p| !p.starts_with('/'))
             .or_else(|| workspace.filter(|r| r.starts_with('.')));
         let (target, range) = if let Some(path) = relative {
-            (Some(graph::linked_importer(importer, path)), "*")
+            (Some(member_target(importer, path, self.config)), "*")
         } else {
             let (package, range) = if let Some(request) = workspace {
                 request
@@ -135,19 +199,10 @@ impl<'a> WorkspaceLinks<'a> {
                 target
             }
         };
-        let from: Vec<_> = importer
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-        let to: Vec<_> = target
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-        let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-        let relative = std::iter::repeat_n("..", from.len() - common)
-            .chain(to[common..].iter().copied())
-            .collect::<Vec<_>>()
-            .join("/");
+        if include_injected {
+            return Ok(Some((format!("link:{target}"), package)));
+        }
+        let relative = member_relative(importer, &target, self.config);
         Ok(Some((format!("link:{relative}"), package)))
     }
 }

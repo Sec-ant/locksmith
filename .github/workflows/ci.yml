@@ -25,6 +25,7 @@ jobs:
         with:
           just-version: "1.59.0"
       - run: just check
+      - run: cargo test --locked -p locksmith-cli --features pnpmfile --test registry generate_evaluates_local_async_hooks_with_the_selected_runtime
 
   pnpm:
     runs-on: ubuntu-latest

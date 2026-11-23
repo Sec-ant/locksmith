@@ -2,5 +2,5 @@ import api from './index.cjs';
 export default api;
 export const {
   Lockfile, parse, validate, merge, converge, repair, dependencyClosure, inspect, inspectPeers,
-  getCliPath, inspectWorkspace, convergeWorkspace, repairWorkspace,
+  getCliPath, generateWorkspace, inspectWorkspace, convergeWorkspace, repairWorkspace,
 } = api;

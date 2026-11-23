@@ -17,6 +17,7 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 | Starting point                                                                      | Command                                                   |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | Two branches changed the lockfile                                                   | [`merge`](#merge-two-branches)                            |
+| You edited workspace dependencies and want to update the lockfile before installing | [`generate`](#generate-a-lockfile-from-the-workspace)          |
 | You edited dependencies and `pnpm install` changed more than you expected           | [`converge`](#reduce-changes-after-an-install)            |
 | Git already merged the lockfile, but some records are duplicated, stale, or missing | [`repair`](#repair-an-already-merged-lockfile)            |
 | You want to trace a peer warning or find packages with multiple locked instances    | [`inspect`](#inspect-peer-bindings-and-package-instances) |
@@ -82,6 +83,41 @@ git config --local locksmith.mainline refs/heads/trunk
 ```
 
 If Git pauses on the lockfile, resolve any project files named in the diagnostic, then open `pnpm-lock.yaml`. Resolve any conflict markers. If the text merged cleanly, review the dependency named in the diagnostic. Stage the resolved files with `git add` and continue the merge or rebase.
+
+## Generate a lockfile from the workspace
+
+From the workspace root, run `locksmith generate` after editing a manifest. It requires the existing `pnpm-lock.yaml`, reuses compatible pins and peer bindings, and writes the updated lockfile atomically. If another tool replaces the lockfile while generation runs, the command fails and leaves that file in place.
+
+Generation preserves the dependencies of unchanged projects and keeps existing releases and peer bindings wherever the edit allows. It reuses releases from the lockfile when resolving new dependencies. When an edit introduces duplicate releases, it can compare alternatives on the affected paths. Use `converge` to deduplicate the rest of the graph. A workspace with `strictPeerDependencies` still requires peer compatibility.
+
+For a release audit, `locksmith generate --exhaustive --stdout --allow-network` compares eligible assignments of registry releases in the resolver's model. It reads the manifests of alternative releases and prunes a branch when its unavoidable costs already match or exceed the best valid graph. Large version ranges and coupled peer requirements can make an exhaustive run much longer. The Node API accepts the same choice as `exhaustive: true`.
+
+```sh
+locksmith generate --allow-network
+locksmith generate --stdout > preview.yaml
+```
+
+Ordinary registry dependencies need only package metadata. `--allow-network` lets Locksmith fetch missing metadata and resolve remote Git or tarball sources. Offline runs use the previous lock and the local metadata cache. Generation runs without a pnpm executable, lifecycle scripts or `node_modules`.
+
+Set the target pnpm version with the root manifest's `packageManager` field or `--pnpm-version VERSION`. The default lock format is v9 for pnpm 9–12. The generator also reads and writes pnpm 12's explicit `lockfile.format: v13`.
+
+Workspaces with an active pnpmfile can select a JavaScript host for `readPackage`, `updateConfig`, `preResolution` and `afterAllResolved`. The selected pnpm version determines which pre-resolution hooks run and the lockfile shape they receive. Like pnpm, generation keeps a lockfile that already matches the workspace. Once a project, catalog, override or patch changes, `readPackage` runs for every release again, because a hook can read files its checksum does not cover. Generation ranks graphs before running `afterAllResolved`, then validates the transformed lockfile.
+
+| `--hook-runtime` | Behavior |
+| --- | --- |
+| `node` (default) | Starts a Node.js process in the workspace directory when it encounters a hook. The CLI uses `node` from `PATH`, or the executable in `LOCKSMITH_NODE`. The Node API uses the calling process's Node.js executable. |
+| `embedded` | Uses LLRT and QuickJS compiled into the executable. Enable the optional Cargo feature with `cargo install --locked --path crates/locksmith-cli --features pnpmfile`. Use the Node host for hooks that require the full Node.js API or native addons. |
+| `off` | Rejects workspaces that request hook evaluation. Workspaces configured with `ignorePnpmfile: true` generate normally. |
+
+The default build omits the embedded runtime. A workspace without a pnpmfile needs no JavaScript host. The Node API returns the generated YAML as a string.
+
+Generation currently requires a shared workspace lockfile and pnpm's built-in resolvers and fetchers. A `runtime:` or `tool:` dependency on Node, Bun or Deno requires a compatible entry in the previous lockfile. Settings that pnpm-workspace.yaml delegates with `include` must come from local files; a file outside the workspace root directory cannot hold settings with relative paths, and settings from config dependencies are rejected.
+
+```js
+import { generateWorkspace } from 'es-locksmith'
+
+const yaml = await generateWorkspace({ cwd: process.cwd(), allowNetwork: true, hookRuntime: 'node' })
+```
 
 ## Reduce changes after an install
 
@@ -168,13 +204,15 @@ fn main() -> Result<(), LockfileError> {
 
 Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full API. For the data model and algorithms, see [How Locksmith works](docs/design.md).
 
+[Notes from reading pnpm lockfiles](docs/pnpm-quirks.md) collects version-specific examples involving catalogs, local links, hooks and peers.
+
 ## Performance
 
 Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the README example. The fixture repeats one site's dependency graph 300 times. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 
-- Supports `lockfileVersion: '9.0'`, the default in pnpm 9–12. Experimental lockfile formats are rejected by their format version.
+- Supports `lockfileVersion: '9.0'`, the default in pnpm 9–12. Generation also supports pnpm 12 workspaces configured with `lockfile.format: v13`.
 - Locksmith never installs packages. Run `pnpm install` for that.
 - The library performs no I/O. The CLI reads project files, Git, and the registry.
 - Registry access is opt-in with `--allow-network`.

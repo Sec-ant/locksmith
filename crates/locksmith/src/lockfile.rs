@@ -3,7 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::{LockfileError, Value, graph, source::Source};
+use crate::{
+    LockfileError, Value, graph,
+    source::{OutputOrder, Source},
+};
 
 /// The project dependency graph or pnpm's package-manager bootstrap graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,7 +20,7 @@ pub enum DocumentKind {
 pub struct Lockfile {
     pub(crate) documents: BTreeMap<DocumentKind, Arc<Value>>,
     pub(crate) sources: Vec<Arc<Source>>,
-    pub(crate) preserve_baseline: bool,
+    pub(crate) output_order: OutputOrder,
 }
 
 /// Parse an owned YAML document, reusing its text buffer for source blocks.
@@ -29,7 +32,7 @@ impl TryFrom<String> for Lockfile {
         Ok(Self {
             documents: source.documents.clone(),
             sources: vec![source],
-            preserve_baseline: false,
+            output_order: OutputOrder::Canonical,
         })
     }
 }
@@ -136,29 +139,56 @@ impl Lockfile {
             if source.documents == self.documents
                 && self.documents.iter().all(|(kind, document)| {
                     crate::manifest::same_override_order(document, &source.documents[kind])
-                        && (Arc::ptr_eq(document, &source.documents[kind]) || {
-                            let keep_importer_order = self.preserve_baseline
-                                && crate::source::importer_order(&self.sources, *kind, document)
-                                    .is_some();
-                            crate::source::SECTIONS
-                                .into_iter()
-                                .chain(["catalogs"])
-                                .all(|section| {
-                                    source.reusable_field(
+                        && (if matches!(self.output_order, OutputOrder::Generated { .. }) && i == 0
+                        {
+                            [
+                                "importers",
+                                "packages",
+                                "snapshots",
+                                "catalogs",
+                                "time",
+                                "patchedDependencies",
+                            ]
+                            .into_iter()
+                            .all(|k| self.output_order.generated_field_sorted(source, *kind, k))
+                        } else {
+                            Arc::ptr_eq(document, &source.documents[kind]) || {
+                                let keep_importer_order = self.output_order
+                                    != OutputOrder::Canonical
+                                    && crate::source::importer_order(
+                                        &self.sources,
                                         *kind,
-                                        section,
-                                        self.preserve_baseline && i == 0,
-                                        keep_importer_order,
+                                        document,
                                     )
-                                })
+                                    .is_some();
+                                crate::source::SECTIONS.into_iter().chain(["catalogs"]).all(
+                                    |section| {
+                                        source.reusable_field(
+                                            *kind,
+                                            section,
+                                            self.output_order != OutputOrder::Canonical && i == 0,
+                                            keep_importer_order,
+                                        )
+                                    },
+                                )
+                            }
                         })
                 })
             {
-                return Ok(source.text.to_string());
+                let mut text = source.text.to_string();
+                if matches!(self.output_order, OutputOrder::Generated { .. })
+                    && !text.ends_with('\n')
+                {
+                    text.push('\n');
+                }
+                return Ok(text);
             }
         }
         let mut output = String::new();
         for (&kind, document) in &self.documents {
+            if !output.is_empty() && !output.ends_with("\n\n") {
+                output.push('\n');
+            }
             if kind == DocumentKind::Environment || !output.is_empty() {
                 output.push_str("---\n");
             }
@@ -167,7 +197,7 @@ impl Lockfile {
                 kind,
                 document,
                 &self.sources,
-                self.preserve_baseline,
+                self.output_order,
                 &mut output,
             );
             crate::verify::verify(&output[start..], document)?;
@@ -179,7 +209,7 @@ impl Lockfile {
         let mut documents = self.documents.clone();
         documents.insert(DocumentKind::Project, Arc::new(project));
         let mut result = Self::with_documents(documents, &[self, candidate]);
-        result.preserve_baseline = true;
+        result.output_order = OutputOrder::Baseline;
         result
     }
 
@@ -198,7 +228,7 @@ impl Lockfile {
         Self {
             documents,
             sources,
-            preserve_baseline: false,
+            output_order: OutputOrder::Canonical,
         }
     }
 }

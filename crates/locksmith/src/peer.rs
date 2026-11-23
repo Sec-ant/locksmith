@@ -6,8 +6,8 @@ pub(crate) use exact::same_binding;
 mod identity;
 use identity::{HashStyle, context, context_tokens, encode, link_peer_id};
 pub(crate) use identity::{
-    context as explicit_bindings, matches_bindings, patch, patch_hash, projected_identity,
-    root_provider,
+    context as explicit_bindings, generated_identity, matches_bindings, patch, patch_hash,
+    projected_identity, root_provider, token_matches,
 };
 mod bindings;
 pub(crate) use bindings::optional_requirement;
@@ -88,6 +88,27 @@ impl<'a> PeerIndex<'a> {
             links
         })
     }
+}
+
+/// Recover printable bindings, including the providers behind a hashed suffix.
+pub(crate) fn snapshot_bindings(
+    doc: &Value,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, crate::LockfileError> {
+    let index = PeerIndex::new([Some(doc), None, None, None]);
+    let mut graph = BindingGraph::default();
+    graph::section(doc, "snapshots")
+        .into_iter()
+        .flat_map(|m| m.keys())
+        .map(|key| {
+            let bound = bindings(doc, &mut graph, key, index.links(0), None).ok_or_else(|| {
+                crate::reconcile::missing(
+                    &["snapshots", key],
+                    "cannot recover peer bindings for the next format",
+                )
+            })?;
+            Ok((key.clone(), (*bound.peers).clone()))
+        })
+        .collect()
 }
 
 pub(crate) struct Merger<'a> {

@@ -114,6 +114,16 @@ export interface WorkspaceOptions {
   allowNetwork?: boolean
   signal?: AbortSignal
 }
+export type HookRuntime = 'node' | 'embedded' | 'off'
+export interface GenerateWorkspaceOptions extends WorkspaceOptions {
+  pnpmVersion?: string
+  /** Search every eligible assignment of registry releases. */
+  exhaustive?: boolean
+  /** Node runs hooks in a separate process of this Node executable. Embedded requires a feature-enabled CLI. */
+  hookRuntime?: HookRuntime
+}
+/** Return updated lockfile YAML using the workspace's existing pnpm-lock.yaml. */
+export function generateWorkspace(options?: GenerateWorkspaceOptions): Promise<string>
 /** Absolute path to the bundled Rust CLI, suitable for spawn() or a Git driver. */
 export function getCliPath(): string
 export function inspectWorkspace(options?: Pick<WorkspaceOptions, 'cwd' | 'signal'>): Promise<Inspection>

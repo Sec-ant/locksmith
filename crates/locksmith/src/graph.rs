@@ -413,7 +413,7 @@ fn check_package_peers(
     }
 }
 
-fn check_package(
+pub(crate) fn check_package(
     document: &Value,
     kind: DocumentKind,
     snapshot: &str,
@@ -512,6 +512,18 @@ fn check_catalogs(
                     .map(String::as_str),
                 None => entry.and_then(|v| v["specifier"].as_str()),
             };
+            if config.is_none()
+                && entry.is_none()
+                && let Some(path) = dependency["version"]
+                    .as_str()
+                    .and_then(|v| v.strip_prefix("link:"))
+                && document["importers"]
+                    .get(linked_project(document.get("importers"), key, path))
+                    .is_some()
+            {
+                // pnpm 12.0–12.5 omitted catalog records used only by local links.
+                continue;
+            }
             if !spec
                 .zip(dependency["version"].as_str())
                 .is_some_and(|(spec, pin)| {
@@ -522,6 +534,7 @@ fn check_catalogs(
                         return document["importers"].get(&target).is_some()
                             && entry.is_none_or(|e| {
                                 crate::reconcile::metadata::catalog_entry_version(spec, e).is_some()
+                                    || (e["specifier"] == spec && e["version"] == spec)
                             });
                     }
                     crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)

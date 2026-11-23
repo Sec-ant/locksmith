@@ -1,0 +1,260 @@
+//! Read the package manifest from the selected source without extracting a package tree.
+use std::{
+    fs,
+    io::{self, Read},
+    path::{Component, Path},
+    process::Command,
+};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use locksmith::SourceManifest;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha512};
+
+use super::GenerationSource;
+use crate::{Result, workspace};
+
+pub(super) fn resolve(
+    source: &mut GenerationSource<'_>,
+    from: &str,
+    name: &str,
+    spec: &str,
+) -> Result<SourceManifest> {
+    let path = spec
+        .strip_prefix("file:")
+        .or_else(|| spec.starts_with(['.', '/']).then_some(spec));
+    if let Some(path) = path {
+        let path = Path::new(from).join(path).canonicalize()?;
+        let relative = relative(&std::env::current_dir()?, &path);
+        let locator = format!("file:{relative}");
+        if path.is_dir() {
+            let raw = workspace::read_manifest(&relative, workspace::working_file)?
+                .ok_or_else(|| format!("missing package manifest in {}", path.display()))?;
+            return package(
+                name,
+                &locator,
+                raw,
+                json!({"directory":relative,"type":"directory"}),
+            );
+        }
+        return archive(name, &locator, fs::File::open(path)?);
+    }
+    if git_spec(spec) {
+        return git(name, spec, source.network);
+    }
+    if spec.starts_with("https://") || spec.starts_with("http://") {
+        if !source.network {
+            return Err(format!("missing tarball manifest for {name}; use --allow-network").into());
+        }
+        let client = source.client()?;
+        let mut request = client.agent.get(spec);
+        if let Some(auth) = client.auth(spec, name)? {
+            request = request.header("Authorization", &auth);
+        }
+        let mut response = request.call()?;
+        if !response.status().is_success() {
+            return Err(format!("tarball source returned HTTP {}", response.status()).into());
+        }
+        return archive(name, spec, response.body_mut().as_reader());
+    }
+    Err(format!("source manifest and resolution required for {spec}").into())
+}
+
+fn package(fallback: &str, locator: &str, raw: Value, resolution: Value) -> Result<SourceManifest> {
+    let actual = raw["name"].as_str().unwrap_or(fallback).to_owned();
+    Ok(SourceManifest::new(
+        format!("{actual}@{locator}"),
+        raw,
+        resolution,
+    )?)
+}
+
+fn relative(from: &Path, to: &Path) -> String {
+    let a: Vec<_> = from.components().collect();
+    let b: Vec<_> = to.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut out: std::path::PathBuf = (common..a.len()).map(|_| "..").collect();
+    out.extend(b[common..].iter().map(|c| c.as_os_str()));
+    out.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn archive(name: &str, locator: &str, mut reader: impl Read) -> Result<SourceManifest> {
+    // Hash compressed bytes, including data after the manifest and tar end markers.
+    let mut compressed = tempfile::tempfile()?;
+    let mut hash = Sha512::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        use io::Write;
+        let count = reader.read(&mut buf)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buf[..count]);
+        compressed.write_all(&buf[..count])?;
+    }
+    io::Seek::rewind(&mut compressed)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(compressed));
+    for entry in tar.entries()? {
+        let entry = entry?;
+        if entry.header().entry_type().is_file() {
+            let path = entry.path()?;
+            let parts: Vec<_> = path.components().collect();
+            if matches!(&parts[..],[Component::Normal(_),Component::Normal(n)] | [Component::Normal(n)] if *n=="package.json")
+            {
+                let raw: Value = serde_json::from_reader(entry)?;
+                let integrity = format!("sha512-{}", STANDARD.encode(hash.finalize()));
+                return package(
+                    name,
+                    locator,
+                    raw,
+                    json!({"integrity":integrity,"tarball":locator}),
+                );
+            }
+        }
+    }
+    Err(format!("no package.json in {locator}").into())
+}
+
+fn git_spec(spec: &str) -> bool {
+    spec.starts_with("git+")
+        || spec.starts_with("git://")
+        || spec.starts_with("ssh://")
+        || spec.starts_with("github:")
+        || spec.split('#').next().is_some_and(|url| {
+            url.ends_with(".git") || (!url.contains(':') && url.split('/').count() == 2)
+        })
+}
+
+fn git(name: &str, spec: &str, network: bool) -> Result<SourceManifest> {
+    let (remote, fragment) = spec.split_once('#').unwrap_or((spec, ""));
+    let https;
+    let url = if let Some(repo) = remote
+        .strip_prefix("github:")
+        .or_else(|| (!remote.contains(':')).then_some(remote))
+    {
+        https = format!("https://github.com/{}.git", repo.trim_end_matches(".git"));
+        &https
+    } else {
+        remote.strip_prefix("git+").unwrap_or(remote)
+    };
+    let scheme = url
+        .split_once("://")
+        .map(|(s, _)| s)
+        .ok_or("expected a Git URL")?;
+    if !matches!(scheme, "http" | "https" | "ssh" | "git" | "file") {
+        return Err(format!("unsupported Git transport {scheme}").into());
+    }
+    let mut revision = "HEAD";
+    let mut subdir = "";
+    for part in fragment.split('&').filter(|s| !s.is_empty()) {
+        if let Some(path) = part.strip_prefix("path:") {
+            subdir = path.trim_matches('/');
+        } else {
+            revision = part;
+        }
+    }
+    if revision.starts_with('-') || subdir.split('/').any(|p| p == "..") {
+        return Err("invalid Git revision or package directory".into());
+    }
+    let cache = |commit: &str| {
+        super::cache_file(
+            &format!("{url}#{commit}&path:/{subdir}"),
+            "git-package-manifest",
+            None,
+        )
+    };
+    let finish = |commit: &str, raw| {
+        let mut locator = format!("git+{url}#{commit}");
+        let mut resolution = json!({"type":"git","repo":url,"commit":commit});
+        if !subdir.is_empty() {
+            resolution["path"] = format!("/{subdir}").into();
+            locator.push_str(&format!("&path:/{subdir}"));
+        }
+        package(name, &locator, raw, resolution)
+    };
+    if revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let commit = revision.to_ascii_lowercase();
+        if let Some(path) = cache(&commit) {
+            match fs::File::open(path) {
+                Ok(file) => {
+                    return finish(&commit, serde_json::from_reader(io::BufReader::new(file))?);
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    if scheme != "file" && !network {
+        return Err(format!("missing Git manifest for {name}; use --allow-network").into());
+    }
+    let temp = tempfile::tempdir()?;
+    let run = |args: &[&str]| -> Result<String> {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(temp.path())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()?;
+        if !out.status.success() {
+            return Err(format!(
+                "Git source {name}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into());
+        }
+        Ok(String::from_utf8(out.stdout)?)
+    };
+    let tag;
+    if let Some(range) = revision.strip_prefix("semver:") {
+        let range = range.parse::<node_semver::Range>()?;
+        let refs = run(&["ls-remote", "--refs", "--tags", "--", url])?;
+        tag = refs
+            .lines()
+            .filter_map(|line| {
+                let (_, tag) = line.split_once("\trefs/tags/")?;
+                let v = tag
+                    .trim_start_matches('v')
+                    .parse::<node_semver::Version>()
+                    .ok()?;
+                v.satisfies(&range).then_some((v, tag))
+            })
+            .max()
+            .ok_or("no Git tag satisfies the semver selector")?
+            .1
+            .to_owned();
+        revision = &tag;
+    }
+    run(&["init", "--bare", "--quiet"])?;
+    run(&["remote", "add", "origin", url])?;
+    run(&["config", "remote.origin.promisor", "true"])?;
+    run(&["config", "remote.origin.partialclonefilter", "blob:none"])?;
+    run(&[
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--depth=1",
+        "--filter=blob:none",
+        "--",
+        "origin",
+        revision,
+    ])?;
+    let commit = run(&["rev-parse", "FETCH_HEAD^{commit}"])?;
+    let commit = commit.trim();
+    let path = if subdir.is_empty() {
+        "package.json".to_owned()
+    } else {
+        format!("{subdir}/package.json")
+    };
+    let raw = serde_json::from_str(&run(&["show", &format!("{commit}:{path}")])?)?;
+    let manifest = finish(commit, raw)?;
+    if let Some(path) = cache(commit) {
+        crate::registry::metadata::store_json(&path, &manifest.manifest)?;
+    }
+    Ok(manifest)
+}

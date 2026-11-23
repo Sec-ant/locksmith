@@ -277,7 +277,9 @@ fn resolve_sources(
             documents,
             &[locks[target], locks[context.target.other_index()], locks[0]],
         );
-        result.preserve_baseline = prefer_baseline;
+        if prefer_baseline {
+            result.output_order = crate::source::OutputOrder::Baseline;
+        }
         result.validate()?;
         Ok(result)
     };
@@ -404,7 +406,11 @@ fn authorized_patch(key: &str, metadata: &Value, docs: [&Value; 4]) -> bool {
 }
 
 // The outer None denotes competing selectors without a unique applicable patch.
-fn desired_patch<'a>(key: &str, metadata: &'a Value, docs: [&Value; 4]) -> Option<Option<&'a str>> {
+pub(crate) fn desired_patch<'a>(
+    key: &str,
+    metadata: &'a Value,
+    docs: [&Value; 4],
+) -> Option<Option<&'a str>> {
     let package = graph::package_key(key);
     let Some(patches) = metadata
         .get("patchedDependencies")

@@ -59,15 +59,13 @@ pub(crate) fn need_version(
     request(missing(path, reason), lookup)
 }
 
-fn effective_manifest<'a>(
+pub(crate) fn effective_manifest<'a>(
     raw: &'a Value,
     config: &WorkspaceConfig,
 ) -> Result<Cow<'a, Value>, LockfileError> {
     let mut result = Cow::Borrowed(raw);
-    let name = raw["name"].as_str().expect("validated published name");
-    let version = raw["version"]
-        .as_str()
-        .expect("validated published version");
+    let name = raw["name"].as_str().unwrap_or_default();
+    let version = raw["version"].as_str().unwrap_or_default();
     for (selector, extension) in config
         .resolution
         .package_extensions
@@ -79,28 +77,37 @@ fn effective_manifest<'a>(
         if !manifest::parent_matches(selector, name, version) {
             continue;
         }
-        for field in [
-            "dependencies",
-            "optionalDependencies",
-            "peerDependencies",
-            "peerDependenciesMeta",
-        ] {
-            if let Some(additions) = extension.get(field).and_then(Value::as_object) {
-                let entries = result
-                    .to_mut()
-                    .as_object_mut()
-                    .expect("published manifest")
-                    .entry(field)
-                    .or_insert_with(|| json!({}))
-                    .as_object_mut()
-                    .ok_or_else(|| missing(&[name, field], "expected mapping"))?;
-                for (k, v) in additions {
-                    entries.entry(k.clone()).or_insert_with(|| v.clone());
-                }
+        add_extension(&mut result, extension)?;
+    }
+    Ok(result)
+}
+
+pub(crate) fn add_extension(
+    result: &mut Cow<'_, Value>,
+    extension: &Value,
+) -> Result<(), LockfileError> {
+    let name = result["name"].as_str().unwrap_or_default().to_owned();
+    for field in [
+        "dependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "peerDependenciesMeta",
+    ] {
+        if let Some(additions) = extension.get(field).and_then(Value::as_object) {
+            let entries = result
+                .to_mut()
+                .as_object_mut()
+                .expect("published manifest")
+                .entry(field)
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| missing(&[&name, field], "expected mapping"))?;
+            for (k, v) in additions {
+                entries.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 pub(super) fn original(
@@ -383,13 +390,12 @@ pub(crate) fn records(
     Ok(output)
 }
 
-fn package_record(raw: &Value, resolution: &Value) -> Value {
+pub(crate) fn package_record(raw: &Value, resolution: &Value) -> Value {
     let mut package = json!({"resolution":resolution});
     for field in ["os", "cpu", "libc", "deprecated"] {
-        if let Some(v) = raw
-            .get(field)
-            .filter(|v| !v.is_null() && v.as_str() != Some(""))
-        {
+        if let Some(v) = raw.get(field).filter(|v| {
+            !v.is_null() && v.as_str() != Some("") && (field != "deprecated" || *v != false)
+        }) {
             package[field] = v.clone();
         }
     }

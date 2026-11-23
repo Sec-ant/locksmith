@@ -16,6 +16,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod args;
 mod converge;
 mod driver;
+mod generation;
 mod git;
 mod inspect;
 mod merge;
@@ -48,6 +49,21 @@ fn run(command: Command) -> Result<()> {
             allow_network,
             ..
         }) => return driver::run(inputs.files(), &path, allow_network),
+        Command::Generate {
+            allow_network,
+            exhaustive,
+            stdout,
+            pnpm_version,
+            hook_runtime,
+        } => {
+            return generation::run(
+                allow_network,
+                stdout,
+                pnpm_version,
+                hook_runtime,
+                exhaustive,
+            );
+        }
         Command::Converge {
             reference,
             allow_network,

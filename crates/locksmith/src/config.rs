@@ -122,6 +122,8 @@ impl Default for ResolutionSettings {
 /// decode settings for a particular pnpm release with `from_pnpm_version`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfig {
+    /// Absolute workspace directory for links between members outside the lockfile folder.
+    pub lockfile_dir: Option<String>,
     pub auto_dedupe: bool,
     pub resolution: ResolutionSettings,
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
@@ -249,6 +251,7 @@ impl WorkspaceConfig {
                 .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
                 .collect(),
             },
+            lockfile_dir: decode(value, "lockfileDir")?,
             catalogs,
             overrides: string_rules(value, "overrides")?,
             override_tie_break: OverrideTieBreak::default(),

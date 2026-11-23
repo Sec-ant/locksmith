@@ -3,9 +3,9 @@ const { spawn } = require('node:child_process');
 const { platformDirectory, getCliPath } = require('./platform.cjs');
 const native = require(join(platformDirectory(), 'locksmith.node'));
 
-function runWorkspace(command, args, { cwd, signal } = {}) {
+function runWorkspace(command, args, { cwd, signal, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(getCliPath(), [command, ...args], { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(getCliPath(), [command, ...args], { cwd, signal, env, stdio: ['ignore', 'pipe', 'pipe'] });
     child.on('error', reject);
     const stdout = [];
     const stderr = [];
@@ -27,9 +27,19 @@ function revisionArgs(ref, options) {
   return options?.allowNetwork ? ['--allow-network', '--', ref] : ['--', ref];
 }
 
+function generateWorkspace({ cwd, signal, allowNetwork = false, pnpmVersion, hookRuntime = 'node', exhaustive = false } = {}) {
+  const args = ['--stdout', '--hook-runtime', hookRuntime];
+  if (allowNetwork) args.push('--allow-network');
+  if (exhaustive) args.push('--exhaustive');
+  if (pnpmVersion) args.push('--pnpm-version', pnpmVersion);
+  // Hooks run in a separate process of this Node executable, in the workspace directory.
+  return runWorkspace('generate', args, { cwd, signal, env: { ...process.env, LOCKSMITH_NODE: process.execPath } });
+}
+
 module.exports = {
   ...native,
   getCliPath,
+  generateWorkspace,
   inspectWorkspace: (options) => runWorkspace('inspect', ['--json'], options).then(JSON.parse),
   convergeWorkspace: (ref, options) => runWorkspace('converge', revisionArgs(ref, options), options),
   repairWorkspace: (ref = 'HEAD', options) => runWorkspace('repair', revisionArgs(ref, options), options),

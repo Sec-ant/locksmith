@@ -14,13 +14,17 @@ pub(super) fn copy_settings(settings: &mut Value, from: &Value) {
     for key in [
         "registry",
         "registries",
+        "namedRegistries",
+        "networkConcurrency",
         "minimumReleaseAge",
         "minimumReleaseAgeStrict",
         "minimumReleaseAgeExclude",
         "minimumReleaseAgeIgnoreMissingTime",
         "resolutionMode",
         "trustPolicy",
+        "trustLockfile",
         "trustPolicyExclude",
+        "trustPolicyIgnoreAfter",
         "lockfileIncludeTarballUrl",
         "pnprServer",
     ] {
@@ -50,6 +54,7 @@ pub(super) fn project_rc(settings: &mut BTreeMap<String, String>, text: &str, cr
             || matches!(
                 key,
                 "minimum-release-age"
+                    | "network-concurrency"
                     | "minimum-release-age-strict"
                     | "trust-policy"
                     | "resolution-mode"

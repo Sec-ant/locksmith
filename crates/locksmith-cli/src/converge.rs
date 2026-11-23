@@ -2,7 +2,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::ErrorKind,
 };
 
 use locksmith::{Lockfile, ManifestChange};
@@ -12,16 +11,8 @@ use crate::{
     Result,
     git::{self, Blobs},
     policy::Policy,
-    workspace::{self, Members, Project},
+    workspace::{self, Members, Project, working_file},
 };
-
-fn working_file(path: &str) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{path}: {e}").into()),
-    }
-}
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let revision = git::output(&[

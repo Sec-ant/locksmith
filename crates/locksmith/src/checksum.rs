@@ -36,16 +36,24 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
     if input.is_string() {
         return input == recorded;
     }
-    let (Some(files), Some(hash)) = (input.as_object(), recorded.as_str()) else {
+    let Some(hash) = recorded.as_str() else {
         return false;
     };
+    hook_digest(input, !hash.starts_with("sha256-")).as_deref() == Some(hash)
+}
+
+pub(crate) fn hook_digest(input: &Value, legacy: bool) -> Option<String> {
+    let files = input.as_object()?;
     let mut files: Vec<_> = files.iter().collect();
     files.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-    if !hash.starts_with("sha256-") {
-        return files.len() == 1
-            && files[0].1.as_str().is_some_and(|s| {
-                crate::peer::patch_hash(s, crate::PatchEncoding::Md5Base32WithPath) == hash
-            });
+    if legacy {
+        let [(_, content)] = files.as_slice() else {
+            return None;
+        };
+        return Some(crate::peer::patch_hash(
+            content.as_str()?,
+            crate::PatchEncoding::Md5Base32WithPath,
+        ));
     }
     let digest = |s: &str| {
         format!(
@@ -53,20 +61,18 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
             base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(s.as_bytes()))
         )
     };
-    let Some(hashes) = files
+    let hashes = files
         .into_iter()
         .map(|(_, v)| Some(digest(&v.as_str()?.replace("\r\n", "\n"))))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return false;
-    };
-    match hashes.as_slice() {
-        [only] => only == hash,
-        many => digest(&many.join(",")) == hash,
-    }
+        .collect::<Option<Vec<_>>>()?;
+    Some(match hashes.as_slice() {
+        [] => return None,
+        [only] => only.clone(),
+        many => digest(&many.join(",")),
+    })
 }
 
-fn calculate(value: &Value, legacy: bool) -> String {
+pub(crate) fn calculate(value: &Value, legacy: bool) -> String {
     let mut text = String::new();
     if legacy {
         json(value, &mut text);

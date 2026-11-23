@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
     path::{Component, Path},
 };
 
@@ -40,6 +42,14 @@ pub fn check_conflicts(
         .into());
     }
     Ok(())
+}
+
+pub fn working_file(path: &str) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{path}: {e}").into()),
+    }
 }
 
 pub fn read_manifest(
@@ -86,12 +96,23 @@ impl Project {
     pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
         let version = pnpm_version(&root);
-        let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
+        Self::from_files_with_version(root, version.as_ref(), read)
+    }
+
+    pub fn from_files_with_version(
+        root: Value,
+        version: Option<&node_semver::Version>,
+        mut read: impl FnMut(&str) -> Result<Option<String>>,
+    ) -> Result<Self> {
+        let (mut config, workspace) = settings(&root, version, &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
         for name in hook_candidates(&config, version.as_ref().map(|v| v.major))? {
             if let Some(contents) = read(&name)? {
+                if config["ignorePnpmfile"] == true || contents.trim().is_empty() {
+                    continue;
+                }
                 hooks.insert(name, Value::String(contents));
                 if config.get("pnpmfile").is_none() {
                     break;
@@ -129,6 +150,23 @@ pub fn settings(
         }
         None => json!({}),
     };
+    if version.is_none_or(|v| v.major < 11)
+        && let Some(resolutions) = root.get("resolutions")
+    {
+        let mut overrides = resolutions
+            .as_object()
+            .ok_or("package.json: expected resolutions to be an object")?
+            .clone();
+        if let Some(value) = config.get("overrides") {
+            overrides.extend(
+                value
+                    .as_object()
+                    .ok_or("package.json: expected pnpm.overrides to be an object")?
+                    .clone(),
+            );
+        }
+        config["overrides"] = overrides.into();
+    }
     if version.as_ref().is_none_or(|v| v.major < 11)
         && let Some(text) = read(".npmrc")?
     {
@@ -150,10 +188,205 @@ pub fn settings(
                     settings.remove(key);
                 }
             }
+            if version.is_none_or(|v| *v >= node_semver::Version::new(12, 15, 0)) {
+                include_settings(&mut settings, &mut read)?;
+            }
             config.as_object_mut().unwrap().extend(settings);
         }
     }
     Ok((config, workspace.is_some()))
+}
+
+/// Settings an included file may hold only as paths relative to that file.
+const PATH_SETTINGS: &[&str] = &[
+    "globalPnpmfile",
+    "lockfileDir",
+    "modulesDir",
+    "packages",
+    "patchedDependencies",
+    "patchesDir",
+    "pnpmfile",
+    "scriptShell",
+    "storeDir",
+    "virtualStoreDir",
+];
+
+/// Each catalog has one owner. Other settings are owned by name.
+fn owned_units(key: &str, value: &Value) -> Vec<String> {
+    match key {
+        "catalog" => vec!["catalogs.default".into()],
+        "catalogs" => value
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| format!("catalogs.{name}"))
+            .collect(),
+        _ => vec![key.into()],
+    }
+}
+
+fn holds_local_path(value: &Value) -> bool {
+    match value {
+        Value::String(s) => [
+            "file:",
+            "link:",
+            "./",
+            "../",
+            "workspace:./",
+            "workspace:../",
+        ]
+        .iter()
+        .any(|prefix| s.starts_with(prefix)),
+        Value::Object(map) => map.values().any(holds_local_path),
+        Value::Array(items) => items.iter().any(holds_local_path),
+        _ => false,
+    }
+}
+
+/// Merge the settings that pnpm-workspace.yaml delegates to other files with
+/// `include` (pnpm 12.15). pnpm rejects a setting that two sources define, or
+/// that a file defines without being delegated it.
+fn include_settings(
+    settings: &mut serde_json::Map<String, Value>,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<()> {
+    let Some(include) = settings.remove("include") else {
+        return Ok(());
+    };
+    let include = include
+        .as_object()
+        .ok_or("pnpm-workspace.yaml: expected include to be a mapping")?;
+    let mut owners = BTreeMap::<String, String>::new();
+    let reserved = |owners: &BTreeMap<String, String>, unit: &str| {
+        owners.get(unit).cloned().or_else(|| {
+            unit.starts_with("catalogs.")
+                .then(|| owners.get("catalogs").cloned())
+                .flatten()
+        })
+    };
+    let mut sources = Vec::new();
+    for (source, delegated) in include {
+        let invalid = |reason: &str| -> Box<dyn std::error::Error> {
+            format!("pnpm-workspace.yaml: include {source:?} {reason}").into()
+        };
+        if !source.starts_with("./") && !source.starts_with("../") {
+            return Err(invalid(
+                "names a config dependency; generate cannot read config dependency settings",
+            ));
+        }
+        let mut parts = Vec::new();
+        for component in Path::new(source).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    parts
+                        .pop()
+                        .ok_or_else(|| invalid("is outside the workspace root"))?;
+                }
+                Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+                _ => return Err(invalid("must be a relative path")),
+            }
+        }
+        let path = parts.join("/");
+        if !(path.ends_with(".yaml") || path.ends_with(".yml"))
+            || path.contains(['*', '?', '[', '{'])
+        {
+            return Err(invalid("must name a .yaml or .yml file"));
+        }
+        let permitted = match delegated {
+            Value::String(all) if all == "*" => None,
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .map(|item| match item.as_str() {
+                        Some("catalog") => Ok("catalogs.default".to_owned()),
+                        Some(setting) => Ok(setting.to_owned()),
+                        None => Err(invalid("expects a list of setting names or '*'")),
+                    })
+                    .collect::<Result<BTreeSet<_>>>()?,
+            ),
+            _ => return Err(invalid("expects a list of setting names or '*'")),
+        };
+        for unit in permitted.iter().flatten() {
+            if let Some(other) = owners.insert(unit.clone(), source.clone()) {
+                return Err(format!("{unit} is delegated to both {other} and {source}").into());
+            }
+        }
+        sources.push((source, path, permitted));
+    }
+    for (key, value) in settings.iter() {
+        for unit in owned_units(key, value) {
+            if let Some(owner) = reserved(&owners, &unit) {
+                return Err(format!(
+                    "pnpm-workspace.yaml defines {unit}, which include delegates to {owner}"
+                )
+                .into());
+            }
+        }
+    }
+    for (source, path, permitted) in sources {
+        let text = read(&path)?.ok_or_else(|| format!("{source}: included file is missing"))?;
+        let file: Option<serde_json::Map<String, Value>> =
+            serde_saphyr::from_str(&text).map_err(|e| format!("{source}: {e}"))?;
+        let nested = path.contains('/');
+        for (key, value) in file.into_iter().flatten() {
+            if key == "include" {
+                return Err(format!("{source}: an included file cannot define include").into());
+            }
+            for unit in owned_units(&key, &value) {
+                match &permitted {
+                    // A list reserves its settings for this file and no other.
+                    Some(_) => {
+                        if reserved(&owners, &unit).as_ref() != Some(source) {
+                            return Err(
+                                format!("{source}: {unit} is not delegated to this file").into()
+                            );
+                        }
+                    }
+                    None => {
+                        let owner = reserved(&owners, &unit).or_else(|| {
+                            settings
+                                .iter()
+                                .any(|(k, v)| owned_units(k, v).contains(&unit))
+                                .then(|| "pnpm-workspace.yaml".to_owned())
+                        });
+                        if let Some(owner) = owner {
+                            return Err(
+                                format!("{unit} is defined by both {owner} and {source}").into()
+                            );
+                        }
+                        owners.insert(unit, source.clone());
+                    }
+                }
+            }
+            // pnpm resolves relative paths against the included file.
+            if nested
+                && (PATH_SETTINGS.contains(&key.as_str())
+                    || ["catalog", "catalogs", "overrides"].contains(&key.as_str())
+                        && holds_local_path(&value))
+            {
+                return Err(format!(
+                    "{source}: generate cannot rebase the relative paths in {key} \
+                     from a file outside the workspace root directory"
+                )
+                .into());
+            }
+            match (key.as_str(), value) {
+                ("catalogs", Value::Object(catalogs)) => {
+                    let target = settings
+                        .entry("catalogs")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .ok_or("pnpm-workspace.yaml: expected catalogs to be a mapping")?;
+                    target.extend(catalogs);
+                }
+                (_, value) => {
+                    settings.insert(key, value);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn manifests(
@@ -259,6 +492,7 @@ pub fn file_inputs(config: &Value) -> Result<Vec<String>> {
 fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
     const FLAGS: &[(&str, &str)] = &[
         ("auto-install-peers", "autoInstallPeers"),
+        ("ignore-pnpmfile", "ignorePnpmfile"),
         ("dedupe-peers", "dedupePeers"),
         ("dedupe-peer-dependents", "dedupePeerDependents"),
         ("exclude-links-from-lockfile", "excludeLinksFromLockfile"),
@@ -271,6 +505,7 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
             "resolvePeersFromWorkspaceRoot",
         ),
         ("strict-peer-dependencies", "strictPeerDependencies"),
+        ("ignore-compatibility-db", "ignoreCompatibilityDb"),
         ("inject-workspace-packages", "injectWorkspacePackages"),
         ("prefer-workspace-packages", "preferWorkspacePackages"),
     ];
@@ -297,6 +532,10 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
                     config["peersSuffixMaxLength"] = json!(value.parse::<usize>()?)
                 }
                 "pnpmfile" => config["pnpmfile"] = json!(value),
+                "global-pnpmfile" => config["globalPnpmfile"] = json!(value),
+                "store-dir" => config["storeDir"] = json!(value),
+                "modules-dir" => config["modulesDir"] = json!(value),
+                "virtual-store-dir" => config["virtualStoreDir"] = json!(value),
                 _ => (),
             }
         }
@@ -310,6 +549,14 @@ pub struct Members {
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
+        Self::from_project(project, false)
+    }
+
+    pub fn for_generation(project: &Project) -> Result<Self> {
+        Self::from_project(project, true)
+    }
+
+    fn from_project(project: &Project, external: bool) -> Result<Self> {
         let mut this = Self {
             include: vec![],
             exclude: vec![],
@@ -340,7 +587,11 @@ impl Members {
                     match part {
                         "" | "." => (),
                         ".." => {
-                            if parts.pop().is_none() {
+                            if parts.last().is_some_and(|p| *p != "..") {
+                                parts.pop();
+                            } else if external {
+                                parts.push(part);
+                            } else {
                                 return Err(
                                     format!("workspace glob escapes the root: {value:?}").into()
                                 );
@@ -355,6 +606,77 @@ impl Members {
             }
         }
         Ok(this)
+    }
+
+    /// Expand the declared globs on disk. Literal prefixes and bounded patterns
+    /// avoid walking unrelated trees in a workspace that does not use **.
+    pub fn filesystem_manifests(&self, root: &Value) -> Result<BTreeMap<String, Value>> {
+        let mut manifests = BTreeMap::from([(".".into(), root.clone())]);
+        let mut directories = BTreeSet::new();
+        let options = MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: true,
+        };
+        for pattern in &self.include {
+            let directory = pattern
+                .as_str()
+                .strip_suffix("/package.json")
+                .expect("manifest glob");
+            // Iterate one component at a time so ** cannot enter node_modules or
+            // follow symlink cycles before the membership filter is applied.
+            let parts: Vec<_> = directory.split('/').collect();
+            let mut pending = vec![(std::path::PathBuf::new(), 0)];
+            let mut seen = BTreeSet::new();
+            while let Some((dir, depth)) = pending.pop() {
+                if !seen.insert((dir.clone(), depth)) {
+                    continue;
+                }
+                let Some(part) = parts.get(depth) else {
+                    if let Some(s) = dir.to_str().filter(|s| !s.is_empty()) {
+                        let id = s.replace(std::path::MAIN_SEPARATOR, "/");
+                        if self.contains(&id) {
+                            directories.insert(id);
+                        }
+                    }
+                    continue;
+                };
+                let recursive = *part == "**";
+                if *part == ".." {
+                    pending.push((dir.join(".."), depth + 1));
+                    continue;
+                }
+                if recursive {
+                    pending.push((dir.clone(), depth + 1));
+                }
+                let parent = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    &dir
+                };
+                let component = Pattern::new(part)?;
+                for entry in fs::read_dir(parent)? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    if matches!(name, "node_modules" | "bower_components" | ".git")
+                        || !component.matches_with(name, options)
+                    {
+                        continue;
+                    }
+                    pending.push((dir.join(name), if recursive { depth } else { depth + 1 }));
+                }
+            }
+        }
+        for dir in directories {
+            if let Some(manifest) = read_manifest(&dir, working_file)? {
+                manifests.insert(dir, manifest);
+            }
+        }
+        Ok(manifests)
     }
 
     pub fn working_directories(&self, prefix: &str) -> Result<BTreeSet<String>> {
