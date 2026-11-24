@@ -41,6 +41,7 @@ fn published_declarations(
     key: &str,
     rules: &manifest::Overrides<'_>,
     config: &WorkspaceConfig,
+    needed: &mut BTreeSet<String>,
 ) -> Result<PublishedDeclarations, LockfileError> {
     let bundle = raw
         .get("bundledDependencies")
@@ -76,6 +77,10 @@ fn published_declarations(
             let Some(spec) = spec else {
                 continue;
             };
+            // Only explicit selectors seed candidate reuse from the input locks.
+            if let Some(request) = lookup(name, &spec, config) {
+                needed.insert(request.name().to_owned());
+            }
             if group == "peerDependencies"
                 && (replacement.is_none() || manifest::valid_peer_range(&spec))
             {
@@ -318,17 +323,8 @@ pub(crate) fn records(
     {
         let publication = &registry.releases[key];
         let raw = effective_manifest(&publication.manifest, config)?;
-        for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
-            for (name, value) in graph::section(&raw, group).into_iter().flatten() {
-                if let Some(range) = value.as_str()
-                    && let Some(spec) = rules.apply(&raw, ".", name, range)?
-                    && let Some(request) = lookup(name, &spec, config)
-                {
-                    needed.insert(request.name().to_owned());
-                }
-            }
-        }
-        releases.push((key, publication, raw));
+        let declarations = published_declarations(&raw, key, &rules, config, &mut needed)?;
+        releases.push((key, publication, raw, declarations));
     }
     let mut index: HashMap<&str, Vec<&str>> = HashMap::new();
     if !needed.is_empty() {
@@ -351,10 +347,8 @@ pub(crate) fn records(
             }
         }
     }
-    let locked = |name: &str, spec: &str| -> Option<String> {
-        let request = lookup(name, spec, config)?;
-        let actual = request.name();
-        index.get(actual)?.iter().find_map(|key| {
+    let locked = |name: &str, spec: &str, request: &RegistryRequest| -> Option<String> {
+        index.get(request.name())?.iter().find_map(|key| {
             let value = reference(name, key);
             (accepts(name, spec, &value, metadata)
                 && desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
@@ -369,7 +363,7 @@ pub(crate) fn records(
     if let Some(patches) = metadata.get("patchedDependencies") {
         output["patchedDependencies"] = patches.clone();
     }
-    for (key, publication, raw) in releases {
+    for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
             .filter_map(|doc| doc["packages"][key]["resolution"].get("integrity"))
@@ -381,7 +375,6 @@ pub(crate) fn records(
             ));
         }
         let mut package = package_record(&raw, &publication.resolution);
-        let declarations = published_declarations(&raw, key, &rules, config)?;
         for (name, (spec, optional)) in &declarations.peers {
             package["peerDependencies"][name] = spec.as_str().into();
             if *optional {
@@ -407,8 +400,7 @@ pub(crate) fn records(
                 (name, field, spec, Some(*optional))
             }))
         {
-            let published = || {
-                let req = lookup(name, spec, config)?;
+            let published = |req: &RegistryRequest| {
                 let locator = registry.selected(req.name(), req.selector()).or_else(|| {
                     peer?;
                     // Another importer may supply this peer under a different
@@ -425,7 +417,8 @@ pub(crate) fn records(
                     hash.map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
                 Some(reference(name, &locator))
             };
-            let value = locked(name, spec).or_else(published);
+            let value = lookup(name, spec, config)
+                .and_then(|request| locked(name, spec, &request).or_else(|| published(&request)));
             if let Some(optional) = peer
                 && value.is_none()
                 && (optional

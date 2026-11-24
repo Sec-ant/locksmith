@@ -36,51 +36,52 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
     if input.is_string() {
         return input == recorded;
     }
-    let Some(hash) = recorded.as_str() else {
+    let (Some(files), Some(hash)) = (input.as_object(), recorded.as_str()) else {
         return false;
     };
-    let legacy = !hash.starts_with("sha256-");
-    [false, true]
-        .into_iter()
-        .any(|path_order| hook_digest(input, legacy, path_order).as_deref() == Some(hash))
+    if !hash.starts_with("sha256-") {
+        return files.len() == 1
+            && files
+                .values()
+                .next()
+                .and_then(Value::as_str)
+                .is_some_and(|content| {
+                    crate::peer::patch_hash(content, crate::PatchEncoding::Md5Base32WithPath)
+                        == hash
+                });
+    }
+    let mut hashes = Vec::with_capacity(files.len());
+    for (path, content) in files {
+        let Some(content) = content.as_str() else {
+            return false;
+        };
+        hashes.push((path, sha256(&content.replace("\r\n", "\n"))));
+    }
+    match hashes.as_slice() {
+        // pnpm 12 records an empty-list digest when only a global hook is active.
+        [] => return sha256("") == hash,
+        [(_, digest)] => return digest == hash,
+        _ => {}
+    }
+    // Older pnpm sorts paths as JavaScript strings. pnpm 12 uses Rust Path order.
+    let combined = |path_order| {
+        let mut ordered: Vec<_> = hashes.iter().collect();
+        if path_order {
+            ordered.sort_by(|(a, _), (b, _)| std::path::Path::new(a).cmp(std::path::Path::new(b)));
+        } else {
+            ordered.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+        }
+        let parts: Vec<_> = ordered.iter().map(|(_, digest)| digest.as_str()).collect();
+        sha256(&parts.join(","))
+    };
+    combined(false) == hash || combined(true) == hash
 }
 
-/// pnpm 12 hashes the project pnpmfiles in `Path` order and records the digest
-/// of an empty list when only a global pnpmfile is active. Earlier releases sort
-/// the paths as JavaScript strings.
-fn hook_digest(input: &Value, legacy: bool, path_order: bool) -> Option<String> {
-    let files = input.as_object()?;
-    let mut files: Vec<_> = files.iter().collect();
-    if path_order {
-        files.sort_by(|(a, _), (b, _)| std::path::Path::new(a).cmp(std::path::Path::new(b)));
-    } else {
-        files.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-    }
-    if legacy {
-        let [(_, content)] = files.as_slice() else {
-            return None;
-        };
-        return Some(crate::peer::patch_hash(
-            content.as_str()?,
-            crate::PatchEncoding::Md5Base32WithPath,
-        ));
-    }
-    let digest = |s: &str| {
-        format!(
-            "sha256-{}",
-            base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(s.as_bytes()))
-        )
-    };
-    let hashes = files
-        .into_iter()
-        .map(|(_, v)| Some(digest(&v.as_str()?.replace("\r\n", "\n"))))
-        .collect::<Option<Vec<_>>>()?;
-    Some(match hashes.as_slice() {
-        [] if path_order => digest(""),
-        [] => return None,
-        [only] => only.clone(),
-        many => digest(&many.join(",")),
-    })
+fn sha256(text: &str) -> String {
+    format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(text.as_bytes()))
+    )
 }
 
 fn calculate(value: &Value, legacy: bool) -> String {
@@ -93,10 +94,7 @@ fn calculate(value: &Value, legacy: bool) -> String {
             .collect()
     } else {
         object_hash(value, &mut text);
-        format!(
-            "sha256-{}",
-            base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(text.as_bytes()))
-        )
+        sha256(&text)
     }
 }
 
