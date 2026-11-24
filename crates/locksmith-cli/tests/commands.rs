@@ -148,6 +148,47 @@ fn unrelated_source_and_excluded_manifest_conflicts_leave_lock_resolved() {
     );
     assert_both(graph(r.git(&["show", ":pnpm-lock.yaml"]).as_bytes()));
 }
+
+#[test]
+fn only_active_hook_conflicts_block_the_lockfile_merge() {
+    for ignored in [true, false] {
+        let repo = Repo::new();
+        repo.write(
+            "pnpm-workspace.yaml",
+            &format!(
+                "packages: ['apps/*']\nignorePnpmfile: {ignored}\npnpmfile: hooks/custom.cjs\n"
+            ),
+        );
+        repo.commit("configure the workspace hook");
+        repo.git(&["branch", "-f", "topic", "HEAD"]);
+        repo.branches(|repo, side| {
+            for path in [".pnpmfile.cjs", "hooks/custom.cjs"] {
+                repo.write(path, side);
+            }
+        });
+
+        let out = repo.cmd("git", &["merge", "--no-edit", "topic"]);
+        assert!(!out.status.success());
+        let conflicts = repo.git(&["diff", "--name-only", "--diff-filter=U"]);
+        if ignored {
+            assert_eq!(
+                conflicts,
+                ".pnpmfile.cjs\nhooks/custom.cjs\n",
+                "{}",
+                report(&out)
+            );
+            assert_both(graph(repo.git(&["show", ":pnpm-lock.yaml"]).as_bytes()));
+        } else {
+            assert_eq!(
+                conflicts,
+                ".pnpmfile.cjs\nhooks/custom.cjs\npnpm-lock.yaml\n",
+                "{}",
+                report(&out)
+            );
+            assert!(report(&out).contains("resolve dependency configuration first"));
+        }
+    }
+}
 #[test]
 fn names_conflicted_configuration_and_preserves_all_lock_stages() {
     let r = Repo::new();
@@ -338,6 +379,31 @@ fn converge_across_a_pnpm_upgrade_keeps_baseline_pins_and_applies_final_override
     assert!(!stale.status.success());
     assert!(stale.stdout.is_empty());
     assert!(report(&stale).contains("overrides"));
+}
+
+#[test]
+fn converge_accepts_changes_to_an_ignored_explicit_hook_across_pnpm_versions() {
+    let repo = Repo::new();
+    repo.write(
+        "pnpm-workspace.yaml",
+        "packages: ['apps/*']\nignorePnpmfile: true\npnpmfile: hooks/custom.cjs\n",
+    );
+    repo.write("hooks/custom.cjs", "module.exports = {};\n");
+    repo.commit("ignore the workspace hook");
+    let original = graph(repo.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
+    repo.write("hooks/custom.cjs", "module.exports = { hooks: {} };\n");
+
+    for version in ["10.34.9", "12.21.0"] {
+        repo.write(
+            "package.json",
+            &json!({"private":true,"packageManager":format!("pnpm@{version}")}).to_string(),
+        );
+        let out = repo.cmd(CLI, &["converge", "HEAD"]);
+        assert!(out.status.success(), "{version}: {}", report(&out));
+        let result = graph(&out.stdout);
+        assert_eq!(result["importers"], original["importers"]);
+        assert_eq!(result["snapshots"], original["snapshots"]);
+    }
 }
 
 #[test]

@@ -20,6 +20,9 @@ fn project_conflicts(
     for project in projects {
         workspaces
             .push(Members::new(project).map_err(|e| format!("{prefix}pnpm-workspace.yaml: {e}"))?);
+        if project.config["ignorePnpmfile"] != true {
+            inputs.extend(workspace::DEFAULT_HOOK_FILES.into_iter().map(str::to_owned));
+        }
         inputs.extend(workspace::file_inputs(&project.config)?);
     }
     workspace::check_conflicts(conflicts, |path| {

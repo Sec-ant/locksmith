@@ -63,7 +63,7 @@ fn published_dependency_uses_local_children_and_separate_peer_instances() {
 
 #[test]
 fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge() {
-    for explicit in [Some("^1"), None] {
+    for (explicit, ignored) in [(Some("^1"), false), (None, false), (None, true)] {
         let manifests = BTreeMap::from([
             (".".to_owned(), json!({})),
             (
@@ -72,11 +72,15 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
             ),
             ("b".to_owned(), json!({"dependencies":{"widget":"1"}})),
         ]);
-        let lock = Lockfile::parse(
-            &json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}}).to_string(),
-        )
-        .unwrap();
-        let cfg = WorkspaceConfig::default();
+        let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}});
+        let cfg = if ignored {
+            let settings = json!({"ignoredOptionalDependencies":["plugin"]});
+            doc["ignoredOptionalDependencies"] = settings["ignoredOptionalDependencies"].clone();
+            WorkspaceConfig::from_pnpm(&settings).unwrap()
+        } else {
+            WorkspaceConfig::default()
+        };
+        let lock = Lockfile::parse(&doc.to_string()).unwrap();
         let mut data = RegistryMetadata::default();
         for (name, selector) in [("widget", "1"), ("plugin", "1.0.0")] {
             let mut package = json!({"name":name,"version":"1.0.0","dist":{"integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}});
@@ -84,6 +88,9 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
                 package["peerDependencies"] = json!({"widget":"^1","undeclared":"not a range"});
                 if let Some(range) = explicit {
                     package["peerDependencies"]["plugin"] = range.into();
+                }
+                if ignored {
+                    package["optionalDependencies"] = json!({"plugin":"^2"});
                 }
                 package["peerDependenciesMeta"] =
                     json!({"plugin":{"optional":true},"undeclared":{"optional":true}});

@@ -19,9 +19,9 @@ pub const CONFIG_FILES: &[&str] = &[
     "package.yaml",
     "pnpm-workspace.yaml",
     ".npmrc",
-    ".pnpmfile.cjs",
-    ".pnpmfile.mjs",
 ];
+
+pub const DEFAULT_HOOK_FILES: [&str; 2] = [".pnpmfile.mjs", ".pnpmfile.cjs"];
 
 pub fn check_conflicts(
     conflicts: &BTreeSet<String>,
@@ -246,11 +246,14 @@ fn hook_candidates(config: &Value, major: Option<u64>) -> Result<Vec<String>> {
             .collect(),
         Some(_) => Err("pnpmfile expects a path or a list of paths".into()),
         None if major.is_some_and(|v| v < 11) => Ok(vec![".pnpmfile.cjs".into()]),
-        None => Ok(vec![".pnpmfile.mjs".into(), ".pnpmfile.cjs".into()]),
+        None => Ok(DEFAULT_HOOK_FILES.into_iter().map(str::to_owned).collect()),
     }
 }
 
 pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
+    if config["ignorePnpmfile"] == true {
+        return Ok(Vec::new());
+    }
     if config.get("pnpmfile").is_some() {
         return hook_candidates(config, None);
     }

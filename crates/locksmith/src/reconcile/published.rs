@@ -115,7 +115,10 @@ fn published_declarations(
         if meta["optional"] == true
             && raw["peerDependencies"].get(name).is_none()
             && (!exclude_self || own_name != Some(name))
-            && raw["optionalDependencies"].get(name).is_none()
+            && declarations
+                .ordinary
+                .get(name)
+                .is_none_or(|(group, _)| *group != "optionalDependencies")
             && (fallback || raw["dependencies"].get(name).is_none())
         {
             declarations.peers.insert(name.clone(), ("*".into(), true));
@@ -386,10 +389,10 @@ pub(crate) fn records(
             }
         }
         // A dependency of the same name serves a peer the release declares.
-        let peers = declarations.peers.iter().filter(|(name, _)| {
-            raw["dependencies"].get(*name).is_none()
-                && raw["optionalDependencies"].get(*name).is_none()
-        });
+        let peers = declarations
+            .peers
+            .iter()
+            .filter(|(name, _)| !declarations.ordinary.contains_key(*name));
         let mut body = json!({});
         for (name, field, spec, peer) in declarations
             .ordinary
