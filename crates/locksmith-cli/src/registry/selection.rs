@@ -5,9 +5,17 @@ use node_semver::{Range, Version};
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Deserialize)]
-struct ReleaseStatus<'a> {
-    deprecated: Option<&'a str>,
+fn deprecated(publication: &serde_json::value::RawValue) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Status {
+        deprecated: Option<Value>,
+    }
+    match serde_json::from_str::<Status>(publication.get())?.deprecated {
+        None => Ok(false),
+        Some(Value::Bool(flag)) => Ok(flag),
+        Some(Value::String(message)) => Ok(!message.is_empty()),
+        Some(_) => Err("expected a deprecation message or boolean in registry metadata".into()),
+    }
 }
 
 fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
@@ -102,11 +110,7 @@ impl Registry {
                     {
                         continue;
                     }
-                    if skip_deprecated
-                        && serde_json::from_str::<ReleaseStatus>(manifest.get())?
-                            .deprecated
-                            .is_some_and(|s| !s.is_empty())
-                    {
+                    if skip_deprecated && deprecated(manifest)? {
                         continue;
                     }
                     result = Some((parsed, version));
@@ -116,9 +120,7 @@ impl Registry {
             let chosen = best(false)?;
             if let Some(version) = chosen
                 && !lowest
-                && serde_json::from_str::<ReleaseStatus>(doc.versions[version].get())?
-                    .deprecated
-                    .is_some_and(|s| !s.is_empty())
+                && deprecated(&doc.versions[version])?
             {
                 return Ok(best(true)?.or(chosen));
             }

@@ -39,31 +39,49 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
     let (Some(files), Some(hash)) = (input.as_object(), recorded.as_str()) else {
         return false;
     };
-    let mut files: Vec<_> = files.iter().collect();
-    files.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     if !hash.starts_with("sha256-") {
         return files.len() == 1
-            && files[0].1.as_str().is_some_and(|s| {
-                crate::peer::patch_hash(s, crate::PatchEncoding::Md5Base32WithPath) == hash
-            });
+            && files
+                .values()
+                .next()
+                .and_then(Value::as_str)
+                .is_some_and(|content| {
+                    crate::peer::patch_hash(content, crate::PatchEncoding::Md5Base32WithPath)
+                        == hash
+                });
     }
-    let digest = |s: &str| {
-        format!(
-            "sha256-{}",
-            base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(s.as_bytes()))
-        )
-    };
-    let Some(hashes) = files
-        .into_iter()
-        .map(|(_, v)| Some(digest(&v.as_str()?.replace("\r\n", "\n"))))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return false;
-    };
+    let mut hashes = Vec::with_capacity(files.len());
+    for (path, content) in files {
+        let Some(content) = content.as_str() else {
+            return false;
+        };
+        hashes.push((path, sha256(&content.replace("\r\n", "\n"))));
+    }
     match hashes.as_slice() {
-        [only] => only == hash,
-        many => digest(&many.join(",")) == hash,
+        // pnpm 12 records an empty-list digest when only a global hook is active.
+        [] => return sha256("") == hash,
+        [(_, digest)] => return digest == hash,
+        _ => {}
     }
+    // Older pnpm sorts paths as JavaScript strings. pnpm 12 uses Rust Path order.
+    let combined = |path_order| {
+        let mut ordered: Vec<_> = hashes.iter().collect();
+        if path_order {
+            ordered.sort_by(|(a, _), (b, _)| std::path::Path::new(a).cmp(std::path::Path::new(b)));
+        } else {
+            ordered.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+        }
+        let parts: Vec<_> = ordered.iter().map(|(_, digest)| digest.as_str()).collect();
+        sha256(&parts.join(","))
+    };
+    combined(false) == hash || combined(true) == hash
+}
+
+fn sha256(text: &str) -> String {
+    format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(text.as_bytes()))
+    )
 }
 
 fn calculate(value: &Value, legacy: bool) -> String {
@@ -76,10 +94,7 @@ fn calculate(value: &Value, legacy: bool) -> String {
             .collect()
     } else {
         object_hash(value, &mut text);
-        format!(
-            "sha256-{}",
-            base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(text.as_bytes()))
-        )
+        sha256(&text)
     }
 }
 

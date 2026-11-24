@@ -124,7 +124,14 @@ pub(super) fn repair<'a>(
                 // pnpm accepts a satisfied importer even when the lock contains
                 // no snapshot for this catalog entry.
                 let current = result["catalogs"][catalog].get(name);
-                if retained.is_none() || current.is_some_and(|entry| !catalog_fits(range, entry)) {
+                let entry_fits = |entry: &Value| {
+                    if workspace_link.is_some() {
+                        reconcile::metadata::catalog_link_entry_fits(range, entry)
+                    } else {
+                        catalog_fits(range, entry)
+                    }
+                };
+                if retained.is_none() || current.is_some_and(|entry| !entry_fits(entry)) {
                     let proposed = metadata["catalogs"][catalog].get(name);
                     let entry = if let Some(entry) = proposed.filter(|e| catalog_fits(range, e)) {
                         entry.clone()

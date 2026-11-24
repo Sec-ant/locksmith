@@ -1,15 +1,168 @@
 //! Add published releases to the set of graph sources under final workspace policy.
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
 };
 
+use indexmap::IndexMap;
 use serde_json::{Map, json};
 
 use super::{MergeContext, accepts, alias, desired_patch, missing, reference};
 use crate::{
     LockfileError, RegistryMetadata, RegistryRequest, Value, WorkspaceConfig, graph, manifest,
 };
+
+// These pnpm releases started recording a declared peer even when only its
+// ordinary dependency supplied it in the resolved graph (pnpm issue #17056).
+fn records_fallback_peers(config: &WorkspaceConfig) -> bool {
+    use node_semver::Version;
+    config
+        .pnpm_version
+        .as_ref()
+        .is_none_or(|v| match v.major() {
+            11 => v >= &Version::from((11, 28, 7)),
+            12 => v >= &Version::from((12, 15, 0)),
+            major => major > 12,
+        })
+}
+
+/// The edges and peers pnpm resolves from a published manifest once the
+/// workspace overrides apply.
+#[derive(Default)]
+struct PublishedDeclarations {
+    /// Group and selector by alias, in manifest order.
+    ordinary: IndexMap<String, (&'static str, String)>,
+    /// Range and optionality by peer name.
+    peers: BTreeMap<String, (String, bool)>,
+}
+
+fn published_declarations(
+    raw: &Value,
+    key: &str,
+    rules: &manifest::Overrides<'_>,
+    config: &WorkspaceConfig,
+    needed: &mut BTreeSet<String>,
+) -> Result<PublishedDeclarations, LockfileError> {
+    let bundle = raw
+        .get("bundledDependencies")
+        .or_else(|| raw.get("bundleDependencies"));
+    // pnpm 9.15.1 removed a package's own name from its peer requirements.
+    let exclude_self = config
+        .pnpm_version
+        .as_ref()
+        .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
+    // pnpm 12 before 12.17 used the promoted selector for an existing optional edge.
+    let promotes_over_optional = config
+        .pnpm_version
+        .as_ref()
+        .is_some_and(|v| v.major() == 12 && v < &node_semver::Version::from((12, 17, 0)));
+    let own_name = raw["name"].as_str();
+    let ignored = config
+        .resolution
+        .ignored_optional_dependencies
+        .as_ref()
+        .and_then(Value::as_array);
+    let mut declarations = PublishedDeclarations::default();
+    let mut removed_dependencies = BTreeSet::new();
+    let mut removed_optional = BTreeSet::new();
+    let mut effective_optional = BTreeSet::new();
+    for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        let Some(entries) = raw.get(group) else {
+            continue;
+        };
+        for (name, value) in entries
+            .as_object()
+            .ok_or_else(|| missing(&[key, group], "expected a dependency mapping"))?
+        {
+            let value = value
+                .as_str()
+                .ok_or_else(|| missing(&[key, group, name], "expected a dependency selector"))?;
+            let replacement = rules.select(raw, name, value)?;
+            let spec = match replacement {
+                Some(value) => rules.resolve(".", name, value)?,
+                None => Some(Cow::Borrowed(value)),
+            };
+            let Some(mut spec) = spec else {
+                if group == "dependencies" {
+                    removed_dependencies.insert(name.as_str());
+                }
+                continue;
+            };
+            let promoted = group == "peerDependencies"
+                && replacement.is_some()
+                && !manifest::valid_peer_range(&spec);
+            // pnpm drops a same-name ordinary edge when ignoring an optional
+            // dependency. The peer's original range then applies again.
+            let restore_peer = promoted && removed_optional.contains(name.as_str());
+            if restore_peer {
+                spec = Cow::Borrowed(value);
+            }
+            // Only explicit selectors seed candidate reuse from the input locks.
+            if let Some(request) = lookup(name, &spec, config) {
+                needed.insert(request.name().to_owned());
+            }
+            if group == "peerDependencies" && (!promoted || restore_peer) {
+                if !exclude_self || own_name != Some(name) {
+                    let optional = raw["peerDependenciesMeta"][name]["optional"] == true;
+                    declarations
+                        .peers
+                        .insert(name.clone(), (spec.into_owned(), optional));
+                }
+                continue;
+            }
+            if group == "optionalDependencies" {
+                if ignored.is_some_and(|a| a.iter().any(|v| v == name)) {
+                    removed_optional.insert(name.as_str());
+                    continue;
+                }
+                // Bundling removes the snapshot edge, but the declaration still applies.
+                effective_optional.insert(name.as_str());
+            }
+            if (group == "dependencies" && raw["optionalDependencies"].get(name).is_some())
+                || bundle.is_some_and(|v| {
+                    v == true || v.as_array().is_some_and(|a| a.iter().any(|v| v == name))
+                })
+            {
+                continue;
+            }
+            let group = if promoted {
+                match declarations.ordinary.get(name) {
+                    Some(("optionalDependencies", _)) if promotes_over_optional => {
+                        "optionalDependencies"
+                    }
+                    Some(("optionalDependencies", _)) => continue,
+                    _ => "dependencies",
+                }
+            } else {
+                group
+            };
+            declarations
+                .ordinary
+                .insert(name.clone(), (group, spec.into_owned()));
+        }
+    }
+    // Optional metadata alone can declare a peer without a selector.
+    let fallback = records_fallback_peers(config);
+    for (name, meta) in graph::section(raw, "peerDependenciesMeta")
+        .into_iter()
+        .flatten()
+    {
+        // Bundled dependencies still supply the peer without a snapshot edge.
+        let suppress_fallback = !fallback
+            && raw["dependencies"].get(name).is_some()
+            && !removed_dependencies.contains(name.as_str())
+            && !removed_optional.contains(name.as_str());
+        if meta["optional"] == true
+            && raw["peerDependencies"].get(name).is_none()
+            && (!exclude_self || own_name != Some(name))
+            && !effective_optional.contains(name.as_str())
+            && !suppress_fallback
+        {
+            declarations.peers.insert(name.clone(), ("*".into(), true));
+        }
+    }
+    Ok(declarations)
+}
 
 fn request(error: LockfileError, lookup: Option<RegistryRequest>) -> LockfileError {
     match error {
@@ -202,17 +355,8 @@ pub(crate) fn records(
     {
         let publication = &registry.releases[key];
         let raw = effective_manifest(&publication.manifest, config)?;
-        for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
-            for (name, value) in graph::section(&raw, group).into_iter().flatten() {
-                if let Some(range) = value.as_str()
-                    && let Some(spec) = rules.apply(&raw, ".", name, range)?
-                    && let Some(request) = lookup(name, &spec, config)
-                {
-                    needed.insert(request.name().to_owned());
-                }
-            }
-        }
-        releases.push((key, publication, raw));
+        let declarations = published_declarations(&raw, key, &rules, config, &mut needed)?;
+        releases.push((key, publication, raw, declarations));
     }
     let mut index: HashMap<&str, Vec<&str>> = HashMap::new();
     if !needed.is_empty() {
@@ -235,10 +379,8 @@ pub(crate) fn records(
             }
         }
     }
-    let locked = |name: &str, spec: &str| -> Option<String> {
-        let request = lookup(name, spec, config)?;
-        let actual = request.name();
-        index.get(actual)?.iter().find_map(|key| {
+    let locked = |name: &str, spec: &str, request: &RegistryRequest| -> Option<String> {
+        index.get(request.name())?.iter().find_map(|key| {
             let value = reference(name, key);
             (accepts(name, spec, &value, metadata)
                 && desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
@@ -253,7 +395,7 @@ pub(crate) fn records(
     if let Some(patches) = metadata.get("patchedDependencies") {
         output["patchedDependencies"] = patches.clone();
     }
-    for (key, publication, raw) in releases {
+    for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
             .filter_map(|doc| doc["packages"][key]["resolution"].get("integrity"))
@@ -265,114 +407,71 @@ pub(crate) fn records(
             ));
         }
         let mut package = package_record(&raw, &publication.resolution);
-        let bundle = raw
-            .get("bundledDependencies")
-            .or_else(|| raw.get("bundleDependencies"));
-        let mut body = json!({});
-        for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
-            let Some(deps) = raw.get(group) else { continue };
-            for (name, spec) in deps
-                .as_object()
-                .ok_or_else(|| missing(&[key, group], "invalid published dependency mapping"))?
-            {
-                if group == "dependencies" && raw["optionalDependencies"].get(name).is_some() {
-                    continue;
-                }
-                if group == "optionalDependencies"
-                    && config
-                        .resolution
-                        .ignored_optional_dependencies
-                        .as_ref()
-                        .and_then(Value::as_array)
-                        .is_some_and(|a| a.iter().any(|v| v == name))
-                {
-                    continue;
-                }
-                if group != "peerDependencies"
-                    && bundle.is_some_and(|v| {
-                        v.as_bool() == Some(true)
-                            || v.as_array()
-                                .is_some_and(|arr| arr.iter().any(|x| x == name))
-                    })
-                {
-                    continue;
-                }
-                let spec = spec.as_str().ok_or_else(|| {
-                    missing(
-                        &[key, group, name],
-                        "invalid published dependency declaration",
-                    )
-                })?;
-                let Some(spec) = rules.apply(&raw, ".", name, spec)? else {
-                    continue;
-                };
-                let is_peer =
-                    group == "peerDependencies" && spec.parse::<node_semver::Range>().is_ok();
-                let optional = raw["peerDependenciesMeta"][name]["optional"] == true;
-                if is_peer {
-                    package["peerDependencies"][name] = spec.as_ref().into();
-                    if optional {
-                        package["peerDependenciesMeta"][name] = json!({"optional":true});
-                    }
-                    if raw["dependencies"].get(name).is_some()
-                        || raw["optionalDependencies"].get(name).is_some()
-                    {
-                        continue;
-                    }
-                }
-                let published = || {
-                    let req = lookup(name, &spec, config)?;
-                    let locator = registry.selected(req.name(), req.selector()).or_else(|| {
-                        if !is_peer {
-                            return None;
-                        }
-                        // Another importer may supply this peer under a different
-                        // selector. The workspace resolver applies its actual scope.
-                        registry
-                            .selections
-                            .get(req.name())?
-                            .values()
-                            .find(|key| accepts(name, &spec, &reference(name, key), metadata))
-                    })?;
-                    let hash = desired_patch(
-                        locator,
-                        metadata,
-                        [docs[0], docs[1], docs[2], &Value::Null],
-                    )?;
-                    let locator = hash
-                        .map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
-                    Some(reference(name, &locator))
-                };
-                let value = locked(name, &spec).or_else(published);
-                if is_peer
-                    && value.is_none()
-                    && (optional
-                        || !config.resolution.lock.auto_install_peers
-                        || context
-                            .manifests
-                            .values()
-                            .any(|m| manifest::GROUPS.iter().any(|g| m[g].get(name).is_some())))
-                {
-                    continue;
-                }
-                let value = value.ok_or_else(|| {
-                    need_version(
-                        &["snapshots", key, name],
-                        name,
-                        &spec,
-                        config,
-                        format!("no locked resolution satisfies {spec}"),
-                    )
-                })?;
-                let field = if is_peer && optional {
-                    "optionalDependencies"
-                } else if group == "peerDependencies" {
-                    "dependencies"
-                } else {
-                    group
-                };
-                body[field][name] = value.into();
+        for (name, (spec, optional)) in &declarations.peers {
+            package["peerDependencies"][name] = spec.as_str().into();
+            if *optional {
+                package["peerDependenciesMeta"][name] = json!({"optional":true});
             }
+        }
+        // A dependency of the same name serves a peer the release declares.
+        let peers = declarations
+            .peers
+            .iter()
+            .filter(|(name, _)| !declarations.ordinary.contains_key(*name));
+        let mut body = json!({});
+        for (name, field, spec, peer) in declarations
+            .ordinary
+            .iter()
+            .map(|(name, (group, spec))| (name, *group, spec, None))
+            .chain(peers.map(|(name, (spec, optional))| {
+                let field = if *optional {
+                    "optionalDependencies"
+                } else {
+                    "dependencies"
+                };
+                (name, field, spec, Some(*optional))
+            }))
+        {
+            let published = |req: &RegistryRequest| {
+                let locator = registry.selected(req.name(), req.selector()).or_else(|| {
+                    peer?;
+                    // Another importer may supply this peer under a different
+                    // selector. The workspace resolver applies its actual scope.
+                    registry
+                        .selections
+                        .get(req.name())?
+                        .values()
+                        .find(|key| accepts(name, spec, &reference(name, key), metadata))
+                })?;
+                let hash =
+                    desired_patch(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
+                let locator =
+                    hash.map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
+                Some(reference(name, &locator))
+            };
+            let value = lookup(name, spec, config)
+                .and_then(|request| locked(name, spec, &request).or_else(|| published(&request)));
+            if let Some(optional) = peer
+                && value.is_none()
+                && (optional
+                    || !config.resolution.lock.auto_install_peers
+                    || context
+                        .manifests
+                        .values()
+                        .any(|m| manifest::GROUPS.iter().any(|g| m[g].get(name).is_some())))
+            {
+                continue;
+            }
+            let value = value.ok_or_else(|| {
+                need_version(
+                    &["snapshots", key, name],
+                    name,
+                    spec,
+                    config,
+                    format!("no locked resolution satisfies {spec}"),
+                )
+            })?;
+            body[field][name] = value.into();
         }
         let hash = desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
             .ok_or_else(|| missing(&["patchedDependencies", key], "competing patch selectors"))?;
@@ -386,10 +485,9 @@ pub(crate) fn records(
 fn package_record(raw: &Value, resolution: &Value) -> Value {
     let mut package = json!({"resolution":resolution});
     for field in ["os", "cpu", "libc", "deprecated"] {
-        if let Some(v) = raw
-            .get(field)
-            .filter(|v| !v.is_null() && v.as_str() != Some(""))
-        {
+        if let Some(v) = raw.get(field).filter(|v| {
+            !v.is_null() && v.as_str() != Some("") && (field != "deprecated" || *v != false)
+        }) {
             package[field] = v.clone();
         }
     }

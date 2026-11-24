@@ -19,9 +19,9 @@ pub const CONFIG_FILES: &[&str] = &[
     "package.yaml",
     "pnpm-workspace.yaml",
     ".npmrc",
-    ".pnpmfile.cjs",
-    ".pnpmfile.mjs",
 ];
+
+pub const DEFAULT_HOOK_FILES: [&str; 2] = [".pnpmfile.mjs", ".pnpmfile.cjs"];
 
 pub fn check_conflicts(
     conflicts: &BTreeSet<String>,
@@ -90,7 +90,12 @@ impl Project {
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
-        for name in hook_candidates(&config, version.as_ref().map(|v| v.major))? {
+        let candidates = if config["ignorePnpmfile"] == true {
+            Vec::new()
+        } else {
+            hook_candidates(&config, version.as_ref().map(|v| v.major()))?
+        };
+        for name in candidates {
             if let Some(contents) = read(&name)? {
                 hooks.insert(name, Value::String(contents));
                 if config.get("pnpmfile").is_none() {
@@ -129,9 +134,25 @@ pub fn settings(
         }
         None => json!({}),
     };
-    if version.as_ref().is_none_or(|v| v.major < 11)
-        && let Some(text) = read(".npmrc")?
-    {
+    // Read this hook setting only from the configuration files supported by pnpm.
+    config.as_object_mut().unwrap().remove("ignorePnpmfile");
+    let legacy = version.is_none_or(|v| v.major() < 11);
+    if legacy && let Some(resolutions) = root.get("resolutions") {
+        let mut overrides = resolutions
+            .as_object()
+            .ok_or("package.json: expected resolutions to be an object")?
+            .clone();
+        if let Some(value) = config.get("overrides") {
+            overrides.extend(
+                value
+                    .as_object()
+                    .ok_or("package.json: expected pnpm.overrides to be an object")?
+                    .clone(),
+            );
+        }
+        config["overrides"] = overrides.into();
+    }
+    if legacy && let Some(text) = read(".npmrc")? {
         legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
     }
     let workspace = read("pnpm-workspace.yaml")?;
@@ -139,7 +160,11 @@ pub fn settings(
         let settings: Option<serde_json::Map<String, Value>> =
             serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
         if let Some(mut settings) = settings {
-            if version.as_ref().is_some_and(|v| v.major == 9) {
+            // pnpm 10.6 added .npmrc options to pnpm-workspace.yaml.
+            if version.is_some_and(|v| v < &node_semver::Version::from((10, 6, 0))) {
+                settings.remove("ignorePnpmfile");
+            }
+            if version.as_ref().is_some_and(|v| v.major() == 9) {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [
                     "peersSuffixMaxLength",
@@ -224,11 +249,14 @@ fn hook_candidates(config: &Value, major: Option<u64>) -> Result<Vec<String>> {
             .collect(),
         Some(_) => Err("pnpmfile expects a path or a list of paths".into()),
         None if major.is_some_and(|v| v < 11) => Ok(vec![".pnpmfile.cjs".into()]),
-        None => Ok(vec![".pnpmfile.mjs".into(), ".pnpmfile.cjs".into()]),
+        None => Ok(DEFAULT_HOOK_FILES.into_iter().map(str::to_owned).collect()),
     }
 }
 
 pub fn hook_paths(config: &Value) -> Result<Vec<String>> {
+    if config["ignorePnpmfile"] == true {
+        return Ok(Vec::new());
+    }
     if config.get("pnpmfile").is_some() {
         return hook_candidates(config, None);
     }
@@ -259,6 +287,7 @@ pub fn file_inputs(config: &Value) -> Result<Vec<String>> {
 fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
     const FLAGS: &[(&str, &str)] = &[
         ("auto-install-peers", "autoInstallPeers"),
+        ("ignore-pnpmfile", "ignorePnpmfile"),
         ("dedupe-peers", "dedupePeers"),
         ("dedupe-peer-dependents", "dedupePeerDependents"),
         ("exclude-links-from-lockfile", "excludeLinksFromLockfile"),
@@ -278,14 +307,11 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = value.trim().trim_matches('"');
         if let Some((_, field)) = FLAGS.iter().find(|(flag, _)| key.trim() == *flag) {
-            config[field] = Value::Bool(
-                value
-                    .parse()
-                    .map_err(|_| format!("{key} expects true or false"))?,
-            );
+            config[field] =
+                Value::Bool(ini_bool(value).map_err(|_| format!("{key} expects true or false"))?);
         } else {
+            let value = value.trim().trim_matches('"');
             match key.trim() {
                 "link-workspace-packages" => {
                     config["linkWorkspacePackages"] = match value {
@@ -302,6 +328,22 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ini_bool(value: &str) -> std::result::Result<bool, std::str::ParseBoolError> {
+    let value = value.trim();
+    if let Some(quote @ ('"' | '\'')) = value.chars().next()
+        && let Some((quoted, rest)) = value[1..].split_once(quote)
+    {
+        let rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with(['#', ';']) {
+            return quoted.parse();
+        }
+    }
+    value
+        .split_once(['#', ';'])
+        .map_or(value, |(flag, _)| flag.trim_end())
+        .parse()
 }
 
 pub struct Members {

@@ -314,7 +314,7 @@ fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
             serde_saphyr::to_string(&cfg).unwrap(),
         )
         .unwrap();
-        if super::pnpm_version().major == 9 {
+        if super::pnpm_version().major() == 9 {
             fs::write(d.join(".npmrc"), "peers-suffix-max-length=4\n").unwrap();
         }
         let mut manifests = vec![];
@@ -393,7 +393,7 @@ fn adding_a_peer_preserves_the_consumers_other_binding_in_a_new_hashed_instance(
     let build = |name: &str, edited: bool, seed: &str| {
         let dir = tmp.path().join(name);
         fs::create_dir_all(&dir).unwrap();
-        if super::pnpm_version().major == 9 {
+        if super::pnpm_version().major() == 9 {
             fs::write(dir.join(".npmrc"), "peers-suffix-max-length=4\n").unwrap();
         }
         let mut peers = json!({"is-number":"^6 || ^7"});

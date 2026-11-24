@@ -121,6 +121,97 @@ fn a_valid_catalog_range_can_have_two_different_locked_versions() {
 }
 
 #[test]
+fn local_catalog_links_keep_the_recorded_catalog_shape() {
+    let manifests = BTreeMap::from([
+        (".".into(), json!({"dependencies":{"sdk":"catalog:"}})),
+        ("sdk".into(), json!({"name":"sdk","version":"1.2.0"})),
+    ]);
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"catalog":{"sdk":"^1"},"linkWorkspacePackages":true}))
+            .unwrap();
+    for version in [None, Some("1.2.0"), Some("^1")] {
+        let mut doc = json!({"lockfileVersion":"9.0","importers":{
+            ".":{"dependencies":{"sdk":{"specifier":"catalog:","version":"link:sdk"}}},
+            "sdk":{}
+        }});
+        if let Some(version) = version {
+            doc["catalogs"]["default"]["sdk"] = json!({"specifier":"^1","version":version});
+        }
+        let lock = doc.to_string();
+        let parsed = Lockfile::parse(&lock).unwrap();
+        locksmith::inspect(&parsed, &Default::default(), None).unwrap();
+        let repaired = repair(
+            &lock,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(repaired.project().unwrap(), &doc);
+    }
+}
+
+#[test]
+fn repair_keeps_the_pnpm_version_specific_group_of_a_linked_dev_peer() {
+    let manifests = BTreeMap::from([
+        (
+            ".".into(),
+            json!({"devDependencies":{"sdk":"^1"},"peerDependencies":{"sdk":"^1"}}),
+        ),
+        ("sdk".into(), json!({"name":"sdk","version":"1.2.0"})),
+    ]);
+    let settings = json!({"overrides":{"sdk":"link:sdk"}});
+    for (version, group) in [("12.16.1", "dependencies"), ("12.17.0", "devDependencies")] {
+        let config =
+            WorkspaceConfig::from_pnpm_version(&settings, &version.parse().unwrap()).unwrap();
+        let mut doc = json!({"lockfileVersion":"9.0","overrides":{"sdk":"link:sdk"},
+            "importers":{".":{},"sdk":{}}});
+        doc["importers"]["."][group]["sdk"] = json!({"specifier":"link:sdk","version":"link:sdk"});
+        let repaired = repair(
+            &doc.to_string(),
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(repaired.project().unwrap(), &doc);
+    }
+}
+
+#[test]
+fn repair_recognizes_pnpm12_hook_checksums_in_path_order() {
+    let doc = json!({"lockfileVersion":"9.0",
+        "pnpmfileChecksum":"sha256-9MLJWe9FUrG3CTTmxsnTx3igVKlNnaMgopkOVRnc8Qc=",
+        "importers":{".":{}}
+    });
+    let config = WorkspaceConfig::from_pnpm(&json!({"pnpmfileChecksum":{
+        "a-.cjs":"module.exports = { hooks: {} };\n",
+        "a/z.cjs":"module.exports = {};\n"
+    }}))
+    .unwrap();
+    let repaired = repair(
+        &doc.to_string(),
+        &RepairContext {
+            manifests: &BTreeMap::from([(".".into(), json!({}))]),
+            configuration: &config,
+            patches: &BTreeMap::new(),
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(repaired.project().unwrap(), &doc);
+}
+
+#[test]
 fn changes_one_stale_catalog_pin_and_preserves_all_other_bytes() {
     let source = LOCK
         .replace("^1.0.0", "1.0.0")

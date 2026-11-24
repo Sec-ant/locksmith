@@ -89,10 +89,20 @@ pub(crate) fn declarations<'a>(
             };
             let Some(effective) = effective else { continue };
             if field == "peerDependencies" {
-                // pnpm writes a non-peer override into regular dependencies,
-                // even if a devDependency on the same name already exists.
                 let promoted = replacement.is_some() && !valid_peer_range(&effective);
-                if !promoted && (!settings.auto_install_peers || result.contains_key(name.as_str()))
+                // pnpm 10 through 12.16 promoted a peer overridden to a local
+                // link even when the importer already declared it for development.
+                let replaces_dev = promoted
+                    && overrides
+                        .config
+                        .pnpm_version
+                        .as_ref()
+                        .is_none_or(|version| {
+                            version.major() >= 10
+                                && version < &node_semver::Version::from((12, 17, 0))
+                        });
+                if (!promoted && !settings.auto_install_peers)
+                    || (!replaces_dev && result.contains_key(name.as_str()))
                 {
                     continue;
                 }
@@ -106,7 +116,7 @@ pub(crate) fn declarations<'a>(
     Ok(result)
 }
 
-fn valid_peer_range(specifier: &str) -> bool {
+pub(crate) fn valid_peer_range(specifier: &str) -> bool {
     specifier.contains("workspace:")
         || specifier.contains("catalog:")
         || specifier.parse::<node_semver::Range>().is_ok()
@@ -431,7 +441,7 @@ impl<'a> Overrides<'a> {
         }
     }
 
-    fn select(
+    pub(crate) fn select(
         &self,
         manifest: &Value,
         name: &str,
@@ -503,7 +513,7 @@ impl<'a> Overrides<'a> {
             .map(String::as_str)
     }
 
-    fn resolve(
+    pub(crate) fn resolve(
         &self,
         importer: &str,
         name: &str,

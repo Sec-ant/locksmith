@@ -63,62 +63,274 @@ fn published_dependency_uses_local_children_and_separate_peer_instances() {
 
 #[test]
 fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge() {
-    let manifests = BTreeMap::from([
-        (".".to_owned(), json!({})),
-        (
-            "a".to_owned(),
-            json!({"dependencies":{"widget":"1","plugin":"1.0.0"}}),
-        ),
-        ("b".to_owned(), json!({"dependencies":{"widget":"1"}})),
-    ]);
-    let lock = Lockfile::parse(
-        &json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}}).to_string(),
-    )
-    .unwrap();
-    let cfg = WorkspaceConfig::default();
-    let mut data = RegistryMetadata::default();
-    for (name, selector) in [("widget", "1"), ("plugin", "1.0.0")] {
-        let mut package = json!({"name":name,"version":"1.0.0","dist":{"integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}});
-        if name == "widget" {
-            package["peerDependencies"] = json!({"plugin":"^1"});
-            package["peerDependenciesMeta"] = json!({"plugin":{"optional":true}});
+    for (explicit, ignored) in [(Some("^1"), false), (None, false), (None, true)] {
+        let manifests = BTreeMap::from([
+            (".".to_owned(), json!({})),
+            (
+                "a".to_owned(),
+                json!({"dependencies":{"widget":"1","plugin":"1.0.0"}}),
+            ),
+            ("b".to_owned(), json!({"dependencies":{"widget":"1"}})),
+        ]);
+        let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}});
+        let cfg = if ignored {
+            let settings = json!({"ignoredOptionalDependencies":["plugin"]});
+            doc["ignoredOptionalDependencies"] = settings["ignoredOptionalDependencies"].clone();
+            WorkspaceConfig::from_pnpm(&settings).unwrap()
+        } else {
+            WorkspaceConfig::default()
+        };
+        let lock = Lockfile::parse(&doc.to_string()).unwrap();
+        let mut data = RegistryMetadata::default();
+        for (name, selector) in [("widget", "1"), ("plugin", "1.0.0")] {
+            let mut package = json!({"name":name,"version":"1.0.0","dist":{"integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}});
+            if name == "widget" {
+                package["peerDependencies"] = json!({"widget":"^1","undeclared":"not a range"});
+                if let Some(range) = explicit {
+                    package["peerDependencies"]["plugin"] = range.into();
+                }
+                if ignored {
+                    package["optionalDependencies"] = json!({"plugin":"^2"});
+                }
+                package["peerDependenciesMeta"] =
+                    json!({"plugin":{"optional":true},"undeclared":{"optional":true}});
+            }
+            data.insert(
+                &RegistryRequest::Version {
+                    name: name.into(),
+                    selector: selector.into(),
+                },
+                package,
+                "https://example.org/",
+                false,
+            )
+            .unwrap();
         }
-        data.insert(
-            &RegistryRequest::Version {
-                name: name.into(),
-                selector: selector.into(),
-            },
-            package,
-            "https://example.org/",
-            false,
+        let graph = merge(
+            &lock,
+            &lock,
+            &lock,
+            Some(&MergeContext {
+                registry: Some(&data),
+                target: MergeTarget::Ours,
+                configuration: &cfg,
+                configurations: [&cfg; 3],
+                manifests: &manifests,
+                patches: &BTreeMap::new(),
+            }),
         )
         .unwrap();
-    }
-    let graph = merge(
-        &lock,
-        &lock,
-        &lock,
-        Some(&MergeContext {
-            registry: Some(&data),
-            target: MergeTarget::Ours,
-            configuration: &cfg,
-            configurations: [&cfg; 3],
-            manifests: &manifests,
-            patches: &BTreeMap::new(),
-        }),
-    )
-    .unwrap();
-    let doc = graph.project().unwrap();
-    for id in ["a", "b"] {
+        let doc = graph.project().unwrap();
         assert_eq!(
-            doc["importers"][id]["dependencies"]["widget"]["version"],
-            "1.0.0(plugin@1.0.0)"
+            doc["packages"]["widget@1.0.0"]["peerDependencies"],
+            json!({"plugin":explicit.unwrap_or("*"),"undeclared":"not a range"})
+        );
+        for id in ["a", "b"] {
+            assert_eq!(
+                doc["importers"][id]["dependencies"]["widget"]["version"],
+                "1.0.0(plugin@1.0.0)"
+            );
+        }
+        assert_eq!(
+            doc["snapshots"]["widget@1.0.0(plugin@1.0.0)"],
+            json!({"optionalDependencies":{"plugin":"1.0.0"}})
         );
     }
-    assert_eq!(
-        doc["snapshots"]["widget@1.0.0(plugin@1.0.0)"],
-        json!({"optionalDependencies":{"plugin":"1.0.0"}})
-    );
+}
+
+#[test]
+fn published_optional_peer_is_restored_after_its_dependency_is_removed() {
+    let required = json!({"dependencies":{"plugin":"1.0.0"}});
+    let bundled = json!({"dependencies":{"plugin":"1.0.0"},"bundledDependencies":["plugin"]});
+    let bundled_optional =
+        json!({"optionalDependencies":{"plugin":"1.0.0"},"bundledDependencies":["plugin"]});
+    let duplicate =
+        json!({"dependencies":{"plugin":"1.0.0"},"optionalDependencies":{"plugin":"1.0.0"}});
+    for (case, fields, remove, ignore, expect_peer) in [
+        ("removed", &required, true, false, true),
+        ("kept", &required, false, false, false),
+        ("bundled", &bundled, false, false, false),
+        ("bundled and removed", &bundled, true, false, true),
+        ("bundled optional", &bundled_optional, false, false, false),
+        (
+            "bundled optional and removed",
+            &bundled_optional,
+            true,
+            false,
+            true,
+        ),
+        (
+            "bundled optional and ignored",
+            &bundled_optional,
+            false,
+            true,
+            true,
+        ),
+        ("duplicate and ignored", &duplicate, false, true, true),
+    ] {
+        let mut settings = json!({});
+        if remove {
+            settings["overrides"] = json!({"widget>plugin":"-"});
+        }
+        if ignore {
+            settings["ignoredOptionalDependencies"] = json!(["plugin"]);
+        }
+        let cfg =
+            WorkspaceConfig::from_pnpm_version(&settings, &"10.34.9".parse().unwrap()).unwrap();
+        let mut doc = settings;
+        doc["lockfileVersion"] = "9.0".into();
+        doc["importers"] = json!({".":{}});
+        let lock = Lockfile::parse(&doc.to_string()).unwrap();
+        let mut data = RegistryMetadata::default();
+        for (name, version) in [
+            ("widget", "1.0.0"),
+            ("plugin", "1.0.0"),
+            ("plugin", "2.0.0"),
+        ] {
+            let mut package = json!({"name":name,"version":version,"dist":{
+                "integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+                "tarball":format!("https://example.org/{name}/-/{name}-{version}.tgz")
+            }});
+            if name == "widget" {
+                package
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                package["peerDependenciesMeta"] = json!({"plugin":{"optional":true}});
+            }
+            data.insert(
+                &RegistryRequest::Version {
+                    name: name.into(),
+                    selector: version.into(),
+                },
+                package,
+                "https://example.org/",
+                false,
+            )
+            .unwrap();
+        }
+        let manifests = BTreeMap::from([(
+            ".".into(),
+            json!({"dependencies":{"widget":"1.0.0","plugin":"2.0.0"}}),
+        )]);
+        let result = merge(
+            &lock,
+            &lock,
+            &lock,
+            Some(&MergeContext {
+                registry: Some(&data),
+                target: MergeTarget::Ours,
+                configuration: &cfg,
+                configurations: [&cfg; 3],
+                manifests: &manifests,
+                patches: &BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let doc = result.project().unwrap();
+        let package = &doc["packages"]["widget@1.0.0"];
+        if expect_peer {
+            assert_eq!(package["peerDependencies"], json!({"plugin":"*"}), "{case}");
+            assert_eq!(
+                package["peerDependenciesMeta"],
+                json!({"plugin":{"optional":true}}),
+                "{case}"
+            );
+            assert_eq!(
+                doc["snapshots"]["widget@1.0.0(plugin@2.0.0)"],
+                json!({"optionalDependencies":{"plugin":"2.0.0"}}),
+                "{case}"
+            );
+        } else {
+            assert!(package.get("peerDependencies").is_none(), "{case}");
+            assert!(package.get("peerDependenciesMeta").is_none(), "{case}");
+        }
+    }
+}
+
+#[test]
+fn published_optional_dependency_takes_precedence_over_an_overridden_peer() {
+    let mut registry = RegistryMetadata::default();
+    for (name, version) in [
+        ("widget", "1.0.0"),
+        ("plugin", "1.0.0"),
+        ("plugin", "2.0.0"),
+        ("replacement", "1.0.0"),
+    ] {
+        let mut package = json!({"name":name,"version":version,"dist":{
+            "integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            "tarball":format!("https://example.org/{name}/-/{name}-{version}.tgz")
+        }});
+        if name == "widget" {
+            package["optionalDependencies"] = json!({"plugin":"2.0.0"});
+            package["peerDependencies"] = json!({"plugin":"1.0.0"});
+        }
+        registry
+            .insert(
+                &RegistryRequest::Version {
+                    name: name.into(),
+                    selector: version.into(),
+                },
+                package,
+                "https://example.org/",
+                false,
+            )
+            .unwrap();
+    }
+
+    for (version, optional_pin) in [
+        ("10.34.9", Some("2.0.0")),
+        ("12.15.0", Some("replacement@1.0.0")),
+        ("12.21.0", Some("2.0.0")),
+        ("12.15.0", None),
+        ("12.21.0", None),
+    ] {
+        let overrides = json!({"widget>plugin@1.0.0":"npm:replacement@1.0.0"});
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"overrides":overrides});
+        let mut settings = json!({"overrides":overrides});
+        if optional_pin.is_none() {
+            settings["ignoredOptionalDependencies"] = json!(["plugin"]);
+            lock["ignoredOptionalDependencies"] = json!(["plugin"]);
+        }
+        let lock = Lockfile::parse(&lock.to_string()).unwrap();
+        let cfg = WorkspaceConfig::from_pnpm_version(&settings, &version.parse().unwrap()).unwrap();
+        let out = merge(
+            &lock,
+            &lock,
+            &lock,
+            Some(&MergeContext {
+                registry: Some(&registry),
+                target: MergeTarget::Ours,
+                configuration: &cfg,
+                configurations: [&cfg; 3],
+                manifests: &BTreeMap::from([(
+                    ".".into(),
+                    json!({"dependencies":{"widget":"1.0.0"}}),
+                )]),
+                patches: &BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let doc = out.project().unwrap();
+        let instance = doc["importers"]["."]["dependencies"]["widget"]["version"]
+            .as_str()
+            .unwrap();
+        let body = &doc["snapshots"][format!("widget@{instance}")];
+        let peers = &doc["packages"]["widget@1.0.0"]["peerDependencies"];
+        if let Some(pin) = optional_pin {
+            assert_eq!(instance, "1.0.0");
+            assert_eq!(
+                body,
+                &json!({"optionalDependencies":{"plugin":pin}}),
+                "{version}"
+            );
+            assert!(peers.is_null());
+        } else {
+            assert_eq!(instance, "1.0.0(plugin@1.0.0)");
+            assert_eq!(body, &json!({"dependencies":{"plugin":"1.0.0"}}));
+            assert_eq!(peers, &json!({"plugin":"1.0.0"}));
+        }
+    }
 }
 
 #[test]
