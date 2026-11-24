@@ -1,6 +1,6 @@
 # locksmith
 
-Locksmith merges pnpm lockfiles, keeps unrelated dependency changes out of your diff, and traces peer dependency issues to the workspaces they affect.
+Locksmith merges and validates pnpm lockfiles, keeps unrelated dependency changes out of your diff, and traces peer dependency issues to the workspaces they affect.
 
 When `pnpm-lock.yaml` conflicts during a merge or rebase, regenerating it can change unrelated versions and peer bindings. Even with the original lockfile in place, a dependency edit can change how pnpm resolves peers in other workspace projects.
 
@@ -11,6 +11,7 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 | Two branches changed the lockfile                                                   | [`merge`](#merge-two-branches)                            |
 | You edited dependencies and `pnpm install` changed more than you expected           | [`converge`](#reduce-changes-after-an-install)            |
 | Git already merged the lockfile, but some records are duplicated, stale, or missing | [`repair`](#repair-an-already-merged-lockfile)            |
+| You want to check a lockfile for errors before merging                              | [`validate`](#validate-a-lockfile)                        |
 | You want to trace a peer warning or find packages with multiple locked instances    | [`inspect`](#inspect-peer-bindings-and-package-instances) |
 
 ## Install
@@ -99,6 +100,12 @@ git diff --no-index pnpm-lock.yaml repaired.yaml
 
 A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
 
+## Validate a lockfile
+
+Run `locksmith validate [FILE]` to check YAML structure and internal references, including duplicate keys and missing snapshots. The path defaults to `pnpm-lock.yaml` in the current directory. The check only reads the lockfile and runs offline.
+
+In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also depends on the workspace manifests, settings, and package availability.
+
 ## Inspect peer bindings and package instances
 
 Run `pnpm locksmith inspect` from the workspace for a text report, or pass a lockfile path. Use `--json` for structured output.
@@ -115,7 +122,8 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 - On success, `merge`, `converge`, and `repair` write YAML to stdout. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
 - Diagnostics go to stderr.
-- Exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
+- `validate` is silent on success (`0`). It returns `1` for an invalid lockfile and `2` when it cannot check the file, for example if the file is unreadable or uses an unsupported format version.
+- For other commands, exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
 - The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
 
 ## Optional registry access

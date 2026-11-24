@@ -639,7 +639,7 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
     assert!(!help.stdout.is_empty());
     assert_eq!(bare.stdout, help.stdout);
     assert!(bare.stderr.is_empty());
-    for name in ["merge", "converge", "repair"] {
+    for name in ["merge", "converge", "repair", "validate"] {
         let out = run(&[name, "--help"]);
         assert!(out.status.success());
         let alias = run(&["help", name]);
@@ -1191,6 +1191,64 @@ fn check_partial_clone(multiple_remotes: bool) {
                 .any(|line| line.strip_prefix('?') == Some(oid.trim()))
         );
     }
+}
+
+#[test]
+fn validate_checks_a_standalone_lockfile_without_writing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(CLI)
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let valid = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {tarball: https://example.org/foo-1.0.0.tgz}
+snapshots:
+  foo@1.0.0: {}
+";
+    let default_file = dir.path().join("pnpm-lock.yaml");
+    fs::write(&default_file, valid).unwrap();
+    let ok = run(&["validate"]);
+    assert_eq!(ok.status.code(), Some(0), "{}", report(&ok));
+    assert!(ok.stdout.is_empty() && ok.stderr.is_empty());
+    assert_eq!(fs::read_to_string(default_file).unwrap(), valid);
+
+    let candidate = dir.path().join("candidate.yaml");
+    for (input, status, diagnostic) in [
+        (format!("{valid}  foo@1.0.0: {{}}\n"), 1, "duplicate"),
+        (
+            valid.replace("snapshots:\n  foo@1.0.0: {}", "snapshots: {}"),
+            1,
+            "missing snapshot foo@1.0.0",
+        ),
+        (
+            "lockfileVersion: '6.0'\n".into(),
+            2,
+            "unsupported lockfileVersion",
+        ),
+    ] {
+        fs::write(&candidate, &input).unwrap();
+        let result = run(&["validate", "candidate.yaml"]);
+        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+        assert_eq!(fs::read_to_string(&candidate).unwrap(), input);
+    }
+    let missing = run(&["validate", "missing.yaml"]);
+    assert_eq!(missing.status.code(), Some(2), "{}", report(&missing));
+    assert!(missing.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("missing.yaml"));
 }
 
 #[test]
