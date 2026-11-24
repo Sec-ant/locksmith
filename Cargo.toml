@@ -13,7 +13,7 @@ serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 serde-saphyr = { version = "2.1.1", default-features = false, features = ["serialize", "deserialize"] }
 thiserror = "1"
-node-semver = "2.2"
+node-semver = { package = "nodejs-semver", version = "7", features = ["serde"] }
 sha2 = "0.10"
 md-5 = "0.10"
 base64 = "0.23"

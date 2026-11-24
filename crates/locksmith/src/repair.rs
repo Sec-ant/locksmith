@@ -129,7 +129,7 @@ pub(crate) fn check_recorded_settings(
     cfg: &WorkspaceConfig,
 ) -> Result<(), LockfileError> {
     let settings = &doc["settings"];
-    let major = cfg.pnpm_version.as_ref().map(|v| v.major);
+    let major = cfg.pnpm_version.as_ref().map(|v| v.major());
     let parameters = &cfg.resolution.parameters;
     let default_suffix = Value::from(1000);
     let disabled = Value::Bool(false);

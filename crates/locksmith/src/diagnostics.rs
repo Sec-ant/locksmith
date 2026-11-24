@@ -3,7 +3,7 @@
 mod range;
 
 use crate::{Lockfile, LockfileError, Value, graph, manifest};
-use nodejs_semver::Version;
+use node_semver::Version;
 pub(crate) use range::PeerRange;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -28,7 +28,7 @@ pub enum PeerVersionMatching {
 }
 impl PeerVersionMatching {
     pub fn for_pnpm(version: Option<&node_semver::Version>) -> Self {
-        match version.map(|v| v.major) {
+        match version.map(|v| v.major()) {
             Some(9) => Self::Pnpm9,
             Some(10) => Self::ReleaseCompatible,
             Some(11) => Self::Pnpm11,

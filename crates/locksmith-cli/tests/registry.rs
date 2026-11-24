@@ -160,6 +160,52 @@ fn registry_selection_uses_scope_auth_release_age_and_a_single_metadata_request(
 }
 
 #[test]
+fn merge_resolves_partial_upper_bounds_with_boolean_deprecation_metadata() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([(
+        "widget",
+        json!({"name":"widget","dist-tags":{"latest":"28.0.0"},
+            "versions":{"27.2.0":{"deprecated":false},"28.0.0":{}}}),
+    )]));
+    let config = json!({"registry":registry.base});
+    write(
+        root,
+        "ctx",
+        &json!({"target":"ours","manifests":{".":{"dependencies":{"widget":"<=27"}}},
+            "configuration":config,"configurations":[config,config,config],"patches":{}}),
+    );
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}}}),
+    );
+    let graph = output(run(
+        root,
+        CLI,
+        &[
+            "merge",
+            "lock",
+            "lock",
+            "lock",
+            "--context",
+            "ctx",
+            "--allow-network",
+        ],
+    ));
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["widget"]["version"],
+        "27.2.0"
+    );
+    assert!(
+        graph["packages"]["widget@27.2.0"]
+            .get("deprecated")
+            .is_none()
+    );
+    assert_eq!(registry.finish().len(), 1);
+}
+
+#[test]
 fn convergence_recovers_an_original_range_only_when_it_can_reuse_a_baseline_pin() {
     let dir = tempdir().unwrap();
     let root = dir.path();

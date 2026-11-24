@@ -19,6 +19,11 @@ pub(crate) fn catalog_entry_version<'a>(specifier: &str, entry: &'a Value) -> Op
         .then_some(version)
 }
 
+pub(crate) fn catalog_link_entry_fits(specifier: &str, entry: &Value) -> bool {
+    catalog_entry_version(specifier, entry).is_some()
+        || (entry["specifier"] == specifier && entry["version"] == specifier)
+}
+
 /// pnpm can retain distinct catalog and importer pins within the declared range.
 pub(crate) fn catalog_consumer_fits(
     name: &str,
@@ -274,7 +279,7 @@ pub(crate) fn publication_times<const N: usize>(
     }
     let major = config
         .and_then(|c| c.pnpm_version.as_ref())
-        .map(|v| v.major);
+        .map(|v| v.major());
     let snapshots = graph::section(project, "snapshots");
     for (_, importer) in graph::section(project, "importers").into_iter().flatten() {
         for group in crate::manifest::GROUPS {

@@ -102,7 +102,7 @@ fn cfg(value: &Value) -> WorkspaceConfig {
 }
 
 fn override_tie_break() -> locksmith::OverrideTieBreak {
-    if pnpm_version().major >= 12 {
+    if pnpm_version().major() >= 12 {
         locksmith::OverrideTieBreak::First
     } else {
         locksmith::OverrideTieBreak::Last

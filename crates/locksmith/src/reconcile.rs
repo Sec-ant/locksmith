@@ -323,7 +323,7 @@ fn environment_source(
     // Older pnpm versions can lack a bootstrap document entirely.
     if version
         .parse::<node_semver::Version>()
-        .is_ok_and(|v| v.major < 11)
+        .is_ok_and(|v| v.major() < 11)
         && let Some(side) = order.into_iter().find(|i| managers[*i].is_none())
     {
         return Ok(side);

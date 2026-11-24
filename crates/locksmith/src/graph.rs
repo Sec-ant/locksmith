@@ -512,21 +512,25 @@ fn check_catalogs(
                     .map(String::as_str),
                 None => entry.and_then(|v| v["specifier"].as_str()),
             };
-            if !spec
-                .zip(dependency["version"].as_str())
-                .is_some_and(|(spec, pin)| {
-                    // A linked importer has no registry pin of its own. Its
-                    // version is in the target manifest, outside the lock.
-                    if let Some(path) = pin.strip_prefix("link:") {
-                        let target = linked_project(document.get("importers"), key, path);
-                        return document["importers"].get(&target).is_some()
-                            && entry.is_none_or(|e| {
-                                crate::reconcile::metadata::catalog_entry_version(spec, e).is_some()
-                            });
+            let pin = dependency["version"].as_str();
+            let fits = if let Some(path) = pin.and_then(|v| v.strip_prefix("link:")) {
+                let target = linked_project(document.get("importers"), key, path);
+                document["importers"].get(&target).is_some()
+                    && match (spec, entry) {
+                        (Some(spec), Some(entry)) => {
+                            crate::reconcile::metadata::catalog_link_entry_fits(spec, entry)
+                        }
+                        (Some(_), None) => true,
+                        // pnpm 12.0–12.5 omitted catalog records used only by local links.
+                        (None, None) => config.is_none(),
+                        (None, Some(_)) => false,
                     }
+            } else {
+                spec.zip(pin).is_some_and(|(spec, pin)| {
                     crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)
                 })
-            {
+            };
+            if !fits {
                 issues.push(issue(
                     kind,
                     &["importers", key, group, name],

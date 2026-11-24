@@ -63,62 +63,72 @@ fn published_dependency_uses_local_children_and_separate_peer_instances() {
 
 #[test]
 fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge() {
-    let manifests = BTreeMap::from([
-        (".".to_owned(), json!({})),
-        (
-            "a".to_owned(),
-            json!({"dependencies":{"widget":"1","plugin":"1.0.0"}}),
-        ),
-        ("b".to_owned(), json!({"dependencies":{"widget":"1"}})),
-    ]);
-    let lock = Lockfile::parse(
-        &json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}}).to_string(),
-    )
-    .unwrap();
-    let cfg = WorkspaceConfig::default();
-    let mut data = RegistryMetadata::default();
-    for (name, selector) in [("widget", "1"), ("plugin", "1.0.0")] {
-        let mut package = json!({"name":name,"version":"1.0.0","dist":{"integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}});
-        if name == "widget" {
-            package["peerDependencies"] = json!({"plugin":"^1"});
-            package["peerDependenciesMeta"] = json!({"plugin":{"optional":true}});
-        }
-        data.insert(
-            &RegistryRequest::Version {
-                name: name.into(),
-                selector: selector.into(),
-            },
-            package,
-            "https://example.org/",
-            false,
+    for explicit in [Some("^1"), None] {
+        let manifests = BTreeMap::from([
+            (".".to_owned(), json!({})),
+            (
+                "a".to_owned(),
+                json!({"dependencies":{"widget":"1","plugin":"1.0.0"}}),
+            ),
+            ("b".to_owned(), json!({"dependencies":{"widget":"1"}})),
+        ]);
+        let lock = Lockfile::parse(
+            &json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}}).to_string(),
         )
         .unwrap();
-    }
-    let graph = merge(
-        &lock,
-        &lock,
-        &lock,
-        Some(&MergeContext {
-            registry: Some(&data),
-            target: MergeTarget::Ours,
-            configuration: &cfg,
-            configurations: [&cfg; 3],
-            manifests: &manifests,
-            patches: &BTreeMap::new(),
-        }),
-    )
-    .unwrap();
-    let doc = graph.project().unwrap();
-    for id in ["a", "b"] {
+        let cfg = WorkspaceConfig::default();
+        let mut data = RegistryMetadata::default();
+        for (name, selector) in [("widget", "1"), ("plugin", "1.0.0")] {
+            let mut package = json!({"name":name,"version":"1.0.0","dist":{"integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}});
+            if name == "widget" {
+                package["peerDependencies"] = json!({"widget":"^1","undeclared":"not a range"});
+                if let Some(range) = explicit {
+                    package["peerDependencies"]["plugin"] = range.into();
+                }
+                package["peerDependenciesMeta"] =
+                    json!({"plugin":{"optional":true},"undeclared":{"optional":true}});
+            }
+            data.insert(
+                &RegistryRequest::Version {
+                    name: name.into(),
+                    selector: selector.into(),
+                },
+                package,
+                "https://example.org/",
+                false,
+            )
+            .unwrap();
+        }
+        let graph = merge(
+            &lock,
+            &lock,
+            &lock,
+            Some(&MergeContext {
+                registry: Some(&data),
+                target: MergeTarget::Ours,
+                configuration: &cfg,
+                configurations: [&cfg; 3],
+                manifests: &manifests,
+                patches: &BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let doc = graph.project().unwrap();
         assert_eq!(
-            doc["importers"][id]["dependencies"]["widget"]["version"],
-            "1.0.0(plugin@1.0.0)"
+            doc["packages"]["widget@1.0.0"]["peerDependencies"],
+            json!({"plugin":explicit.unwrap_or("*"),"undeclared":"not a range"})
+        );
+        for id in ["a", "b"] {
+            assert_eq!(
+                doc["importers"][id]["dependencies"]["widget"]["version"],
+                "1.0.0(plugin@1.0.0)"
+            );
+        }
+        assert_eq!(
+            doc["snapshots"]["widget@1.0.0(plugin@1.0.0)"],
+            json!({"optionalDependencies":{"plugin":"1.0.0"}})
         );
     }
-    assert_eq!(
-        doc["snapshots"]["widget@1.0.0(plugin@1.0.0)"],
-        json!({"optionalDependencies":{"plugin":"1.0.0"}})
-    );
 }
 
 #[test]

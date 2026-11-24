@@ -90,7 +90,12 @@ impl Project {
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
-        for name in hook_candidates(&config, version.as_ref().map(|v| v.major))? {
+        let candidates = if config["ignorePnpmfile"] == true {
+            Vec::new()
+        } else {
+            hook_candidates(&config, version.as_ref().map(|v| v.major()))?
+        };
+        for name in candidates {
             if let Some(contents) = read(&name)? {
                 hooks.insert(name, Value::String(contents));
                 if config.get("pnpmfile").is_none() {
@@ -129,7 +134,24 @@ pub fn settings(
         }
         None => json!({}),
     };
-    if version.as_ref().is_none_or(|v| v.major < 11)
+    if version.is_none_or(|v| v.major() < 11)
+        && let Some(resolutions) = root.get("resolutions")
+    {
+        let mut overrides = resolutions
+            .as_object()
+            .ok_or("package.json: expected resolutions to be an object")?
+            .clone();
+        if let Some(value) = config.get("overrides") {
+            overrides.extend(
+                value
+                    .as_object()
+                    .ok_or("package.json: expected pnpm.overrides to be an object")?
+                    .clone(),
+            );
+        }
+        config["overrides"] = overrides.into();
+    }
+    if version.as_ref().is_none_or(|v| v.major() < 11)
         && let Some(text) = read(".npmrc")?
     {
         legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
@@ -139,7 +161,7 @@ pub fn settings(
         let settings: Option<serde_json::Map<String, Value>> =
             serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
         if let Some(mut settings) = settings {
-            if version.as_ref().is_some_and(|v| v.major == 9) {
+            if version.as_ref().is_some_and(|v| v.major() == 9) {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [
                     "peersSuffixMaxLength",
@@ -259,6 +281,7 @@ pub fn file_inputs(config: &Value) -> Result<Vec<String>> {
 fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
     const FLAGS: &[(&str, &str)] = &[
         ("auto-install-peers", "autoInstallPeers"),
+        ("ignore-pnpmfile", "ignorePnpmfile"),
         ("dedupe-peers", "dedupePeers"),
         ("dedupe-peer-dependents", "dedupePeerDependents"),
         ("exclude-links-from-lockfile", "excludeLinksFromLockfile"),

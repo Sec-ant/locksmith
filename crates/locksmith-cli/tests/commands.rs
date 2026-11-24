@@ -830,6 +830,37 @@ fn repair_reports_ambiguous_duplicates_without_emitting_yaml() {
 }
 
 #[test]
+fn repair_and_converge_honor_ignored_pnpmfiles_and_legacy_resolutions() {
+    let repo = Repo::new();
+    let original = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    repo.write(".npmrc", "ignore-pnpmfile=true\n");
+    repo.write(".pnpmfile.cjs", "module.exports = { hooks: {} };\n");
+    repo.commit("ignore the workspace hook");
+    let check = |expected: &str| {
+        for args in [["repair", "HEAD"], ["converge", "HEAD"]] {
+            let out = repo.cmd(CLI, &args);
+            assert!(out.status.success(), "{}", report(&out));
+            assert_eq!(out.stdout, expected.as_bytes());
+        }
+    };
+    check(&original);
+
+    repo.write(
+        "package.json",
+        &json!({"private":true,"packageManager":"pnpm@10.34.9",
+            "resolutions":{"left":"2.0.0","right":"^1.0.0"},
+            "pnpm":{"overrides":{"left":"1.0.0"}}})
+        .to_string(),
+    );
+    let mut lock: Value = serde_json::from_str(&original).unwrap();
+    lock["overrides"] = json!({"left":"1.0.0","right":"^1.0.0"});
+    let text = lock.to_string();
+    repo.write("pnpm-lock.yaml", &text);
+    repo.commit("use legacy resolutions with an explicit override");
+    check(&text);
+}
+
+#[test]
 fn normalized_workspace_globs_and_pnpm_manifest_formats_keep_healthy_importers() {
     let repo = Repo::new();
     let lock = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
