@@ -40,7 +40,16 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
 impl RepairInput {
     /// Accept the same YAML and identical duplicate records as [`repair`].
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
-        edit::parse_for_repair(text).map(Self)
+        edit::parse_for_repair(text, None).map(Self)
+    }
+
+    /// Use a reconciled lock to select an existing copy of a conflicting
+    /// project snapshot. Each selected record must already appear in the input.
+    pub fn parse_with_snapshot_reference(
+        text: &str,
+        reference: &Lockfile,
+    ) -> Result<Self, LockfileError> {
+        edit::parse_for_repair(text, reference.project()).map(Self)
     }
 
     /// Repair the original source against this context.

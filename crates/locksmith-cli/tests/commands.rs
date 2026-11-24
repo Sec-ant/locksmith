@@ -885,6 +885,51 @@ fn repair_uses_the_selected_commit_and_recovers_a_missing_parent_record() {
 }
 
 #[test]
+fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
+    const LOCK: &str = "pnpm-lock.yaml";
+    let repo = Repo::new();
+    repo.write("apps/web/package.json", "{}");
+    repo.write(
+        LOCK,
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  apps/web: {}\n",
+    );
+    repo.commit("start without widget");
+    repo.git(&["branch", "-f", "topic", "HEAD"]);
+
+    let snapshot =
+        |version: &str| format!("  widget@1.0.0:\n    dependencies:\n      child: {version}\n");
+    let lock = |snapshots: &str| {
+        format!(
+            "# preserve the merged lock's formatting\n\
+lockfileVersion: '9.0'\n\
+importers:\n  .: {{}}\n  apps/web:\n    dependencies:\n      widget: {{specifier: 1.0.0, version: 1.0.0}}\n\
+packages:\n  child@1.0.0: {{resolution: {{integrity: sha512-child-one}}}}\n  child@2.0.0: {{resolution: {{integrity: sha512-child-two}}}}\n  widget@1.0.0: {{resolution: {{integrity: sha512-widget}}}}\n\
+snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
+        )
+    };
+    let ours = snapshot("1.0.0");
+    let theirs = snapshot("2.0.0");
+    for (branch, snapshot) in [("main", &ours), ("topic", &theirs)] {
+        repo.git(&["switch", branch]);
+        repo.write(
+            "apps/web/package.json",
+            r#"{"dependencies":{"widget":"1.0.0"}}"#,
+        );
+        repo.write(LOCK, &lock(snapshot));
+        repo.commit(branch);
+    }
+    repo.git(&["switch", "main"]);
+    repo.git(&["merge", "-s", "ours", "--no-commit", "topic"]);
+    let damaged = lock(&format!("{theirs}{ours}"));
+    repo.write(LOCK, &damaged);
+    repo.commit("keep both snapshots in the merge result");
+    let out = repo.cmd(CLI, &["repair"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, lock(&ours).as_bytes());
+    assert_eq!(repo.git(&["show", "HEAD:pnpm-lock.yaml"]), damaged);
+}
+
+#[test]
 fn repair_reports_ambiguous_duplicates_without_emitting_yaml() {
     let repo = Repo::new();
     repo.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters: {}\nsnapshots:\n  x@1.0.0: {}\n  x@1.0.0: {dependencies: {y: 2.0.0}}\n");
