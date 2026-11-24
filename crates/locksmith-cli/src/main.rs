@@ -1,13 +1,14 @@
 //! Command-line adapters for the in-memory locksmith library.
 use std::{
     error::Error,
+    fs,
     io::{self, Write},
     process::ExitCode,
 };
 
 use args::{Command, Merge};
 use bpaf::{Args, ParseFailure};
-use locksmith::LockfileError;
+use locksmith::{Lockfile, LockfileError};
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[global_allocator]
@@ -56,6 +57,11 @@ fn run(command: Command) -> Result<()> {
             reference,
             allow_network,
         } => repair::run(&reference, allow_network)?,
+        Command::Validate { file } => {
+            let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            Lockfile::try_from(text)?.validate()?;
+            return Ok(());
+        }
         Command::Inspect {
             json,
             pnpm_version,
@@ -93,23 +99,24 @@ fn main() -> ExitCode {
         }
     };
     let driver = matches!(command, Command::Merge(Merge::Git { .. }));
+    let validating = matches!(command, Command::Validate { .. });
     match run(command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("locksmith: {error}");
-            if driver
-                || matches!(
-                    error.downcast_ref::<LockfileError>(),
-                    Some(
-                        LockfileError::Conflicts(_)
-                            | LockfileError::ResolutionRequired { .. }
-                            | LockfileError::UnmetPeers(_)
-                    )
-                )
-            {
-                ExitCode::from(1)
-            } else {
-                ExitCode::from(2)
+            match error.downcast_ref::<LockfileError>() {
+                _ if driver => ExitCode::from(1),
+                Some(
+                    LockfileError::Conflicts(_)
+                    | LockfileError::ResolutionRequired { .. }
+                    | LockfileError::UnmetPeers(_),
+                ) => ExitCode::from(1),
+                Some(
+                    LockfileError::Parse(_)
+                    | LockfileError::InvalidDocument(_)
+                    | LockfileError::InvalidGraph(_),
+                ) if validating => ExitCode::from(1),
+                _ => ExitCode::from(2),
             }
         }
     }

@@ -36,6 +36,14 @@ fn oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+pub fn merge_base(ours: &str, theirs: &str) -> Result<String> {
+    let base = output(&["merge-base", "--all", ours, theirs])?;
+    if !oid(base.trim()) {
+        return Err("Git did not identify a unique merge base".into());
+    }
+    Ok(base.trim().to_owned())
+}
+
 pub struct DriverInputs {
     pub revisions: [String; 3],
     replay: bool,
@@ -81,11 +89,7 @@ pub fn revisions(files: [&OsString; 3], path: &str) -> Result<DriverInputs> {
         .to_owned();
     let replay = incoming.is_none();
     let (base, incoming) = if let Some(incoming) = incoming {
-        let base = output(&["merge-base", "--all", &current, &incoming])?;
-        if !oid(base.trim()) {
-            return Err("Git did not identify a unique merge base".into());
-        }
-        (base.trim().to_owned(), incoming)
+        (merge_base(&current, &incoming)?, incoming)
     } else {
         let incoming = replay_commit()?;
         let parents = output(&["rev-list", "--parents", "-1", &incoming])?;

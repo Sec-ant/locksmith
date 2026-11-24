@@ -639,7 +639,7 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
     assert!(!help.stdout.is_empty());
     assert_eq!(bare.stdout, help.stdout);
     assert!(bare.stderr.is_empty());
-    for name in ["merge", "converge", "repair"] {
+    for name in ["merge", "converge", "repair", "validate"] {
         let out = run(&[name, "--help"]);
         assert!(out.status.success());
         let alias = run(&["help", name]);
@@ -882,6 +882,51 @@ fn repair_uses_the_selected_commit_and_recovers_a_missing_parent_record() {
     let out = repo.cmd(CLI, &["repair", "HEAD^"]);
     assert!(out.status.success(), "{}", report(&out));
     assert_eq!(out.stdout, original.as_bytes());
+}
+
+#[test]
+fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
+    const LOCK: &str = "pnpm-lock.yaml";
+    let repo = Repo::new();
+    repo.write("apps/web/package.json", "{}");
+    repo.write(
+        LOCK,
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  apps/web: {}\n",
+    );
+    repo.commit("start without widget");
+    repo.git(&["branch", "-f", "topic", "HEAD"]);
+
+    let snapshot =
+        |version: &str| format!("  widget@1.0.0:\n    dependencies:\n      child: {version}\n");
+    let lock = |snapshots: &str| {
+        format!(
+            "# preserve the merged lock's formatting\n\
+lockfileVersion: '9.0'\n\
+importers:\n  .: {{}}\n  apps/web:\n    dependencies:\n      widget: {{specifier: 1.0.0, version: 1.0.0}}\n\
+packages:\n  child@1.0.0: {{resolution: {{integrity: sha512-child-one}}}}\n  child@2.0.0: {{resolution: {{integrity: sha512-child-two}}}}\n  widget@1.0.0: {{resolution: {{integrity: sha512-widget}}}}\n\
+snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
+        )
+    };
+    let ours = snapshot("1.0.0");
+    let theirs = snapshot("2.0.0");
+    for (branch, snapshot) in [("main", &ours), ("topic", &theirs)] {
+        repo.git(&["switch", branch]);
+        repo.write(
+            "apps/web/package.json",
+            r#"{"dependencies":{"widget":"1.0.0"}}"#,
+        );
+        repo.write(LOCK, &lock(snapshot));
+        repo.commit(branch);
+    }
+    repo.git(&["switch", "main"]);
+    repo.git(&["merge", "-s", "ours", "--no-commit", "topic"]);
+    let damaged = lock(&format!("{theirs}{ours}"));
+    repo.write(LOCK, &damaged);
+    repo.commit("keep both snapshots in the merge result");
+    let out = repo.cmd(CLI, &["repair"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, lock(&ours).as_bytes());
+    assert_eq!(repo.git(&["show", "HEAD:pnpm-lock.yaml"]), damaged);
 }
 
 #[test]
@@ -1146,6 +1191,64 @@ fn check_partial_clone(multiple_remotes: bool) {
                 .any(|line| line.strip_prefix('?') == Some(oid.trim()))
         );
     }
+}
+
+#[test]
+fn validate_checks_a_standalone_lockfile_without_writing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(CLI)
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let valid = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {tarball: https://example.org/foo-1.0.0.tgz}
+snapshots:
+  foo@1.0.0: {}
+";
+    let default_file = dir.path().join("pnpm-lock.yaml");
+    fs::write(&default_file, valid).unwrap();
+    let ok = run(&["validate"]);
+    assert_eq!(ok.status.code(), Some(0), "{}", report(&ok));
+    assert!(ok.stdout.is_empty() && ok.stderr.is_empty());
+    assert_eq!(fs::read_to_string(default_file).unwrap(), valid);
+
+    let candidate = dir.path().join("candidate.yaml");
+    for (input, status, diagnostic) in [
+        (format!("{valid}  foo@1.0.0: {{}}\n"), 1, "duplicate"),
+        (
+            valid.replace("snapshots:\n  foo@1.0.0: {}", "snapshots: {}"),
+            1,
+            "missing snapshot foo@1.0.0",
+        ),
+        (
+            "lockfileVersion: '6.0'\n".into(),
+            2,
+            "unsupported lockfileVersion",
+        ),
+    ] {
+        fs::write(&candidate, &input).unwrap();
+        let result = run(&["validate", "candidate.yaml"]);
+        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+        assert_eq!(fs::read_to_string(&candidate).unwrap(), input);
+    }
+    let missing = run(&["validate", "missing.yaml"]);
+    assert_eq!(missing.status.code(), Some(2), "{}", report(&missing));
+    assert!(missing.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("missing.yaml"));
 }
 
 #[test]

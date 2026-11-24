@@ -4,7 +4,7 @@ use crate::{
     registry,
     workspace::{self, Project},
 };
-use locksmith::{Lockfile, LockfileError, RepairContext, RepairInput};
+use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget, RepairContext, RepairInput};
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let revision = git::output(&[
@@ -35,7 +35,15 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         parents: &[],
         registry: None,
     };
-    let input = RepairInput::parse(&text)?;
+    let input = match RepairInput::parse(&text) {
+        Err(error)
+            if matches!(&error, LockfileError::ResolutionRequired { path, .. }
+                if matches!(path.as_slice(), [section, _] if section == "snapshots")) =>
+        {
+            recover_merge_snapshots(&text, commit, prefix, &context)?.ok_or(error)?
+        }
+        other => other?,
+    };
     let result = match input.apply(&context) {
         Err(LockfileError::ResolutionRequired { .. }) => {
             let revisions = git::output(&["rev-list", "--parents", "-1", commit])?;
@@ -90,4 +98,48 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     };
     policy.check_peers(&project.config, &result, &manifests)?;
     Ok(result)
+}
+
+fn recover_merge_snapshots(
+    text: &str,
+    commit: &str,
+    prefix: &str,
+    context: &RepairContext<'_>,
+) -> Result<Option<RepairInput>> {
+    let history = git::output(&["rev-list", "--parents", "-1", commit])?;
+    let parents: Vec<_> = history.split_whitespace().skip(1).collect();
+    let [ours, theirs] = parents.as_slice() else {
+        return Ok(None);
+    };
+    let base = git::merge_base(ours, theirs)?;
+    let mut blobs = git::Blobs::open()?;
+    let file = format!("{prefix}pnpm-lock.yaml");
+    let [base, ours, theirs] = [base.as_str(), ours, theirs].map(|revision| -> Result<_> {
+        let text = blobs
+            .read(revision, &file)?
+            .ok_or_else(|| format!("missing {revision}:{file}"))?;
+        let lock = Lockfile::try_from(text)?;
+        let project = Project::read(&mut blobs, revision, prefix)?;
+        let config = Policy::from_manifest(&project.root).configuration(&project.config)?;
+        Ok((lock, config))
+    });
+    let ((base, base_cfg), (ours, ours_cfg), (theirs, theirs_cfg)) = (base?, ours?, theirs?);
+    drop(blobs);
+    // The first parent is the committed merge's target, independent of current refs.
+    let witness = locksmith::merge(
+        &base,
+        &ours,
+        &theirs,
+        Some(&MergeContext {
+            target: MergeTarget::Ours,
+            manifests: context.manifests,
+            configurations: [&base_cfg, &ours_cfg, &theirs_cfg],
+            configuration: context.configuration,
+            patches: context.patches,
+            registry: None,
+        }),
+    )?;
+    Ok(Some(RepairInput::parse_with_snapshot_reference(
+        text, &witness,
+    )?))
 }

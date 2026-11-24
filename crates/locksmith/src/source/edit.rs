@@ -70,14 +70,18 @@ fn header_end(text: &str) -> Option<usize> {
 
 // Only independent block entries may be removed. The strict parser checks both
 // copies separately, including nested keys, then checks the whole edited file.
-pub(crate) fn parse_for_repair(text: &str) -> Result<Lockfile, LockfileError> {
+pub(crate) fn parse_for_repair(
+    text: &str,
+    reference: Option<&Value>,
+) -> Result<Lockfile, LockfileError> {
     let error = match Lockfile::parse(text) {
         Err(error @ LockfileError::Parse(_)) => error,
         result => return result,
     };
     let bom = text.len() - text.trim_start_matches('\u{feff}').len();
     let mut removals = Vec::new();
-    for doc in document_ranges(&text[bom..]) {
+    let documents = document_ranges(&text[bom..]);
+    for (index, doc) in documents.iter().enumerate() {
         let start = bom + doc.start;
         let raw = &text[start..bom + doc.end];
         let Some(fields) = blocks(raw, 0) else {
@@ -92,34 +96,52 @@ pub(crate) fn parse_for_repair(text: &str) -> Result<Lockfile, LockfileError> {
                 continue;
             };
             let body = &field_text[header..];
-            let Some(entries) = blocks(body, 1) else {
+            let Some(mut entries) = blocks(body, 1) else {
                 continue;
             };
-            let mut seen = BTreeMap::<String, Range<usize>>::new();
-            for (key, range) in entries {
-                if let Some(first) = seen.get(&key) {
-                    let parse = |range: Range<usize>| {
-                        let raw = &body[range];
+            // The project document, when present, follows the bootstrap document.
+            let reference =
+                reference.filter(|_| section == "snapshots" && index + 1 == documents.len());
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for copies in entries
+                .chunk_by(|(a, _), (b, _)| a == b)
+                .filter(|c| c.len() > 1)
+            {
+                let key = &copies[0].0;
+                let values = copies
+                    .iter()
+                    .map(|(_, range)| {
+                        let raw = &body[range.clone()];
                         serde_saphyr::from_str_with_options::<Value>(raw, options(raw.len()))
-                    };
-                    if parse(first.clone())? != parse(range.clone())? {
-                        return Err(LockfileError::ResolutionRequired {
-                            path: vec![section.clone(), key],
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let keep = if values[1..].iter().all(|value| value == &values[0]) {
+                    0
+                } else {
+                    reference
+                        .and_then(|doc| doc["snapshots"].get(key))
+                        .and_then(|witness| {
+                            values
+                                .iter()
+                                .position(|value| value.get(key) == Some(witness))
+                        })
+                        .ok_or_else(|| LockfileError::ResolutionRequired {
+                            path: vec![section.clone(), key.clone()],
                             message: "duplicate records have different contents".into(),
                             request: None,
-                        });
-                    }
-                    let offset = start + field.start + header;
-                    removals.push(offset + range.start..offset + range.end);
-                } else {
-                    seen.insert(key, range);
-                }
+                        })?
+                };
+                let offset = start + field.start + header;
+                removals.extend(copies.iter().enumerate().filter_map(|(i, (_, range))| {
+                    (i != keep).then_some(offset + range.start..offset + range.end)
+                }));
             }
         }
     }
     if removals.is_empty() {
         return Err(error);
     }
+    removals.sort_unstable_by_key(|range| range.start);
     let mut output = String::with_capacity(text.len());
     let mut cursor = 0;
     for range in removals {
