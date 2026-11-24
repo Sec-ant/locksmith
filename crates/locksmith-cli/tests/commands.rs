@@ -1002,6 +1002,45 @@ fn repair_keeps_the_active_hooks_dependencies() {
 }
 
 #[test]
+fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
+    let repo = Repo::new();
+    let lock: Value = serde_json::from_str(&repo.git(&["show", "HEAD:pnpm-lock.yaml"])).unwrap();
+    repo.write(".pnpmfile.cjs", "module.exports = { hooks: {} };\n");
+
+    for (version, yaml, ignored) in [
+        ("10.34.9", "", true),
+        ("11.0.0", "", false),
+        ("11.0.0", "ignorePnpmfile: true\n", true),
+    ] {
+        repo.write(
+            "package.json",
+            &json!({"private":true,"packageManager":format!("pnpm@{version}"),
+                "pnpm":{"ignorePnpmfile":true}})
+            .to_string(),
+        );
+        repo.write(
+            "pnpm-workspace.yaml",
+            &format!("packages: ['apps/*']\n{yaml}"),
+        );
+        let mut recorded = lock.clone();
+        if !ignored {
+            recorded["pnpmfileChecksum"] =
+                json!("sha256-dS522kUCN9FHUHk8JODaJjlMeNKVaNv8hwk1JhcGjEY=");
+        }
+        let text = recorded.to_string();
+        repo.write("pnpm-lock.yaml", &text);
+        repo.commit("record the effective pnpm hook");
+        let out = repo.cmd(CLI, &["repair", "HEAD"]);
+        assert!(
+            out.status.success(),
+            "{version}, {yaml:?}: {}",
+            report(&out)
+        );
+        assert_eq!(out.stdout, text.as_bytes());
+    }
+}
+
+#[test]
 fn stale_candidate_settings_are_reported_even_when_the_two_locks_match() {
     let repo = Repo::new();
     repo.write(

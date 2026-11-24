@@ -134,9 +134,8 @@ pub fn settings(
         }
         None => json!({}),
     };
-    if version.is_none_or(|v| v.major() < 11)
-        && let Some(resolutions) = root.get("resolutions")
-    {
+    let legacy = version.is_none_or(|v| v.major() < 11);
+    if legacy && let Some(resolutions) = root.get("resolutions") {
         let mut overrides = resolutions
             .as_object()
             .ok_or("package.json: expected resolutions to be an object")?
@@ -151,10 +150,13 @@ pub fn settings(
         }
         config["overrides"] = overrides.into();
     }
-    if version.as_ref().is_none_or(|v| v.major() < 11)
-        && let Some(text) = read(".npmrc")?
-    {
-        legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
+    if legacy {
+        if let Some(text) = read(".npmrc")? {
+            legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
+        }
+    } else {
+        // An obsolete package.json flag must not disable hook discovery in pnpm 11+.
+        config.as_object_mut().unwrap().remove("ignorePnpmfile");
     }
     let workspace = read("pnpm-workspace.yaml")?;
     if let Some(text) = &workspace {
