@@ -65,6 +65,7 @@ fn published_declarations(
     let mut declarations = PublishedDeclarations::default();
     let mut removed_dependencies = BTreeSet::new();
     let mut removed_optional = BTreeSet::new();
+    let mut effective_optional = BTreeSet::new();
     for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
         let Some(entries) = raw.get(group) else {
             continue;
@@ -109,11 +110,13 @@ fn published_declarations(
                 }
                 continue;
             }
-            if group == "optionalDependencies"
-                && ignored.is_some_and(|a| a.iter().any(|v| v == name))
-            {
-                removed_optional.insert(name.as_str());
-                continue;
+            if group == "optionalDependencies" {
+                if ignored.is_some_and(|a| a.iter().any(|v| v == name)) {
+                    removed_optional.insert(name.as_str());
+                    continue;
+                }
+                // Bundling removes the snapshot edge, but the declaration still applies.
+                effective_optional.insert(name.as_str());
             }
             if (group == "dependencies" && raw["optionalDependencies"].get(name).is_some())
                 || bundle.is_some_and(|v| {
@@ -152,10 +155,7 @@ fn published_declarations(
         if meta["optional"] == true
             && raw["peerDependencies"].get(name).is_none()
             && (!exclude_self || own_name != Some(name))
-            && declarations
-                .ordinary
-                .get(name)
-                .is_none_or(|(group, _)| *group != "optionalDependencies")
+            && !effective_optional.contains(name.as_str())
             && !suppress_fallback
         {
             declarations.peers.insert(name.clone(), ("*".into(), true));

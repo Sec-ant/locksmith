@@ -142,6 +142,8 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
 fn published_optional_peer_is_restored_after_its_dependency_is_removed() {
     let required = json!({"dependencies":{"plugin":"1.0.0"}});
     let bundled = json!({"dependencies":{"plugin":"1.0.0"},"bundledDependencies":["plugin"]});
+    let bundled_optional =
+        json!({"optionalDependencies":{"plugin":"1.0.0"},"bundledDependencies":["plugin"]});
     let duplicate =
         json!({"dependencies":{"plugin":"1.0.0"},"optionalDependencies":{"plugin":"1.0.0"}});
     for (case, fields, remove, ignore, expect_peer) in [
@@ -149,6 +151,21 @@ fn published_optional_peer_is_restored_after_its_dependency_is_removed() {
         ("kept", &required, false, false, false),
         ("bundled", &bundled, false, false, false),
         ("bundled and removed", &bundled, true, false, true),
+        ("bundled optional", &bundled_optional, false, false, false),
+        (
+            "bundled optional and removed",
+            &bundled_optional,
+            true,
+            false,
+            true,
+        ),
+        (
+            "bundled optional and ignored",
+            &bundled_optional,
+            false,
+            true,
+            true,
+        ),
         ("duplicate and ignored", &duplicate, false, true, true),
     ] {
         let mut settings = json!({});
