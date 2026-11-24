@@ -307,14 +307,11 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = value.trim().trim_matches('"');
         if let Some((_, field)) = FLAGS.iter().find(|(flag, _)| key.trim() == *flag) {
-            config[field] = Value::Bool(
-                value
-                    .parse()
-                    .map_err(|_| format!("{key} expects true or false"))?,
-            );
+            config[field] =
+                Value::Bool(ini_bool(value).map_err(|_| format!("{key} expects true or false"))?);
         } else {
+            let value = value.trim().trim_matches('"');
             match key.trim() {
                 "link-workspace-packages" => {
                     config["linkWorkspacePackages"] = match value {
@@ -331,6 +328,22 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ini_bool(value: &str) -> std::result::Result<bool, std::str::ParseBoolError> {
+    let value = value.trim();
+    if let Some(quote @ ('"' | '\'')) = value.chars().next()
+        && let Some((quoted, rest)) = value[1..].split_once(quote)
+    {
+        let rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with(['#', ';']) {
+            return quoted.parse();
+        }
+    }
+    value
+        .split_once(['#', ';'])
+        .map_or(value, |(flag, _)| flag.trim_end())
+        .parse()
 }
 
 pub struct Members {

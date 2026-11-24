@@ -51,6 +51,11 @@ fn published_declarations(
         .pnpm_version
         .as_ref()
         .is_none_or(|v| v >= &node_semver::Version::from((9, 15, 1)));
+    // pnpm 12 before 12.17 used the promoted selector for an existing optional edge.
+    let promotes_over_optional = config
+        .pnpm_version
+        .as_ref()
+        .is_some_and(|v| v.major() == 12 && v < &node_semver::Version::from((12, 17, 0)));
     let own_name = raw["name"].as_str();
     let ignored = config
         .resolution
@@ -58,6 +63,7 @@ fn published_declarations(
         .as_ref()
         .and_then(Value::as_array);
     let mut declarations = PublishedDeclarations::default();
+    let mut removed_optional = BTreeSet::new();
     for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
         let Some(entries) = raw.get(group) else {
             continue;
@@ -74,16 +80,23 @@ fn published_declarations(
                 Some(value) => rules.resolve(".", name, value)?,
                 None => Some(Cow::Borrowed(value)),
             };
-            let Some(spec) = spec else {
+            let Some(mut spec) = spec else {
                 continue;
             };
+            let promoted = group == "peerDependencies"
+                && replacement.is_some()
+                && !manifest::valid_peer_range(&spec);
+            // pnpm drops a same-name ordinary edge when ignoring an optional
+            // dependency. The peer's original range then applies again.
+            let restore_peer = promoted && removed_optional.contains(name.as_str());
+            if restore_peer {
+                spec = Cow::Borrowed(value);
+            }
             // Only explicit selectors seed candidate reuse from the input locks.
             if let Some(request) = lookup(name, &spec, config) {
                 needed.insert(request.name().to_owned());
             }
-            if group == "peerDependencies"
-                && (replacement.is_none() || manifest::valid_peer_range(&spec))
-            {
+            if group == "peerDependencies" && (!promoted || restore_peer) {
                 if !exclude_self || own_name != Some(name) {
                     let optional = raw["peerDependenciesMeta"][name]["optional"] == true;
                     declarations
@@ -92,17 +105,27 @@ fn published_declarations(
                 }
                 continue;
             }
+            if group == "optionalDependencies"
+                && ignored.is_some_and(|a| a.iter().any(|v| v == name))
+            {
+                removed_optional.insert(name.as_str());
+                continue;
+            }
             if (group == "dependencies" && raw["optionalDependencies"].get(name).is_some())
-                || (group == "optionalDependencies"
-                    && ignored.is_some_and(|a| a.iter().any(|v| v == name)))
                 || bundle.is_some_and(|v| {
                     v == true || v.as_array().is_some_and(|a| a.iter().any(|v| v == name))
                 })
             {
                 continue;
             }
-            let group = if group == "peerDependencies" {
-                "dependencies"
+            let group = if promoted {
+                match declarations.ordinary.get(name) {
+                    Some(("optionalDependencies", _)) if promotes_over_optional => {
+                        "optionalDependencies"
+                    }
+                    Some(("optionalDependencies", _)) => continue,
+                    _ => "dependencies",
+                }
             } else {
                 group
             };

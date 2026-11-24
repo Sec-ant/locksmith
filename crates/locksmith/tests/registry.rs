@@ -139,6 +139,91 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
 }
 
 #[test]
+fn published_optional_dependency_takes_precedence_over_an_overridden_peer() {
+    let mut registry = RegistryMetadata::default();
+    for (name, version) in [
+        ("widget", "1.0.0"),
+        ("plugin", "1.0.0"),
+        ("plugin", "2.0.0"),
+        ("replacement", "1.0.0"),
+    ] {
+        let mut package = json!({"name":name,"version":version,"dist":{
+            "integrity":"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            "tarball":format!("https://example.org/{name}/-/{name}-{version}.tgz")
+        }});
+        if name == "widget" {
+            package["optionalDependencies"] = json!({"plugin":"2.0.0"});
+            package["peerDependencies"] = json!({"plugin":"1.0.0"});
+        }
+        registry
+            .insert(
+                &RegistryRequest::Version {
+                    name: name.into(),
+                    selector: version.into(),
+                },
+                package,
+                "https://example.org/",
+                false,
+            )
+            .unwrap();
+    }
+
+    for (version, optional_pin) in [
+        ("10.34.9", Some("2.0.0")),
+        ("12.15.0", Some("replacement@1.0.0")),
+        ("12.21.0", Some("2.0.0")),
+        ("12.15.0", None),
+        ("12.21.0", None),
+    ] {
+        let overrides = json!({"widget>plugin@1.0.0":"npm:replacement@1.0.0"});
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"overrides":overrides});
+        let mut settings = json!({"overrides":overrides});
+        if optional_pin.is_none() {
+            settings["ignoredOptionalDependencies"] = json!(["plugin"]);
+            lock["ignoredOptionalDependencies"] = json!(["plugin"]);
+        }
+        let lock = Lockfile::parse(&lock.to_string()).unwrap();
+        let cfg = WorkspaceConfig::from_pnpm_version(&settings, &version.parse().unwrap()).unwrap();
+        let out = merge(
+            &lock,
+            &lock,
+            &lock,
+            Some(&MergeContext {
+                registry: Some(&registry),
+                target: MergeTarget::Ours,
+                configuration: &cfg,
+                configurations: [&cfg; 3],
+                manifests: &BTreeMap::from([(
+                    ".".into(),
+                    json!({"dependencies":{"widget":"1.0.0"}}),
+                )]),
+                patches: &BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let doc = out.project().unwrap();
+        let instance = doc["importers"]["."]["dependencies"]["widget"]["version"]
+            .as_str()
+            .unwrap();
+        let body = &doc["snapshots"][format!("widget@{instance}")];
+        let peers = &doc["packages"]["widget@1.0.0"]["peerDependencies"];
+        if let Some(pin) = optional_pin {
+            assert_eq!(instance, "1.0.0");
+            assert_eq!(
+                body,
+                &json!({"optionalDependencies":{"plugin":pin}}),
+                "{version}"
+            );
+            assert!(peers.is_null());
+        } else {
+            assert_eq!(instance, "1.0.0(plugin@1.0.0)");
+            assert_eq!(body, &json!({"dependencies":{"plugin":"1.0.0"}}));
+            assert_eq!(peers, &json!({"plugin":"1.0.0"}));
+        }
+    }
+}
+
+#[test]
 fn auto_dedupe_combines_new_transitive_versions_only_when_the_parent_accepts_them() {
     const SRI: &str = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
     let base = json!({"lockfileVersion":"9.0","importers":{".":{}}});

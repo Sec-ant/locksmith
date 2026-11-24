@@ -1013,6 +1013,11 @@ fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
     let sources = [
         ("manifest", "", ""),
         ("npmrc", "ignore-pnpmfile=true\n", ""),
+        (
+            "npmrc inline comments",
+            "ignore-pnpmfile=true ; disable the hook\nignore-pnpmfile=false # keep the hook\n",
+            "",
+        ),
         ("workspace YAML", "", "ignorePnpmfile: true\n"),
         (
             "workspace YAML over npmrc",
@@ -1021,12 +1026,12 @@ fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
         ),
     ];
     for (version, checksum, active_hooks) in [
-        ("10.34.9", SHA256, [true, false, false, true]),
-        ("9.15.9", MD5, [true, false, true, false]),
-        ("10.5.0", SHA256, [true, false, true, false]),
-        ("10.6.0", SHA256, [true, false, false, true]),
-        ("11.0.0", SHA256, [true, true, false, true]),
-        ("12.21.0", SHA256, [true, true, false, true]),
+        ("10.34.9", SHA256, [true, false, true, false, true]),
+        ("9.15.9", MD5, [true, false, true, true, false]),
+        ("10.5.0", SHA256, [true, false, true, true, false]),
+        ("10.6.0", SHA256, [true, false, true, false, true]),
+        ("11.0.0", SHA256, [true, true, true, false, true]),
+        ("12.21.0", SHA256, [true, true, true, false, true]),
     ] {
         repo.write(
             "package.json",
