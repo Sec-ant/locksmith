@@ -63,6 +63,7 @@ fn published_declarations(
         .as_ref()
         .and_then(Value::as_array);
     let mut declarations = PublishedDeclarations::default();
+    let mut removed_dependencies = BTreeSet::new();
     let mut removed_optional = BTreeSet::new();
     for group in ["dependencies", "optionalDependencies", "peerDependencies"] {
         let Some(entries) = raw.get(group) else {
@@ -81,6 +82,9 @@ fn published_declarations(
                 None => Some(Cow::Borrowed(value)),
             };
             let Some(mut spec) = spec else {
+                if group == "dependencies" {
+                    removed_dependencies.insert(name.as_str());
+                }
                 continue;
             };
             let promoted = group == "peerDependencies"
@@ -140,6 +144,11 @@ fn published_declarations(
         .into_iter()
         .flatten()
     {
+        // Bundled dependencies still supply the peer without a snapshot edge.
+        let suppress_fallback = !fallback
+            && raw["dependencies"].get(name).is_some()
+            && !removed_dependencies.contains(name.as_str())
+            && !removed_optional.contains(name.as_str());
         if meta["optional"] == true
             && raw["peerDependencies"].get(name).is_none()
             && (!exclude_self || own_name != Some(name))
@@ -147,7 +156,7 @@ fn published_declarations(
                 .ordinary
                 .get(name)
                 .is_none_or(|(group, _)| *group != "optionalDependencies")
-            && (fallback || raw["dependencies"].get(name).is_none())
+            && !suppress_fallback
         {
             declarations.peers.insert(name.clone(), ("*".into(), true));
         }
