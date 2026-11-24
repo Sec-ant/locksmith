@@ -134,6 +134,8 @@ pub fn settings(
         }
         None => json!({}),
     };
+    // Read this hook setting only from the configuration files supported by pnpm.
+    config.as_object_mut().unwrap().remove("ignorePnpmfile");
     let legacy = version.is_none_or(|v| v.major() < 11);
     if legacy && let Some(resolutions) = root.get("resolutions") {
         let mut overrides = resolutions
@@ -150,19 +152,18 @@ pub fn settings(
         }
         config["overrides"] = overrides.into();
     }
-    if legacy {
-        if let Some(text) = read(".npmrc")? {
-            legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
-        }
-    } else {
-        // An obsolete package.json flag must not disable hook discovery in pnpm 11+.
-        config.as_object_mut().unwrap().remove("ignorePnpmfile");
+    if legacy && let Some(text) = read(".npmrc")? {
+        legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
     }
     let workspace = read("pnpm-workspace.yaml")?;
     if let Some(text) = &workspace {
         let settings: Option<serde_json::Map<String, Value>> =
             serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
         if let Some(mut settings) = settings {
+            // pnpm 10.6 added .npmrc options to pnpm-workspace.yaml.
+            if version.is_some_and(|v| v < &node_semver::Version::from((10, 6, 0))) {
+                settings.remove("ignorePnpmfile");
+            }
             if version.as_ref().is_some_and(|v| v.major() == 9) {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [

@@ -1007,10 +1007,26 @@ fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
     let lock: Value = serde_json::from_str(&repo.git(&["show", "HEAD:pnpm-lock.yaml"])).unwrap();
     repo.write(".pnpmfile.cjs", "module.exports = { hooks: {} };\n");
 
-    for (version, yaml, ignored) in [
-        ("10.34.9", "", true),
-        ("11.0.0", "", false),
-        ("11.0.0", "ignorePnpmfile: true\n", true),
+    // The checksums and active hooks below come from native pnpm lockfiles.
+    const MD5: &str = "sfyfo37yjh2vk573iqozpdqqfa";
+    const SHA256: &str = "sha256-dS522kUCN9FHUHk8JODaJjlMeNKVaNv8hwk1JhcGjEY=";
+    let sources = [
+        ("manifest", "", ""),
+        ("npmrc", "ignore-pnpmfile=true\n", ""),
+        ("workspace YAML", "", "ignorePnpmfile: true\n"),
+        (
+            "workspace YAML over npmrc",
+            "ignore-pnpmfile=true\n",
+            "ignorePnpmfile: false\n",
+        ),
+    ];
+    for (version, checksum, active_hooks) in [
+        ("10.34.9", SHA256, [true, false, false, true]),
+        ("9.15.9", MD5, [true, false, true, false]),
+        ("10.5.0", SHA256, [true, false, true, false]),
+        ("10.6.0", SHA256, [true, false, false, true]),
+        ("11.0.0", SHA256, [true, true, false, true]),
+        ("12.21.0", SHA256, [true, true, false, true]),
     ] {
         repo.write(
             "package.json",
@@ -1018,25 +1034,27 @@ fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
                 "pnpm":{"ignorePnpmfile":true}})
             .to_string(),
         );
-        repo.write(
-            "pnpm-workspace.yaml",
-            &format!("packages: ['apps/*']\n{yaml}"),
-        );
-        let mut recorded = lock.clone();
-        if !ignored {
-            recorded["pnpmfileChecksum"] =
-                json!("sha256-dS522kUCN9FHUHk8JODaJjlMeNKVaNv8hwk1JhcGjEY=");
+        for ((source, npmrc, yaml), active) in sources.into_iter().zip(active_hooks) {
+            repo.write(".npmrc", npmrc);
+            repo.write(
+                "pnpm-workspace.yaml",
+                &format!("packages: ['apps/*']\n{yaml}"),
+            );
+            let mut recorded = lock.clone();
+            if active {
+                recorded["pnpmfileChecksum"] = json!(checksum);
+            }
+            let text = recorded.to_string();
+            repo.write("pnpm-lock.yaml", &text);
+            repo.commit("record the effective pnpm hook");
+            let out = repo.cmd(CLI, &["repair", "HEAD"]);
+            assert!(
+                out.status.success(),
+                "{version}, {source}: {}",
+                report(&out)
+            );
+            assert_eq!(out.stdout, text.as_bytes());
         }
-        let text = recorded.to_string();
-        repo.write("pnpm-lock.yaml", &text);
-        repo.commit("record the effective pnpm hook");
-        let out = repo.cmd(CLI, &["repair", "HEAD"]);
-        assert!(
-            out.status.success(),
-            "{version}, {yaml:?}: {}",
-            report(&out)
-        );
-        assert_eq!(out.stdout, text.as_bytes());
     }
 }
 
