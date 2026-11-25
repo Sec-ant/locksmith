@@ -8,7 +8,9 @@ use crate::{LockfileError, Value, graph, source::Source};
 /// The project dependency graph or pnpm's package-manager bootstrap graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DocumentKind {
+    /// Bootstrap dependencies for the package manager itself.
     Environment,
+    /// Workspace importers and their package graph.
     Project,
 }
 
@@ -39,18 +41,24 @@ impl Lockfile {
     ///
     /// Graph validation is separate: [`Self::validate`] checks all references.
     /// Scoped operations can ignore unrelated, stale records in a candidate.
+    ///
+    /// # Errors
+    /// Returns an error for invalid YAML, duplicate keys, unsupported versions or malformed lockfile structures.
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
         Self::try_from(text.to_owned())
     }
 
+    /// Borrow the workspace graph, if the lock contains a project document.
     pub fn project(&self) -> Option<&Value> {
         self.document(DocumentKind::Project)
     }
 
+    /// Borrow the package-manager bootstrap graph when present.
     pub fn environment(&self) -> Option<&Value> {
         self.document(DocumentKind::Environment)
     }
 
+    /// Borrow the parsed document of the requested kind.
     pub fn document(&self, kind: DocumentKind) -> Option<&Value> {
         self.documents.get(&kind).map(AsRef::as_ref)
     }
@@ -69,6 +77,7 @@ impl Lockfile {
         let Some(doc) = self.project() else {
             return ids;
         };
+        let links = graph::LinkedProjects::new(doc.get("importers"));
         for (key, snapshot) in graph::section(doc, "snapshots").into_iter().flatten() {
             let package = &doc["packages"][graph::package_key(key)];
             for (name, _) in graph::section(package, "peerDependencies")
@@ -78,7 +87,7 @@ impl Lockfile {
                 if let Some(path) =
                     graph::dependency(snapshot, name).and_then(|(_, pin)| pin.strip_prefix("link:"))
                 {
-                    let id = graph::linked_project(doc.get("importers"), ".", path);
+                    let id = links.resolve(".", path);
                     if doc["importers"].get(&id).is_some() {
                         ids.insert(id);
                     }
@@ -90,6 +99,9 @@ impl Lockfile {
 
     /// Inspect a project's full dependency closure, including distinct peer
     /// instances. Catalog policy is checked separately by [`Self::validate`].
+    ///
+    /// # Errors
+    /// Returns an error if the project or importer is missing or a reachable dependency has an invalid reference.
     pub fn dependency_closure(
         &self,
         importer: &str,
@@ -106,6 +118,9 @@ impl Lockfile {
 
     /// Check all importer and snapshot edges, package records and catalog pins.
     /// Local `link:` references may refer to directories outside the workspace.
+    ///
+    /// # Errors
+    /// Returns [`LockfileError::InvalidGraph`] with the paths of invalid records or references.
     pub fn validate(&self) -> Result<(), LockfileError> {
         self.validate_with_config(None)
     }
@@ -116,6 +131,10 @@ impl Lockfile {
     /// Callers supply effective manifests if hooks apply. For a range pinned to a
     /// directory outside the member set, `read_linked` supplies its manifest,
     /// `None` for an absent directory, or an error for unreadable inputs.
+    ///
+    /// # Errors
+    /// Invalid graph records, workspace declarations, settings and patches return errors. Errors from
+    /// `read_linked` are propagated when validation needs a linked manifest.
     pub fn validate_workspace(
         &self,
         manifests: &BTreeMap<String, Value>,
@@ -128,12 +147,8 @@ impl Lockfile {
         let document = self
             .project()
             .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
-        let recorded = crate::LockSettings::from_document(document);
-        let configured = &config.resolution.lock;
-        if recorded.auto_install_peers != configured.auto_install_peers
-            || recorded.dedupe_peers != configured.dedupe_peers
-            || recorded.exclude_links_from_lockfile != configured.exclude_links_from_lockfile
-        {
+        let recorded = config.read_lock_settings(document);
+        if recorded != config.recorded_settings() {
             return Err(crate::manifest::mismatch(
                 ".",
                 "workspace",
@@ -190,7 +205,7 @@ impl Lockfile {
         }
         if !config
             .resolution
-            .ignored_optional_dependencies_match(document, false)?
+            .ignored_optional_dependencies_match(document)?
         {
             return Err(crate::manifest::mismatch(
                 ".",
@@ -201,24 +216,14 @@ impl Lockfile {
         let effective =
             crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
         let recorded_overrides = crate::manifest::rule_map(document, "overrides");
-        if effective.as_ref() != recorded_overrides
-            || effective
-                .as_ref()
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-                .ne(recorded_overrides
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flatten())
-        {
+        if !crate::manifest::same_ordered_mapping(effective.as_ref(), recorded_overrides) {
             return Err(crate::manifest::mismatch(
                 ".",
                 "workspace",
                 "overrides differ",
             ));
         }
-        let overrides = crate::manifest::Overrides::new(document, config);
+        let overrides = crate::manifest::Overrides::for_frozen_workspace(document, config);
         for id in graph::section(document, "importers")
             .into_iter()
             .flat_map(|m| m.keys())
@@ -230,16 +235,17 @@ impl Lockfile {
         let workspace = crate::workspace_links::FrozenWorkspace::new(
             manifests,
             config,
+            document,
             external_members,
             &read_linked,
-        )?;
+        );
         for (id, manifest) in manifests {
-            crate::manifest::check_with_links(
+            crate::manifest::check_manifest(
                 &overrides,
                 id,
                 Some(manifest),
                 "workspace",
-                Some(&workspace),
+                crate::manifest::ManifestCheck::Frozen(&workspace),
             )?;
         }
         Ok(())
@@ -266,6 +272,9 @@ impl Lockfile {
     /// Rewritten sections use pnpm's sorted entry order. Non-block YAML is emitted
     /// with the YAML serializer. Output is verified with a streaming comparison
     /// against the existing data, without building another document tree.
+    ///
+    /// # Errors
+    /// Serialization errors and discrepancies between emitted YAML and the intended graph are reported.
     pub fn to_yaml(&self) -> Result<String, LockfileError> {
         for (i, source) in self.sources.iter().enumerate() {
             if source.documents == self.documents

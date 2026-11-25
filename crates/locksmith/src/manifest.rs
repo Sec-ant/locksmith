@@ -40,11 +40,16 @@ pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
 }
 
 pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
-    left.get("overrides") == right.get("overrides")
-        && graph::section(left, "overrides")
+    same_ordered_mapping(left.get("overrides"), right.get("overrides"))
+}
+
+pub(crate) fn same_ordered_mapping(left: Option<&Value>, right: Option<&Value>) -> bool {
+    left == right
+        && left
+            .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .eq(graph::section(right, "overrides").into_iter().flatten())
+            .eq(right.and_then(Value::as_object).into_iter().flatten())
 }
 
 /// pnpm precedence: optional > production > dev > auto-installed peers.
@@ -53,15 +58,7 @@ pub(crate) fn declarations<'a>(
     overrides: &Overrides<'a>,
     importer: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
-    importer_declarations(manifest, overrides, importer, &[])
-}
-
-fn importer_declarations<'a>(
-    manifest: &'a Value,
-    overrides: &Overrides<'a>,
-    importer: &str,
-    ignored_optional: &[&str],
-) -> Result<Declarations<'a>, LockfileError> {
+    let ignores_optional = overrides.optional_exclusion()?;
     // pnpm 12 checks optional exclusions after peers have entered the production group.
     let exclude_peer = overrides
         .config
@@ -76,7 +73,11 @@ fn importer_declarations<'a>(
         ("peerDependencies", "dependencies"),
         ("optionalDependencies", "optionalDependencies"),
     ] {
-        let filter_optional = !ignored_optional.is_empty()
+        let filter_optional = overrides
+            .config
+            .resolution
+            .ignored_optional_dependencies
+            .is_some()
             && (matches!(field, "dependencies" | "optionalDependencies")
                 || (exclude_peer && field == "peerDependencies"));
         let engines = match field {
@@ -123,7 +124,7 @@ fn importer_declarations<'a>(
                 .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
             if filter_optional
                 && manifest["optionalDependencies"].get(name).is_some()
-                && crate::config::matches_patterns(ignored_optional.iter().copied(), name)
+                && ignores_optional(name)
             {
                 continue;
             }
@@ -185,16 +186,57 @@ pub(crate) fn check(
     manifest: Option<&Value>,
     side: &'static str,
 ) -> Result<(), LockfileError> {
-    check_with_links(overrides, importer, manifest, side, None)
+    check_manifest(overrides, importer, manifest, side, ManifestCheck::Authored)
 }
 
-pub(crate) fn check_with_links(
+pub(crate) enum ManifestCheck<'a> {
+    Authored,
+    RecordedBaseline,
+    Frozen(&'a crate::workspace_links::FrozenWorkspace<'a>),
+}
+
+fn recorded_declarations<'a>(
+    manifest: &'a Value,
+    id: &str,
+) -> Result<Declarations<'a>, LockfileError> {
+    let mut expected = Declarations::new();
+    for group in GROUPS {
+        let Some(entries) = manifest.get(group) else {
+            continue;
+        };
+        let entries = entries
+            .as_object()
+            .ok_or_else(|| LockfileError::InvalidManifest(id.into()))?;
+        for (name, specifier) in entries {
+            let specifier = specifier
+                .as_str()
+                .ok_or_else(|| LockfileError::InvalidManifest(id.into()))?;
+            if expected
+                .insert(name, (group, Cow::Borrowed(specifier)))
+                .is_some()
+            {
+                return Err(mismatch(
+                    id,
+                    "baseline",
+                    format!("duplicate dependency {name}"),
+                ));
+            }
+        }
+    }
+    Ok(expected)
+}
+
+pub(crate) fn check_manifest(
     overrides: &Overrides<'_>,
     importer: &str,
     manifest: Option<&Value>,
     side: &'static str,
-    workspace: Option<&crate::workspace_links::FrozenWorkspace<'_>>,
+    mode: ManifestCheck<'_>,
 ) -> Result<(), LockfileError> {
+    let workspace = match mode {
+        ManifestCheck::Frozen(ws) => Some(ws),
+        _ => None,
+    };
     let document = overrides.document;
     let record = document.get("importers").and_then(|map| map.get(importer));
     let Some(manifest) = manifest else {
@@ -220,12 +262,10 @@ pub(crate) fn check_with_links(
         }
         _ => return Err(mismatch(importer, side, "missing importer")),
     };
-    let mut expected = importer_declarations(
-        manifest,
-        overrides,
-        importer,
-        workspace.map_or(&[], |ws| ws.ignored_optional.as_slice()),
-    )?;
+    let mut expected = match mode {
+        ManifestCheck::RecordedBaseline => recorded_declarations(manifest, importer)?,
+        _ => declarations(manifest, overrides, importer)?,
+    };
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {
@@ -434,15 +474,68 @@ struct OverrideRule<'a> {
     value: &'a Value,
 }
 
+#[derive(Clone, Copy)]
+enum OptionalRules {
+    Configured,
+    Sorted,
+    Disabled,
+}
+
 /// Index once per manifest so unrelated selectors are not reparsed for each
 /// dependency. Rules for one name retain their declaration order.
 pub(crate) struct Overrides<'a> {
     document: &'a Value,
     by_name: BTreeMap<&'a str, Vec<OverrideRule<'a>>>,
+    ignored_optional: std::cell::OnceCell<Vec<String>>,
+    optional_rules: OptionalRules,
     config: &'a WorkspaceConfig,
 }
 
 impl<'a> Overrides<'a> {
+    pub(crate) fn configuration(&self) -> &WorkspaceConfig {
+        self.config
+    }
+
+    pub(crate) fn optional_exclusion(&self) -> Result<impl Fn(&str) -> bool + '_, LockfileError> {
+        let patterns = match self.ignored_optional.get() {
+            Some(patterns) => patterns,
+            None => {
+                let raw = self
+                    .config
+                    .resolution
+                    .ignored_optional_dependencies
+                    .as_ref();
+                let rules = match self.optional_rules {
+                    OptionalRules::Disabled => Vec::new(),
+                    OptionalRules::Configured => crate::config::optional_patterns(raw, true)?,
+                    OptionalRules::Sorted => crate::config::optional_patterns(raw, false)?,
+                };
+                self.ignored_optional
+                    .get_or_init(|| rules.into_iter().map(str::to_owned).collect())
+            }
+        };
+        Ok(move |name: &str| {
+            crate::config::matches_patterns(patterns.iter().map(String::as_str), name)
+        })
+    }
+
+    pub(crate) fn for_frozen_workspace(document: &'a Value, config: &'a WorkspaceConfig) -> Self {
+        // pnpm 11.21+ on the 11.x line sorts mixed rules during the frozen check.
+        // Fresh resolution uses the configured order, including for snapshot edges.
+        let sorted = config
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
+        Self {
+            optional_rules: if sorted {
+                OptionalRules::Sorted
+            } else {
+                OptionalRules::Configured
+            },
+            ..Self::new(document, config)
+        }
+    }
+
     pub(crate) fn relevant(
         &self,
         name: &str,
@@ -475,6 +568,19 @@ impl<'a> Overrides<'a> {
         Self {
             document,
             by_name,
+            ignored_optional: Default::default(),
+            // pnpm's native resolver began applying optional exclusions to fresh
+            // importer and package manifests in 12.4.1. Earlier 12.x frozen
+            // checks already used the configured patterns.
+            optional_rules: if config
+                .pnpm_version
+                .as_ref()
+                .is_some_and(|v| v.major() == 12 && v < &node_semver::Version::from((12, 4, 1)))
+            {
+                OptionalRules::Disabled
+            } else {
+                OptionalRules::Configured
+            },
             config,
         }
     }

@@ -26,6 +26,96 @@ fn change<'a>(id: &'a str, before: &'a Value, after: &'a Value) -> ManifestChang
         after: Some(after),
     }
 }
+
+#[test]
+fn unchanged_pnpm_configuration_can_be_supplied_once() {
+    let input = lock(json!({".": {}}), json!({}));
+    let before = json!({"packageManager":"pnpm@12.21.0"});
+    let after =
+        json!({"packageManager":"pnpm@12.21.0","pnpm":{"ignoredBuiltDependencies":["tool"]}});
+    let config =
+        locksmith::WorkspaceConfig::from_pnpm_version(&json!({}), &"12.21.0".parse().unwrap())
+            .unwrap();
+    for baseline_configuration in [None, Some(&config)] {
+        let output = converge(
+            &input,
+            &input,
+            &[change(".", &before, &after)],
+            locksmith::ConvergeOptions {
+                configuration: Some(&config),
+                baseline_configuration,
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(output.to_yaml().unwrap(), input.to_yaml().unwrap());
+    }
+    let legacy =
+        locksmith::WorkspaceConfig::from_pnpm_version(&json!({}), &"10.34.9".parse().unwrap())
+            .unwrap();
+    let result = converge(
+        &input,
+        &input,
+        &[change(
+            ".",
+            &json!({}),
+            &json!({"pnpm":{"overrides":{"lib":"1"}}}),
+        )],
+        locksmith::ConvergeOptions {
+            configuration: Some(&legacy),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(result, Err(LockfileError::GlobalConfigurationChanged{field,..}) if field=="pnpm")
+    );
+}
+
+#[test]
+fn recorded_and_authored_baselines_validate_their_own_specifiers() {
+    let input = lock(
+        json!({"app":{"dependencies":{"lib":{"specifier":"2.0.0","version":"2.0.0"}}}}),
+        json!({"lib@2.0.0":{}}),
+    );
+    let mut doc = input.project().unwrap().clone();
+    doc["overrides"] = json!({"lib@1.0.0":"2.0.0","lib@2.0.0":"3.0.0"});
+    let lock = parse(doc);
+    let authored = json!({"dependencies":{"lib":"1.0.0"}});
+    let recorded = json!({"dependencies":{"lib":"2.0.0"}});
+    let reconstructed = std::collections::BTreeSet::from(["app".to_owned()]);
+    let check = |before: &Value, after: &Value| {
+        locksmith::converge_with_recorded_baselines(
+            &lock,
+            &lock,
+            &[change("app", before, after)],
+            Default::default(),
+            &Default::default(),
+            &reconstructed,
+        )
+    };
+    assert!(check(&recorded, &authored).is_ok());
+    for (before, after, side) in [
+        (&authored, &authored, "baseline"),
+        (&recorded, &recorded, "candidate"),
+    ] {
+        assert!(
+            matches!(check(before, after), Err(LockfileError::ManifestMismatch {side: actual,..}) if actual == side)
+        );
+    }
+    assert!(matches!(
+        converge(
+            &lock,
+            &lock,
+            &[change("app", &recorded, &authored)],
+            Default::default()
+        ),
+        Err(LockfileError::ManifestMismatch {
+            side: "baseline",
+            ..
+        })
+    ));
+}
+
 fn fixture() -> (Lockfile, Lockfile, Value, Value) {
     let before = json!({"dependencies":{"foo":"1.0.0","bar":"^1.0.0"}});
     let after = json!({"dependencies":{"foo":"2.0.0","bar":"^1.0.0"}});

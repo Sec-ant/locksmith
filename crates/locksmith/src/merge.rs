@@ -6,7 +6,9 @@ use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value
 
 /// A parsed lockfile or its original YAML text.
 pub enum MergeInput<'a> {
+    /// Reuse an already parsed lockfile.
     Parsed(&'a Lockfile),
+    /// Parse the supplied YAML as part of the merge.
     Yaml(&'a str),
 }
 
@@ -28,6 +30,11 @@ impl<'a> From<&'a str> for MergeInput<'a> {
 ///
 /// Pass parsed lockfiles or YAML slices. Contextual merges of raw YAML can recover
 /// duplicate snapshot keys when every interpretation yields the same result.
+///
+/// # Errors
+/// Returns [`LockfileError::Conflicts`] for incompatible branch edits, or
+/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select a pin.
+/// Malformed inputs and invalid dependency graphs also return errors.
 pub fn merge<'a>(
     base: impl Into<MergeInput<'a>>,
     ours: impl Into<MergeInput<'a>>,
@@ -111,6 +118,12 @@ fn three_way(
                 }
             }
             crate::assembly::complete(&mut document, kind, None, &mut context.conflicts)?;
+            if kind == DocumentKind::Project && context.conflicts.is_empty() {
+                graph::refresh_merged_optional(
+                    &mut document,
+                    [ours, theirs].into_iter().filter_map(Lockfile::project),
+                )?;
+            }
             documents.insert(kind, std::sync::Arc::new(document));
         }
         conflicts.extend(context.conflicts);
@@ -160,14 +173,26 @@ impl Context<'_> {
         // deletion could remove an entry that a new importer still references.
         let container = path.is_empty()
             || (path.len() == 1 && ["packages", "snapshots"].contains(&path[0].as_str()));
-        if !container || ours == theirs {
-            if ours == theirs {
-                return ours.cloned();
+        let ordered = path.len() == 1 && path[0] == "overrides";
+        let equal = |left: Option<&Value>, right: Option<&Value>| {
+            if ordered {
+                crate::manifest::same_ordered_mapping(left, right)
+            } else {
+                left == right
+                    && (!path.is_empty()
+                        || left
+                            .zip(right)
+                            .is_none_or(|(a, b)| crate::manifest::same_override_order(a, b)))
             }
-            if ours == base {
+        };
+        if equal(ours, theirs) {
+            return ours.cloned();
+        }
+        if !container {
+            if equal(ours, base) {
                 return theirs.cloned();
             }
-            if theirs == base {
+            if equal(theirs, base) {
                 return ours.cloned();
             }
         }
@@ -190,17 +215,36 @@ impl Context<'_> {
             && base.is_none_or(Value::is_object);
         if recurse {
             let mut result = Map::new();
-            // Keep the first parent's root/field order. Entry sections are sorted
-            // when emitted, matching pnpm's output.
-            let mut seen = BTreeSet::new();
-            let names: Vec<_> = ours
-                .into_iter()
-                .chain(theirs)
-                .chain(base)
-                .flat_map(|value| value.as_object().expect("mapping was checked").keys())
-                .filter(|key| seen.insert((*key).clone()))
-                .cloned()
-                .collect();
+            let (left, right) = (
+                ours.unwrap().as_object().unwrap(),
+                theirs.unwrap().as_object().unwrap(),
+            );
+            let base_map = base.and_then(Value::as_object);
+            let names = if ordered {
+                override_keys(base_map, left, right)
+            } else {
+                // Keep the first parent's field order. The writer sorts graph sections.
+                let mut seen = BTreeSet::new();
+                Some(
+                    left.keys()
+                        .chain(right.keys())
+                        .chain(base_map.into_iter().flat_map(Map::keys))
+                        .filter(|key| seen.insert(*key))
+                        .cloned()
+                        .collect(),
+                )
+            };
+            let Some(names) = names else {
+                self.conflicts.push(Conflict {
+                    document: self.kind,
+                    path: path.clone(),
+                    kind: ConflictKind::BothChanged,
+                    base: base.cloned(),
+                    ours: ours.cloned(),
+                    theirs: theirs.cloned(),
+                });
+                return ours.cloned();
+            };
             for name in names {
                 path.push(name.clone());
                 let value = self.value(
@@ -226,10 +270,10 @@ impl Context<'_> {
                 Some(theirs.unwrap_or(&empty)),
             );
         }
-        if ours == base {
+        if equal(ours, base) {
             return theirs.cloned();
         }
-        if theirs == base {
+        if equal(theirs, base) {
             return ours.cloned();
         }
         self.conflicts.push(Conflict {
@@ -248,4 +292,98 @@ impl Context<'_> {
         // Conflicted candidates never escape through the public API.
         ours.or(theirs).cloned()
     }
+}
+
+// Merge precedence among surviving base rules separately from insertions.
+// A deletion still participates in the value merge so delete/modify conflicts surface.
+fn override_keys(
+    base: Option<&Map<String, Value>>,
+    ours: &Map<String, Value>,
+    theirs: &Map<String, Value>,
+) -> Option<Vec<String>> {
+    if ours.keys().eq(theirs.keys()) {
+        return Some(ours.keys().cloned().collect());
+    }
+    let mut names = Vec::new();
+    let mut indices = std::collections::HashMap::new();
+    let parents = [ours, theirs].map(|map| {
+        map.keys()
+            .map(|key| {
+                *indices.entry(key.as_str()).or_insert_with(|| {
+                    names.push(key);
+                    names.len() - 1
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let surviving = |key: &&String| ours.contains_key(*key) && theirs.contains_key(*key);
+    let original: Vec<_> = base
+        .into_iter()
+        .flat_map(Map::keys)
+        .filter(surviving)
+        .map(|key| indices[key.as_str()])
+        .collect();
+    let anchors: BTreeSet<_> = original.iter().copied().collect();
+    let [left, right] = parents.each_ref().map(|keys| {
+        keys.iter()
+            .copied()
+            .filter(|k| anchors.contains(k))
+            .collect::<Vec<_>>()
+    });
+    let order = if left == right || right == original {
+        &left
+    } else if left == original {
+        &right
+    } else {
+        return None;
+    };
+
+    // Each inserted run keeps its neighbors. Leading and trailing runs stay
+    // at their respective ends when the other parent reorders existing rules.
+    let mut successors = vec![BTreeSet::new(); names.len()];
+    let mut incoming = vec![0; names.len()];
+    let mut precedes = |a: usize, b: usize| {
+        if successors[a].insert(b) {
+            incoming[b] += 1;
+        }
+    };
+    for pair in order.windows(2) {
+        precedes(pair[0], pair[1]);
+    }
+    for mut keys in parents {
+        keys.retain(|k| anchors.contains(k) || base.is_none_or(|m| !m.contains_key(names[*k])));
+        for pair in keys.windows(2) {
+            if !anchors.contains(&pair[0]) || !anchors.contains(&pair[1]) {
+                precedes(pair[0], pair[1]);
+            }
+        }
+        if let Some((&first, &last)) = order.first().zip(order.last()) {
+            if let Some(&prefix) = keys.iter().take_while(|k| !anchors.contains(k)).last() {
+                precedes(prefix, first);
+            }
+            if let Some(&suffix) = keys
+                .iter()
+                .rev()
+                .take_while(|k| !anchors.contains(k))
+                .last()
+            {
+                precedes(last, suffix);
+            }
+        }
+    }
+
+    // Indices break unconstrained ties in parent order. A cycle means the
+    // insertions and the chosen precedence cannot both be honored.
+    let mut ready: BTreeSet<_> = (0..names.len()).filter(|&i| incoming[i] == 0).collect();
+    let mut result = Vec::with_capacity(names.len());
+    while let Some(i) = ready.pop_first() {
+        result.push(names[i].clone());
+        for &next in &successors[i] {
+            incoming[next] -= 1;
+            if incoming[next] == 0 {
+                ready.insert(next);
+            }
+        }
+    }
+    (result.len() == names.len()).then_some(result)
 }

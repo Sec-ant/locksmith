@@ -296,55 +296,39 @@ fn retired_requirements(
     retired
 }
 
-pub(super) fn rebuild(
-    document: &mut Value,
+fn importer_roots(record: &Value) -> Vec<(String, String)> {
+    manifest::GROUPS
+        .into_iter()
+        .flat_map(|group| {
+            graph::section(record, group)
+                .into_iter()
+                .flatten()
+                .map(|(name, dep)| {
+                    (
+                        name.clone(),
+                        dep["version"].as_str().expect("selected root").to_owned(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>()
+}
+
+struct Propagation {
+    required: Requirements,
+    affected: PeerRequirements,
+    retired: PeerRequirements,
+}
+
+fn initial_requirements(
+    additions: &PeerRequirements,
+    unresolved: &PeerRequirements,
+    snapshots: &Map<String, Value>,
+    packages: &Map<String, Value>,
     peers: &mut peer::Merger<'_>,
-    changes: PeerChanges,
-    config: &WorkspaceConfig,
-    source: impl Fn(&str) -> Option<usize>,
-) -> Result<Vec<String>, LockfileError> {
-    let PeerChanges {
-        required: additions,
-        mut affected,
-        unresolved,
-        supplied,
-    } = changes;
-    let mut snapshots = std::mem::take(
-        document["snapshots"]
-            .as_object_mut()
-            .expect("assembled snapshots"),
-    );
-    let mut importers = std::mem::take(
-        document["importers"]
-            .as_object_mut()
-            .expect("assembled importers"),
-    );
-    let packages = document["packages"]
-        .as_object()
-        .expect("assembled packages");
-    let roots = |record: &Value| {
-        manifest::GROUPS
-            .into_iter()
-            .flat_map(|group| {
-                graph::section(record, group)
-                    .into_iter()
-                    .flatten()
-                    .map(|(name, dep)| {
-                        (
-                            name.clone(),
-                            dep["version"].as_str().expect("selected root").to_owned(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>()
-    };
-    let global = installed(importers.values().flat_map(&roots), &snapshots, packages);
-    let original_roots: BTreeMap<_, _> = importers
-        .iter()
-        .map(|(id, record)| (id.clone(), roots(record)))
-        .collect();
+    source: &impl Fn(&str) -> Option<usize>,
+) -> Result<Requirements, LockfileError> {
     let mut required = Requirements::new();
-    for (key, names) in &additions {
+    for (key, names) in additions {
         let side = peers
             .origin_side(key)
             .or_else(|| source(key))
@@ -367,7 +351,7 @@ pub(super) fn rebuild(
         };
         let entries = required.entry(key.clone()).or_default();
         for name in names {
-            let Some(optional) = peer::optional_requirement(key, name, &snapshots, packages) else {
+            let Some(optional) = peer::optional_requirement(key, name, snapshots, packages) else {
                 // Ordinary edge selection can remove the last consumer of an
                 // unresolved transitive peer from the borrowed snapshot.
                 continue;
@@ -395,12 +379,30 @@ pub(super) fn rebuild(
             );
         }
     }
+    Ok(required)
+}
+
+fn propagate(
+    changes: PeerChanges,
+    snapshots: &Map<String, Value>,
+    packages: &Map<String, Value>,
+    peers: &mut peer::Merger<'_>,
+    source: &impl Fn(&str) -> Option<usize>,
+) -> Result<Propagation, LockfileError> {
+    let PeerChanges {
+        required: additions,
+        mut affected,
+        unresolved,
+        supplied,
+    } = changes;
+    let mut required =
+        initial_requirements(&additions, &unresolved, snapshots, packages, peers, source)?;
     let mut parents: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
-    for (key, body) in &snapshots {
+    for (key, body) in snapshots {
         for (_, name, value) in references(body).filter(|(_, _, value)| !value.starts_with("link:"))
         {
             parents
-                .entry(graph::snapshot_key(name, value, Some(&snapshots)))
+                .entry(graph::snapshot_key(name, value, Some(snapshots)))
                 .or_default()
                 .push((key, name));
         }
@@ -448,7 +450,7 @@ pub(super) fn rebuild(
             }
         }
     }
-    let retired = retired_requirements(&supplied, &snapshots, packages, &parents);
+    let retired = retired_requirements(&supplied, snapshots, packages, &parents);
     for (key, names) in &retired {
         affected
             .entry(key.clone())
@@ -468,7 +470,7 @@ pub(super) fn rebuild(
         for (_, name, value) in
             references(&snapshots[&parent]).filter(|(_, _, value)| !value.starts_with("link:"))
         {
-            let child = graph::snapshot_key(name, value, Some(&snapshots));
+            let child = graph::snapshot_key(name, value, Some(snapshots));
             let own = packages[graph::package_key(&child)].get("peerDependencies");
             let transitive = snapshots[&child]["transitivePeerDependencies"].as_array();
             let mut inherited = context
@@ -490,6 +492,47 @@ pub(super) fn rebuild(
             }
         }
     }
+    Ok(Propagation {
+        required,
+        affected,
+        retired,
+    })
+}
+
+pub(super) fn rebuild(
+    document: &mut Value,
+    peers: &mut peer::Merger<'_>,
+    changes: PeerChanges,
+    config: &WorkspaceConfig,
+    source: impl Fn(&str) -> Option<usize>,
+) -> Result<Vec<String>, LockfileError> {
+    let mut snapshots = std::mem::take(
+        document["snapshots"]
+            .as_object_mut()
+            .expect("assembled snapshots"),
+    );
+    let mut importers = std::mem::take(
+        document["importers"]
+            .as_object_mut()
+            .expect("assembled importers"),
+    );
+    let packages = document["packages"]
+        .as_object()
+        .expect("assembled packages");
+    let original_roots: BTreeMap<_, _> = importers
+        .iter()
+        .map(|(id, record)| (id.clone(), importer_roots(record)))
+        .collect();
+    let global = installed(
+        original_roots.values().flatten().cloned(),
+        &snapshots,
+        packages,
+    );
+    let Propagation {
+        required,
+        affected,
+        retired,
+    } = propagate(changes, &snapshots, packages, peers, &source)?;
     let mut instances: HashMap<&str, Vec<&str>> = HashMap::new();
     for key in snapshots.keys() {
         instances
@@ -580,107 +623,11 @@ pub(super) fn rebuild(
         pending: BTreeSet::new(),
         selected_providers: HashMap::new(),
     };
-    let ids: Vec<_> = importers.keys().cloned().collect();
-    for id in ids {
-        if !resolver.share_optional {
-            resolver.scope_id += 1;
-            let root = (id != "." && config.resolution.workspace_root_peers)
-                .then(|| original_roots["."].clone());
-            resolver.project = installed(
-                original_roots[&id]
-                    .iter()
-                    .cloned()
-                    .chain(root.into_iter().flatten()),
-                &snapshots,
-                packages,
-            );
-        }
-        let roots: Vec<_> = manifest::GROUPS
-            .into_iter()
-            .flat_map(|group| {
-                graph::section(&importers[&id], group)
-                    .into_iter()
-                    .flatten()
-                    .map(move |(name, dep)| {
-                        (
-                            group,
-                            name.clone(),
-                            dep["version"].as_str().expect("selected root").to_owned(),
-                        )
-                    })
-            })
-            .collect();
-        let mut settled = false;
-        for _ in 0..=roots.len() {
-            let mut scope = Scope::new();
-            for importer in [
-                (id != "." && config.resolution.workspace_root_peers).then_some("."),
-                Some(id.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for group in manifest::GROUPS {
-                    for (name, dep) in graph::section(&importers[importer], group)
-                        .into_iter()
-                        .flatten()
-                    {
-                        scope.insert(
-                            name.clone(),
-                            peer::root_provider(
-                                importer,
-                                dep["version"].as_str().expect("selected root"),
-                            ),
-                        );
-                    }
-                }
-            }
-            let scope = peer::canonical_providers(&scope);
-            let scope = resolver.environments.overlay(
-                &resolver.environments.empty(),
-                scope
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.as_str())),
-            );
-            let mut changed = false;
-            for (group, name, initial) in &roots {
-                if initial.starts_with("link:") {
-                    continue;
-                }
-                let key = graph::snapshot_key(name, initial, Some(&snapshots));
-                let rebound = resolver.node(&key, &scope).map_err(|error| match error {
-                    LockfileError::ResolutionRequired {
-                        path,
-                        message,
-                        request,
-                    } => LockfileError::ResolutionRequired {
-                        request,
-                        path: ["importers".into(), id.clone(), name.clone()]
-                            .into_iter()
-                            .chain(path)
-                            .collect(),
-                        message,
-                    },
-                    error => error,
-                })?;
-                let rebound = rebound.map_or(key.as_str(), |id| resolver.environments.text(id));
-                let next = Value::String(reference(name, rebound));
-                let previous = &mut importers[&id][*group][name]["version"];
-                changed |= *previous != next;
-                *previous = next;
-            }
-            if !changed {
-                settled = true;
-                break;
-            }
-        }
-        if !settled {
-            return Err(missing(
-                &["importers", &id],
-                "new peer identities do not reach a stable context",
-            ));
-        }
-    }
+    resolver.resolve_importers(
+        &mut importers,
+        &original_roots,
+        config.resolution.workspace_root_peers,
+    )?;
     for (key, context) in resolver.deferred_contexts {
         let bindings = context
             .bindings
@@ -701,7 +648,6 @@ pub(super) fn rebuild(
     }
     let written = resolver.written;
     let mut pending = resolver.pending;
-    drop(parents);
     let mut replacements: Vec<_> = written
         .into_iter()
         .filter_map(|(key, instance)| {
@@ -785,6 +731,115 @@ struct Resolver<'a, 'm, 'd, F> {
 }
 
 impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
+    fn resolve_importers(
+        &mut self,
+        importers: &mut Map<String, Value>,
+        original_roots: &BTreeMap<String, Vec<(String, String)>>,
+        workspace_root_peers: bool,
+    ) -> Result<(), LockfileError> {
+        let ids: Vec<_> = importers.keys().cloned().collect();
+        for id in ids {
+            if !self.share_optional {
+                self.scope_id += 1;
+                let root = (id != "." && workspace_root_peers).then(|| original_roots["."].clone());
+                self.project = installed(
+                    original_roots[&id]
+                        .iter()
+                        .cloned()
+                        .chain(root.into_iter().flatten()),
+                    self.snapshots,
+                    self.packages,
+                );
+            }
+            let roots: Vec<_> = manifest::GROUPS
+                .into_iter()
+                .flat_map(|group| {
+                    graph::section(&importers[&id], group)
+                        .into_iter()
+                        .flatten()
+                        .map(move |(name, dep)| {
+                            (
+                                group,
+                                name.clone(),
+                                dep["version"].as_str().expect("selected root").to_owned(),
+                            )
+                        })
+                })
+                .collect();
+            let mut settled = false;
+            for _ in 0..=roots.len() {
+                let mut scope = Scope::new();
+                for importer in [
+                    (id != "." && workspace_root_peers).then_some("."),
+                    Some(id.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for group in manifest::GROUPS {
+                        for (name, dep) in graph::section(&importers[importer], group)
+                            .into_iter()
+                            .flatten()
+                        {
+                            scope.insert(
+                                name.clone(),
+                                peer::root_provider(
+                                    importer,
+                                    dep["version"].as_str().expect("selected root"),
+                                ),
+                            );
+                        }
+                    }
+                }
+                let scope = peer::canonical_providers(&scope);
+                let scope = self.environments.overlay(
+                    &self.environments.empty(),
+                    scope
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
+                );
+                let mut changed = false;
+                for (group, name, initial) in &roots {
+                    if initial.starts_with("link:") {
+                        continue;
+                    }
+                    let key = graph::snapshot_key(name, initial, Some(self.snapshots));
+                    let rebound = self.node(&key, &scope).map_err(|error| match error {
+                        LockfileError::ResolutionRequired {
+                            path,
+                            message,
+                            request,
+                        } => LockfileError::ResolutionRequired {
+                            request,
+                            path: ["importers".into(), id.clone(), name.clone()]
+                                .into_iter()
+                                .chain(path)
+                                .collect(),
+                            message,
+                        },
+                        error => error,
+                    })?;
+                    let rebound = rebound.map_or(key.as_str(), |id| self.environments.text(id));
+                    let next = Value::String(reference(name, rebound));
+                    let previous = &mut importers[&id][*group][name]["version"];
+                    changed |= *previous != next;
+                    *previous = next;
+                }
+                if !changed {
+                    settled = true;
+                    break;
+                }
+            }
+            if !settled {
+                return Err(missing(
+                    &["importers", &id],
+                    "new peer identities do not reach a stable context",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn provider_allowed(&self, key: &str, optional: bool) -> bool {
         if optional {
             (if self.share_optional {

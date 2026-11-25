@@ -1,8 +1,6 @@
 //! Follow reachable dependency edges and install each repaired snapshot with its source metadata.
 use super::repair::repair_snapshot;
-use super::{
-    GraphSources, PeerChanges, RepairedSnapshot, authorized_patch, expand, missing, peer_names,
-};
+use super::{GraphSources, PeerChanges, RepairedSnapshot, expand, missing, peer_names};
 use crate::{LockfileError, Value, graph, manifest, peer};
 use serde_json::json;
 use std::borrow::Cow;
@@ -17,7 +15,7 @@ pub(super) fn assemble(
     preferences: &super::preference::Preferences,
     alternative: usize,
 ) -> Result<bool, LockfileError> {
-    let docs = sources.docs;
+    let docs = sources.documents();
     output["snapshots"] = json!({});
     output["packages"] = json!({});
     let mut pending = Vec::new();
@@ -39,7 +37,7 @@ pub(super) fn assemble(
             if !seen.insert(key.clone()) || output["snapshots"].get(&key).is_some() {
                 continue;
             }
-            if !authorized_patch(&key, output, sources.docs) {
+            if !sources.authorized_patch(&key, output) {
                 return Err(missing(
                     &["snapshots", &key],
                     "instance does not use the final patch",
@@ -58,11 +56,11 @@ pub(super) fn assemble(
                 .into_iter()
                 .chain(order)
             {
-                if !sources.compatibility[side].accepts(&key) {
+                if !sources.inputs[side].compatibility.accepts(&key) {
                     continue;
                 }
                 if let Some(body) = docs[side].get("snapshots").and_then(|v| v.get(&key)) {
-                    if sources.compatibility[side].unchanged(&key) {
+                    if sources.inputs[side].compatibility.unchanged(&key) {
                         selected = Some((side, Cow::Borrowed(body)));
                         break;
                     }
@@ -70,9 +68,9 @@ pub(super) fn assemble(
                 }
             }
             if let Some(side) = peers.origin_side(&key)
-                && !sources.compatibility[side].unchanged(&key)
+                && !sources.inputs[side].compatibility.unchanged(&key)
             {
-                if selected.is_none() && !sources.compatibility[side].accepts(&key) {
+                if selected.is_none() && !sources.inputs[side].compatibility.accepts(&key) {
                     return Err(missing(
                         &["snapshots", &key],
                         "peer instance uses a different resolution configuration",
@@ -171,7 +169,7 @@ pub(super) fn assemble(
         pending = expand::rebuild(output, peers, new_peers, sources.configuration, |key| {
             configured_sources.get(key).copied().or_else(|| {
                 source_order.iter().copied().find(|side| {
-                    sources.compatibility[*side].accepts(key)
+                    sources.inputs[*side].compatibility.accepts(key)
                         && docs[*side]
                             .get("snapshots")
                             .and_then(|v| v.get(key))

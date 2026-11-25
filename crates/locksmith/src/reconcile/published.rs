@@ -57,11 +57,7 @@ fn published_declarations(
         .as_ref()
         .is_some_and(|v| v.major() == 12 && v < &node_semver::Version::from((12, 17, 0)));
     let own_name = raw["name"].as_str();
-    let ignored = config
-        .resolution
-        .ignored_optional_dependencies
-        .as_ref()
-        .and_then(Value::as_array);
+    let ignores_optional = rules.optional_exclusion()?;
     let mut declarations = PublishedDeclarations::default();
     let mut removed_dependencies = BTreeSet::new();
     let mut removed_optional = BTreeSet::new();
@@ -111,7 +107,7 @@ fn published_declarations(
                 continue;
             }
             if group == "optionalDependencies" {
-                if ignored.is_some_and(|a| a.iter().any(|v| v == name)) {
+                if ignores_optional(name) {
                     removed_optional.insert(name.as_str());
                     continue;
                 }

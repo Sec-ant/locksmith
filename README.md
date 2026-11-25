@@ -4,7 +4,7 @@ Locksmith merges and validates pnpm lockfiles, keeps unrelated dependency change
 
 When `pnpm-lock.yaml` conflicts during a merge or rebase, regenerating it can change unrelated versions and peer bindings. Even with the original lockfile in place, a dependency edit can change how pnpm resolves peers in other workspace projects.
 
-Locksmith works directly on the lockfile graph and preserves versions and peer bindings that still fit. It works offline by default. Merge, converge, and repair return the original bytes when the lockfile needs no changes.
+Locksmith works directly on the lockfile graph and preserves versions and peer bindings that still fit. It works offline by default. Repair returns a healthy lock byte-for-byte. Merge and converge reuse unchanged source blocks and can normalize importer ordering or record formatting when assembling the result.
 
 | Starting point                                                                      | Command                                                   |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -85,7 +85,7 @@ pnpm locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers after overrides, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 
@@ -98,7 +98,7 @@ pnpm locksmith repair HEAD > repaired.yaml
 git diff --no-index pnpm-lock.yaml repaired.yaml
 ```
 
-A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
+Repair checks dependencies reachable from the workspace projects. It preserves unrelated, unreachable records, including stale ones. Run `locksmith validate repaired.yaml` to check every recorded reference. A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
 
 ## Validate a lockfile
 
@@ -109,6 +109,8 @@ Use `locksmith validate --workspace [FILE]` to also check that workspace members
 When the workspace omits `packages` and the pnpm version is unknown, Locksmith selects only the root package. Projects using the recursive default of pnpm before 10.5 can declare their pnpm version in `packageManager`.
 
 In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also checks package availability and integrity.
+
+Mixed `ignoredOptionalDependencies` rules can expose a difference between fresh and frozen installs. For example, pnpm 11.21 and later on the 11.x line keeps `is-number` on a fresh install with `["*", "!is-number"]`, then rejects that lock on a frozen install. Locksmith's writing commands preserve the fresh resolution. `validate --workspace` follows the frozen check for the workspace's pnpm version.
 
 ## Inspect peer bindings and package instances
 
@@ -174,7 +176,7 @@ Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full AP
 
 ## Performance
 
-Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
+Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times. Two further inspection workloads have 1,000 and 4,000 projects linking to an external directory. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 
@@ -183,7 +185,7 @@ Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project
 - The library performs no I/O. The CLI reads project files, Git, and the registry.
 - Registry access is opt-in with `--allow-network`.
 - The Git driver requires Git 2.38 or later.
-- The output is validated before it is written; a failed operation produces no partial lockfile.
+- Lockfile commands finish assembling and checking their result before writing YAML to stdout. Use `validate` to check references throughout a lockfile, including records outside the scope of a repair.
 
 ## Prepare a release
 

@@ -97,6 +97,13 @@ impl Project {
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
+        let recorded_version = if recorded_version.is_none() && pnpm_version(&root).is_none() {
+            read("pnpm-lock.yaml")?
+                .as_deref()
+                .and_then(locksmith::RepairInput::recorded_pnpm_version)
+        } else {
+            recorded_version
+        };
         Self::from_manifest(root, recorded_version, read)
     }
 
@@ -148,7 +155,8 @@ pub fn settings(
     version: Option<&node_semver::Version>,
     mut read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<(Value, bool)> {
-    let mut config = match root.get("pnpm") {
+    let legacy = version.is_none_or(|v| v.major() < 11);
+    let mut config = match root.get("pnpm").filter(|_| legacy) {
         Some(v) if v.is_object() => v.clone(),
         Some(_) => {
             return Err("package.json: expected pnpm to be an object".into());
@@ -159,7 +167,6 @@ pub fn settings(
     config.as_object_mut().unwrap().remove("packages");
     // Read this hook setting only from the configuration files supported by pnpm.
     config.as_object_mut().unwrap().remove("ignorePnpmfile");
-    let legacy = version.is_none_or(|v| v.major() < 11);
     if legacy && let Some(resolutions) = root.get("resolutions") {
         let mut overrides = resolutions
             .as_object()

@@ -96,8 +96,11 @@ export interface Inspection {
     exception: string | null
     bindings: Array<{ snapshot: string; reference: string | null }>
     matchingVersionsInLock: string[]
+    /** Importers with a direct dependency edge to a requester snapshot. */
     directWorkspaces: string[]
+    /** Importers that reach a requester through any recorded path, including direct edges. */
     reachableWorkspaces: string[]
+    /** A shortest path from a workspace to the requester, or null when unreachable. */
     examplePath: string[] | null
   }>
   multiplicity: Array<{ name: string; releases: Array<{ id: string; version: string | null; snapshots: number }> }>
@@ -105,8 +108,10 @@ export interface Inspection {
 }
 export function inspect(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<Inspection>
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>
+/** Merge the branches against their ancestor. A conflict or unresolved selection rejects with a LockfileError. */
 export function merge(base: LockInput, ours: LockInput, theirs: LockInput, context?: MergeContext): Promise<string>
 export function converge(baseline: LockInput, candidate: LockInput, changes: ManifestChange[], options?: ConvergeOptions): Promise<string>
+/** Repair the dependencies reachable from the supplied projects. Use validate() to check all recorded references. */
 export function repair(yaml: string, context: RepairContext): Promise<string>
 
 export interface WorkspaceOptions {

@@ -104,7 +104,9 @@ fn main() -> io::Result<ExitCode> {
         .status
         .success()
     {
-        regressed |= compare("inspect", [base, head])?;
+        for command in ["inspect", "inspect-external-1000", "inspect-external-4000"] {
+            regressed |= compare(command, [base, head])?;
+        }
     }
     Ok(if regressed {
         ExitCode::FAILURE

@@ -2040,6 +2040,438 @@ fn write_input(root: &Path, name: &str, contents: impl std::fmt::Display) {
     fs::write(path, contents.to_string()).unwrap();
 }
 
+#[test]
+fn converge_tracks_an_installed_git_ignored_member_from_addition_to_removal() {
+    let r = Repo::new();
+    r.write(
+        "package.json",
+        r#"{"private":true,"packageManager":"pnpm@12.21.0"}"#,
+    );
+    r.write(".gitignore", "apps/generated/\n");
+    r.commit("ignore generated files");
+    let mut manifest = json!({"dependencies":{"local":"link:../local"},
+        "dependenciesMeta":{"local":{"injected":false}},
+        "publishConfig":{"directory":"dist","linkDirectory":false}});
+    r.write("apps/generated/package.json", &manifest.to_string());
+    let mut candidate = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    candidate["importers"]["apps/generated"] = json!({"dependencies":{"local":{"specifier":"link:../local","version":"link:../local"}},
+            "dependenciesMeta":manifest["dependenciesMeta"],"publishDirectory":"dist","linkDirectory":false});
+    r.write("pnpm-lock.yaml", &candidate.to_string());
+    check_workspace(r.0.path(), 0, "installed candidate");
+    let result = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(result.status.success(), "{}", report(&result));
+    r.write(
+        "pnpm-lock.yaml",
+        std::str::from_utf8(&result.stdout).unwrap(),
+    );
+    check_workspace(r.0.path(), 0, "converged output");
+    r.commit("record the generated importer");
+    let repeat = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(repeat.status.success(), "{}", report(&repeat));
+    assert_eq!(repeat.stdout, result.stdout);
+    let new_link = "link:../other";
+    manifest["dependencies"]["local"] = json!(new_link);
+    manifest["publishConfig"] = json!({"directory":"build"});
+    r.write("apps/generated/package.json", &manifest.to_string());
+    candidate["importers"]["apps/generated"]["publishDirectory"] = json!("build");
+    candidate["importers"]["apps/generated"]
+        .as_object_mut()
+        .unwrap()
+        .remove("linkDirectory");
+    candidate["importers"]["apps/generated"]["dependencies"]["local"] =
+        json!({"specifier":new_link,"version":new_link});
+    r.write("pnpm-lock.yaml", &candidate.to_string());
+    let edit = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(edit.status.success(), "{}", report(&edit));
+    r.write("pnpm-lock.yaml", std::str::from_utf8(&edit.stdout).unwrap());
+    check_workspace(r.0.path(), 0, "edited generated member");
+    r.commit("update generated member");
+    fs::remove_dir_all(r.0.path().join("apps/generated")).unwrap();
+    candidate["importers"]
+        .as_object_mut()
+        .unwrap()
+        .remove("apps/generated");
+    r.write("pnpm-lock.yaml", &candidate.to_string());
+    let removed = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(removed.status.success(), "{}", report(&removed));
+    r.write(
+        "pnpm-lock.yaml",
+        std::str::from_utf8(&removed.stdout).unwrap(),
+    );
+    check_workspace(r.0.path(), 0, "removed generated member");
+}
+
+#[test]
+fn converge_uses_recorded_specifiers_once_for_generated_members() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let overrides = json!({"is-number@5.0.0":"6.0.0","is-number@6.0.0":"7.0.0"});
+    r.write(
+        "pnpm-workspace.yaml",
+        &json!({"packages":["apps/*"],"overrides":overrides}).to_string(),
+    );
+    let id = "apps/generated";
+    let path = "apps/generated/package.json";
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    lock["overrides"] = overrides.clone();
+    let importer = |version: &str| json!({"dependencies":{"is-number":{"specifier":version,"version":version}}});
+    let manifest = |version: &str| json!({"dependencies":{"is-number":version}}).to_string();
+    r.write(path, &manifest("5.0.0"));
+    lock["importers"][id] = importer("6.0.0");
+    lock["packages"]["is-number@6.0.0"] = json!({"resolution":{}});
+    lock["snapshots"]["is-number@6.0.0"] = json!({});
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    check_workspace(r.0.path(), 0, "baseline");
+    r.commit("record the overridden importer");
+
+    r.write(path, &manifest("6.0.0"));
+    let stale = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(!stale.status.success(), "{}", report(&stale));
+    lock["importers"][id] = importer("7.0.0");
+    lock["packages"]["is-number@7.0.0"] = json!({"resolution":{}});
+    lock["snapshots"]["is-number@7.0.0"] = json!({});
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let edit = r.cmd(CLI, &["converge", "HEAD"]);
+
+    fs::remove_file(r.0.path().join(path)).unwrap();
+    lock["importers"].as_object_mut().unwrap().remove(id);
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let remove = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(
+        edit.status.success() && remove.status.success(),
+        "edit: {}\nremove: {}",
+        report(&edit),
+        report(&remove)
+    );
+    assert_eq!(graph(&edit.stdout)["importers"][id], importer("7.0.0"));
+    assert!(graph(&remove.stdout)["importers"].get(id).is_none());
+
+    // A rule and an authored specifier can change while the locked importer stays identical.
+    r.write(path, &manifest("6.0.0"));
+    lock["importers"][id] = importer("6.0.0");
+    lock["overrides"] = json!({"is-number@5.0.0":"6.0.0"});
+    r.write(
+        "pnpm-workspace.yaml",
+        &json!({"packages":["apps/*"],"overrides":lock["overrides"]}).to_string(),
+    );
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let unchanged = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(unchanged.status.success(), "{}", report(&unchanged));
+    assert_eq!(graph(&unchanged.stdout)["importers"][id], importer("6.0.0"));
+
+    // The new extension affects only the release the manifest just stopped using.
+    lock["overrides"] = overrides;
+    let settings = json!({"packages":["apps/*"],"overrides":lock["overrides"],
+        "packageExtensions":{"is-number@6":{"dependencies":{"is-buffer":"2.0.5"}}}});
+    r.write("pnpm-workspace.yaml", &settings.to_string());
+    // Recorded by pnpm 10.34.9 for the extension above.
+    lock["packageExtensionsChecksum"] =
+        json!("sha256-zWdDqa44lCRfRipKQcYOcX1RGy6x468mGsfynbmxO5k=");
+    lock["importers"][id] = importer("7.0.0");
+    for section in ["packages", "snapshots"] {
+        lock[section]
+            .as_object_mut()
+            .unwrap()
+            .remove("is-number@6.0.0");
+    }
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let replaced = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(replaced.status.success(), "{}", report(&replaced));
+    assert_eq!(graph(&replaced.stdout)["importers"][id], importer("7.0.0"));
+}
+
+#[test]
+fn converge_keeps_a_generated_members_peer_pin_across_an_unrelated_edit() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let id = "apps/generated";
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    for (range, pin, link, expected) in [
+        ("^1", "1.0.0", "link:../before", "1.0.0"),
+        ("^1", "1.1.0", "link:../after", "1.0.0"),
+        (">=1", "1.1.0", "link:../after", "1.1.0"),
+    ] {
+        r.write(
+            "apps/generated/package.json",
+            &json!({"peerDependencies":{"foo":range},"dependencies":{"local":link}}).to_string(),
+        );
+        lock["importers"][id] = json!({"dependencies":{"foo":{"specifier":range,"version":pin},"local":{"specifier":link,"version":link}}});
+        let key = format!("foo@{pin}");
+        lock["packages"][&key] = json!({"resolution":{}});
+        lock["snapshots"][&key] = json!({});
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        if pin == "1.0.0" {
+            r.commit("record the generated member's peer");
+            continue;
+        }
+        let result = r.cmd(CLI, &["converge", "HEAD"]);
+        assert!(result.status.success(), "{}", report(&result));
+        let doc = graph(&result.stdout);
+        assert_eq!(
+            doc["importers"][id]["dependencies"]["foo"]["version"], expected,
+            "{range}"
+        );
+        assert_eq!(
+            doc["importers"][id]["dependencies"]["local"]["version"],
+            link
+        );
+    }
+}
+
+#[test]
+fn converge_accepts_an_ignored_members_dependency_edit_with_unchanged_dev_engines() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    let mut member = json!({"devEngines":{"packageManager":{"name":"pnpm","version":"10.34.9"}}});
+    for spec in ["link:../original", "link:../edited"] {
+        member["dependencies"]["local"] = json!(spec);
+        lock["importers"]["apps/generated"]["dependencies"]["local"] =
+            json!({"specifier":spec,"version":spec});
+        r.write("apps/generated/package.json", &member.to_string());
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        if spec == "link:../original" {
+            r.commit("record generated importer");
+        }
+    }
+    let output = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(output.status.success(), "{}", report(&output));
+    assert_eq!(
+        graph(&output.stdout)["importers"]["apps/generated"],
+        lock["importers"]["apps/generated"]
+    );
+}
+
+#[test]
+fn converge_ignores_changes_to_inactive_package_json_settings() {
+    let r = Repo::new();
+    let mut root = json!({"packageManager":"pnpm@12.21.0"});
+    r.write("package.json", &root.to_string());
+    r.commit("use pnpm 12");
+    root["pnpm"] = json!({"ignoredBuiltDependencies":["build-tool"]});
+    r.write("package.json", &root.to_string());
+    let result = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(result.status.success(), "{}", report(&result));
+    assert_eq!(
+        result.stdout,
+        fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap()
+    );
+}
+
+#[test]
+fn convergence_uses_the_bootstrap_version_for_unpinned_workspace_configuration() {
+    let r = Repo::new();
+    let raw = fs::read_to_string(r.0.path().join("pnpm-lock.yaml")).unwrap();
+    let input = with_recorded_manager("12.21.0", &raw);
+    r.write("pnpm-lock.yaml", &input);
+    r.write("package.json", r#"{"pnpm":"unused by this version"}"#);
+    r.commit("lock the package manager");
+    check_workspace(r.0.path(), 0, "bootstrap version");
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, input.as_bytes());
+}
+
+#[test]
+fn workspace_commands_preserve_an_ignored_optional_dependency_even_when_another_member_uses_it() {
+    let r = Repo::new();
+    let root = json!({"packageManager":"pnpm@10.34.9","optionalDependencies":{"shared":"1.0.0"}});
+    let member = json!({"dependencies":{"shared":"1.0.0"}});
+    let settings = json!({"packages":["apps/*"],"ignoredOptionalDependencies":["shared"]});
+    let lock = json!({"lockfileVersion":"9.0","ignoredOptionalDependencies":["shared"],
+        "importers":{".":{},"apps/web":{"dependencies":{"shared":{"specifier":"1.0.0","version":"1.0.0"}}}},
+        "packages":{"shared@1.0.0":{"resolution":{}}},"snapshots":{"shared@1.0.0":{}}}).to_string();
+    r.write("package.json", &root.to_string());
+    r.write("apps/web/package.json", &member.to_string());
+    r.write("pnpm-workspace.yaml", &settings.to_string());
+    r.write("pnpm-lock.yaml", &lock);
+    r.write(
+        "context.json",
+        &json!({"target":"ours","manifests":{".":root,"apps/web":member},
+        "configuration":settings,"configurations":[settings,settings,settings],"patches":{}})
+        .to_string(),
+    );
+    r.commit("installed workspace");
+    check_workspace(r.0.path(), 0, "installed lock");
+    let mut failures = Vec::new();
+    for args in [
+        &["converge", "HEAD"][..],
+        &["repair", "HEAD"],
+        &[
+            "merge",
+            "pnpm-lock.yaml",
+            "pnpm-lock.yaml",
+            "pnpm-lock.yaml",
+            "--context",
+            "context.json",
+        ],
+    ] {
+        r.write("pnpm-lock.yaml", &lock);
+        let out = r.cmd(CLI, args);
+        if !out.status.success() {
+            failures.push(format!("{args:?}: {}", report(&out)));
+            continue;
+        }
+        r.write("pnpm-lock.yaml", std::str::from_utf8(&out.stdout).unwrap());
+        let check = r.cmd(CLI, &["validate", "--workspace"]);
+        if !check.status.success() {
+            failures.push(format!("{args:?}: {}", report(&check)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn writing_mixed_optional_exclusions_preserves_the_installers_choices() {
+    let r = Repo::new();
+    let settings = json!({"packages":[],"ignoredOptionalDependencies":["*","!keep"]});
+    let mut failures = Vec::new();
+    for (version, recorded, filters_on_install, frozen) in [
+        ("10.34.9", json!(["!keep", "*"]), true, 0),
+        ("11.21.0", json!(["!keep", "*"]), true, 1),
+        ("12.4.0", json!(["*", "!keep"]), false, 1),
+        ("12.4.1", json!(["*", "!keep"]), true, 0),
+    ] {
+        let manifest = json!({"packageManager":format!("pnpm@{version}"),
+            "optionalDependencies":{"keep":"1.0.0","dev":"2.0.0"},"devDependencies":{"dev":"1.0.0"}});
+        let pin = json!({"specifier":"1.0.0","version":"1.0.0"});
+        let (importer, dev_key, dev_snapshot) = if filters_on_install {
+            (
+                json!({"optionalDependencies":{"keep":pin},"devDependencies":{"dev":pin}}),
+                "dev@1.0.0",
+                json!({}),
+            )
+        } else {
+            (
+                json!({"optionalDependencies":{"keep":pin,"dev":{"specifier":"2.0.0","version":"2.0.0"}}}),
+                "dev@2.0.0",
+                json!({"optional":true}),
+            )
+        };
+        let lock = json!({"lockfileVersion":"9.0","ignoredOptionalDependencies":recorded,
+            "importers":{".": importer},"packages":{"keep@1.0.0":{"resolution":{}},dev_key:{"resolution":{}}},
+            "snapshots":{"keep@1.0.0":{"optional":true},dev_key:dev_snapshot}});
+        r.write("package.json", &manifest.to_string());
+        r.write("pnpm-workspace.yaml", &settings.to_string());
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        r.write(
+            "context.json",
+            &json!({"target":"ours","manifests":{".":manifest},"configuration":settings,
+            "configurations":[settings,settings,settings],"patches":{}})
+            .to_string(),
+        );
+        r.commit("record the installed graph");
+        check_workspace(r.0.path(), frozen, version);
+        for args in [
+            &["converge", "HEAD"][..],
+            &["repair", "HEAD"],
+            &[
+                "merge",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "--context",
+                "context.json",
+            ],
+        ] {
+            let out = r.cmd(CLI, args);
+            if !out.status.success() {
+                failures.push(format!("{version} {args:?}: {}", report(&out)));
+            } else if graph(&out.stdout)["importers"]["."] != importer {
+                failures.push(format!(
+                    "{version} {args:?}: {}",
+                    graph(&out.stdout)["importers"]["."]
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn validate_uses_the_effective_project_scoped_optional_peers_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(
+        root,
+        "package.json",
+        json!({"packageManager":"pnpm@12.21.0"}),
+    );
+    for (configured, dedupe, recorded, status) in [
+        (false, true, true, 1),
+        (true, true, false, 1),
+        (true, true, true, 0),
+        (true, false, false, 0),
+        (true, false, true, 1),
+    ] {
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
+            json!({"packages":[],
+            "projectScopedOptionalPeers":configured,"dedupePeerDependents":dedupe}),
+        );
+        let mut lock = json!({"lockfileVersion":"9.0","settings":{},"importers":{".":{}}});
+        if recorded {
+            lock["settings"]["projectScopedOptionalPeers"] = json!(true);
+        }
+        write_input(root, "pnpm-lock.yaml", lock);
+        check_workspace(root, status, (configured, dedupe, recorded));
+    }
+}
+
+#[test]
+fn validate_ignores_a_newer_peer_header_on_versions_that_do_not_check_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "pnpm-workspace.yaml", "packages: []");
+    write_input(
+        root,
+        "pnpm-lock.yaml",
+        json!({"lockfileVersion":"9.0",
+        "settings":{"projectScopedOptionalPeers":true},"importers":{".":{}}}),
+    );
+    for (version, status) in [
+        ("9.15.9", 0),
+        ("10.34.9", 0),
+        ("11.28.12", 0),
+        ("12.18.0", 0),
+        ("12.19.0", 1),
+    ] {
+        write_input(
+            root,
+            "package.json",
+            json!({"packageManager":format!("pnpm@{version}")}),
+        );
+        check_workspace(root, status, version);
+    }
+}
+
+#[test]
+fn package_json_overrides_apply_only_to_the_pnpm_versions_that_read_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "pnpm-workspace.yaml", "packages: []");
+    for (version, legacy) in [
+        ("9.15.9", true),
+        ("10.34.9", true),
+        ("11.28.12", false),
+        ("12.21.0", false),
+    ] {
+        let rules = json!({"lib":"5.0.0"});
+        write_input(
+            root,
+            "package.json",
+            json!({"packageManager":format!("pnpm@{version}"),"pnpm":{"overrides":rules}}),
+        );
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        if legacy {
+            lock["overrides"] = rules;
+        }
+        write_input(root, "pnpm-lock.yaml", lock);
+        check_workspace(root, 0, version);
+    }
+}
+
 #[track_caller]
 fn check_workspace(root: &Path, expected: i32, case: impl std::fmt::Debug) -> Output {
     let result = Command::new(CLI)

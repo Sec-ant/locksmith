@@ -10,17 +10,31 @@ use crate::{LockfileError, Value, manifest};
 /// already identified by an input lock, even when it is no longer a candidate.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RegistryRequest {
-    Version { name: String, selector: String },
-    Manifest { name: String, version: String },
+    /// Select a published release matching a dependency request.
+    Version {
+        /// Registry package name after alias expansion.
+        name: String,
+        /// Requested version range or distribution tag.
+        selector: String,
+    },
+    /// Look up the original manifest of an already identified release.
+    Manifest {
+        /// Registry package whose original declarations are needed.
+        name: String,
+        /// Exact published version recorded in the graph.
+        version: String,
+    },
 }
 
 impl RegistryRequest {
+    /// Return the registry package name for either request kind.
     pub fn name(&self) -> &str {
         match self {
             Self::Version { name, .. } | Self::Manifest { name, .. } => name,
         }
     }
 
+    /// Return the requested range, tag or exact version to look up.
     pub fn selector(&self) -> &str {
         match self {
             Self::Version { selector, .. } => selector,
@@ -70,6 +84,7 @@ fn tag(selector: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
 
+/// Published releases and selected versions available as additional resolution evidence.
 #[derive(Debug, Default)]
 pub struct RegistryMetadata {
     pub(crate) unavailable_manifests: BTreeSet<String>,
@@ -97,6 +112,9 @@ impl RegistryMetadata {
 
     /// Supply the selected registry manifest and its registry base URL. The
     /// caller selects versions under its registry's tags, time and trust policy.
+    ///
+    /// # Errors
+    /// Returns an error if the supplied release does not match the request or lacks usable distribution metadata.
     pub fn insert(
         &mut self,
         request: &RegistryRequest,

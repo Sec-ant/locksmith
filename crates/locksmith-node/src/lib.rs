@@ -1,4 +1,6 @@
 //! Node-API bindings for the in-memory engine. File and Git operations use the CLI.
+#![warn(missing_docs)]
+
 mod context;
 mod diagnostic;
 
@@ -15,6 +17,7 @@ use std::collections::BTreeMap;
 type Result<T> = std::result::Result<T, LockfileError>;
 type Work<T> = Box<dyn FnOnce() -> Result<T> + Send>;
 
+/// Work run on a Node worker thread. Resolution errors reject the JavaScript promise.
 pub struct Job<T>(Option<Work<T>>);
 
 impl<T: Send + ToNapiValue + TypeName + 'static> Task for Job<T> {
@@ -38,17 +41,20 @@ fn job<T: Send + ToNapiValue + TypeName + 'static>(
     AsyncTask::new(Job(Some(Box::new(work))))
 }
 
+/// Parsed lockfile handle shared by the asynchronous inspection and editing APIs.
 #[napi(js_name = "Lockfile")]
 pub struct ParsedLockfile(Lockfile);
 
 #[napi]
 impl ParsedLockfile {
+    /// Render the lock as YAML, reusing original source blocks when possible.
     #[napi]
     pub fn to_yaml(&self) -> AsyncTask<Job<String>> {
         let lock = self.0.clone();
         job(move || lock.to_yaml())
     }
 
+    /// Return the project or environment mapping, or null when the selected document is absent.
     #[napi]
     pub fn document(&self, kind: String) -> AsyncTask<Job<Option<BTreeMap<String, Value>>>> {
         let lock = self.0.clone();
@@ -103,24 +109,31 @@ impl Input {
     }
 }
 
+/// Parse YAML once and return a reusable JavaScript lockfile handle.
 #[napi]
 pub fn parse(yaml: String) -> AsyncTask<Job<ParsedLockfile>> {
     job(move || Lockfile::try_from(yaml).map(ParsedLockfile))
 }
 
+/// Check every recorded dependency reference, including unreachable snapshots.
 #[napi]
 pub fn validate(lock: Either<String, &ParsedLockfile>) -> AsyncTask<Job<()>> {
     let input = Input::from(lock);
     job(move || input.parse()?.validate())
 }
 
+/// Workspace projects, package metadata and instances reachable from one importer.
 #[napi(object, object_from_js = false)]
 pub struct DependencyClosure {
+    /// Workspace-relative paths of reachable projects.
     pub importers: Vec<String>,
+    /// Reachable package metadata keys, without peer instance suffixes.
     pub packages: Vec<String>,
+    /// Reachable installed instance IDs, including peer and patch suffixes.
     pub snapshots: Vec<String>,
 }
 
+/// Traverse the graph from the supplied importer path.
 #[napi]
 pub fn dependency_closure(
     lock: Either<String, &ParsedLockfile>,
@@ -137,6 +150,7 @@ pub fn dependency_closure(
     })
 }
 
+/// Return peer requirements that the selected policy does not accept.
 #[napi]
 pub fn inspect_peers(
     lock: Either<String, &ParsedLockfile>,
@@ -149,6 +163,7 @@ pub fn inspect_peers(
     })
 }
 
+/// Report peer findings, affected workspaces, package multiplicity and external links.
 #[napi]
 pub fn inspect(
     lock: Either<String, &ParsedLockfile>,
@@ -161,6 +176,7 @@ pub fn inspect(
     })
 }
 
+/// Merge two branches against their ancestor using the optional final workspace context.
 #[napi]
 pub fn merge(
     base: Either<String, &ParsedLockfile>,
@@ -179,6 +195,7 @@ pub fn merge(
     })
 }
 
+/// Retain installed changes required by the supplied manifests and workspace configuration.
 #[napi]
 pub fn converge(
     baseline: Either<String, &ParsedLockfile>,
@@ -196,6 +213,7 @@ pub fn converge(
     })
 }
 
+/// Repair the reachable workspace graph and preserve unrelated source records.
 #[napi]
 pub fn repair(yaml: String, context: Value) -> AsyncTask<Job<String>> {
     job(move || decode::<Repair>(context)?.apply(&yaml)?.to_yaml())

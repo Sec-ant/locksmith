@@ -8,6 +8,7 @@ pub(crate) use range::PeerRange;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// Package-manager policy for comparing a peer declaration with its provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PeerVersionMatching {
@@ -27,6 +28,7 @@ pub enum PeerVersionMatching {
     Unspecified,
 }
 impl PeerVersionMatching {
+    /// Select the matching policy for a pnpm release, or compare across supported policies when unspecified.
     pub fn for_pnpm(version: Option<&node_semver::Version>) -> Self {
         match version.map(|v| v.major()) {
             Some(9) => Self::Pnpm9,
@@ -38,10 +40,14 @@ impl PeerVersionMatching {
     }
 }
 
+/// Version matching and workspace exceptions used to evaluate peer requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeerRules {
+    /// Package-manager behavior used for ranges and exceptions.
     pub version_matching: PeerVersionMatching,
+    /// Peer name patterns allowed to have no provider.
     pub ignore_missing: Vec<String>,
+    /// Peer name patterns allowed to use any installed version.
     pub allow_any: Vec<String>,
     /// Selector/range pairs in declaration order.
     pub allowed_versions: Vec<(String, String)>,
@@ -49,6 +55,9 @@ pub struct PeerRules {
 impl PeerRules {
     /// Decode pnpm peer exceptions with an explicitly chosen matching rule.
     /// This does not read packageManager or strictPeerDependencies.
+    ///
+    /// # Errors
+    /// Returns an error when the peer rules or their pattern lists have an invalid shape.
     pub fn from_pnpm(
         configuration: &Value,
         version_matching: PeerVersionMatching,
@@ -77,9 +86,13 @@ impl PeerRules {
 /// An unmet peer requirement. The caller decides whether this rejects a result.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerIssue {
+    /// Requester snapshot ID, including its peer suffix.
     pub snapshot: String,
+    /// Dependency name from the requesting package’s peer declarations.
     pub peer: String,
+    /// Declared peer range or specifier.
     pub wanted: String,
+    /// Locked provider reference, or `None` when the peer has no binding.
     pub resolved: Option<String>,
 }
 
@@ -101,12 +114,17 @@ pub fn inspect_peers(
     issues
 }
 
+/// What the lock and configured exceptions say about a peer binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PeerStatus {
+    /// The requester has no binding for a required peer.
     Missing,
+    /// The provider version falls outside the requested range.
     OutOfRange,
+    /// Available evidence does not determine whether the binding satisfies the declaration.
     Unknown,
+    /// The peer matches an explicit workspace exception. See [`Disposition`] for install-time acceptance.
     Allowed,
 }
 
@@ -115,8 +133,11 @@ pub enum PeerStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Disposition {
+    /// The selected package-manager policy accepts the binding.
     Accepted,
+    /// The selected policy reports an unmet peer.
     Rejected,
+    /// The outcome depends on evidence or a package-manager version the caller did not supply.
     Unknown,
 }
 
@@ -124,8 +145,11 @@ pub enum Disposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UnknownReason {
+    /// The linked or otherwise opaque provider has no known version.
     ProviderVersion,
+    /// The requested specifier cannot be compared as a version range.
     OpaqueSpecifier,
+    /// Supported pnpm policies disagree and no specific policy was selected.
     PackageManager,
 }
 
@@ -155,6 +179,7 @@ pub(crate) fn scan(
     let Some(doc) = lock.project() else {
         return Vec::new();
     };
+    let links = graph::LinkedProjects::new(doc.get("importers"));
     let packages = graph::section(doc, "packages");
     let snapshots = graph::section(doc, "snapshots");
     let mut ranges = BTreeMap::new();
@@ -174,7 +199,7 @@ pub(crate) fn scan(
             }
             let (provider, version) = match binding {
                 Some(pin) if pin.starts_with("link:") => {
-                    let id = graph::linked_project(doc.get("importers"), ".", &pin[5..]);
+                    let id = links.resolve(".", &pin[5..]);
                     let target = manifests.and_then(|m| m.get(&id));
                     (
                         target.and_then(|m| m["name"].as_str()).unwrap_or(name),

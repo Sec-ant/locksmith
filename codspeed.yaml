@@ -7,3 +7,7 @@ benchmarks:
     exec: benchmarks/cli repair
   - name: Inspect peer bindings and workspace reachability
     exec: benchmarks/cli inspect
+  - name: Inspect external links across 1000 projects
+    exec: benchmarks/cli inspect-external-1000
+  - name: Inspect external links across 4000 projects
+    exec: benchmarks/cli inspect-external-4000

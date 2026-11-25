@@ -15,8 +15,17 @@ use bindings::{BindingGraph, Bindings, ConstructedBindings, analyze_bindings, bi
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{borrow::Cow, cell::OnceCell, rc::Rc};
 
-type Origin = (usize, String, std::rc::Rc<BTreeMap<String, String>>);
-type SavedRecord = (String, Option<Value>, Option<Origin>);
+struct Origin {
+    side: usize,
+    original: String,
+    bindings: Rc<BTreeMap<String, String>>,
+}
+
+struct SavedRecord {
+    key: String,
+    body: Option<Value>,
+    origin: Option<Origin>,
+}
 
 type Triple = (String, String, String);
 type WorkspaceLinks = HashMap<String, HashMap<String, Option<String>>>;
@@ -146,7 +155,7 @@ impl<'a> Merger<'a> {
         let origin = self
             .origins
             .get(key)
-            .map(|(side, key, _)| (*side, key.clone()));
+            .map(|origin| (origin.side, origin.original.clone()));
         let (side, key) = origin
             .as_ref()
             .map_or((side, key), |(side, key)| (*side, key.as_str()));
@@ -196,7 +205,7 @@ impl<'a> Merger<'a> {
         if settled {
             return;
         }
-        for (key, body, origin) in records.into_iter().rev() {
+        for SavedRecord { key, body, origin } in records.into_iter().rev() {
             if let Some(body) = body {
                 self.generated.insert(key.clone(), body);
             } else {
@@ -234,7 +243,7 @@ impl<'a> Merger<'a> {
     }
 
     pub(crate) fn origin_side(&self, key: &str) -> Option<usize> {
-        self.origins.get(key).map(|(side, _, _)| *side)
+        self.origins.get(key).map(|origin| origin.side)
     }
 
     pub(crate) fn has_generated(&self, key: &str) -> bool {
@@ -271,9 +280,7 @@ impl<'a> Merger<'a> {
     }
 
     pub(crate) fn origin_key<'k>(&'k self, key: &'k str) -> &'k str {
-        self.origins
-            .get(key)
-            .map_or(key, |(_, original, _)| original)
+        self.origins.get(key).map_or(key, |origin| &origin.original)
     }
 
     pub(crate) fn discard_generated(&mut self, key: &str) {
@@ -310,8 +317,8 @@ impl<'a> Merger<'a> {
         let (side, original) = self
             .origins
             .get(key)
-            .map_or((side, key.to_owned()), |(side, original, _)| {
-                (*side, original.clone())
+            .map_or((side, key.to_owned()), |origin| {
+                (origin.side, origin.original.clone())
             });
         self.save_rebound(side, &original, &bindings, &desired, body)?;
         Some(desired)
@@ -324,8 +331,14 @@ impl<'a> Merger<'a> {
         key: &str,
         bindings: BTreeMap<String, String>,
     ) {
-        self.origins
-            .insert(key.into(), (side, original.into(), bindings.into()));
+        self.origins.insert(
+            key.into(),
+            Origin {
+                side,
+                original: original.into(),
+                bindings: bindings.into(),
+            },
+        );
     }
 
     pub(crate) fn context_identity(
@@ -428,7 +441,7 @@ impl<'a> Merger<'a> {
         key: &str,
         previous_providers: impl FnOnce() -> Cow<'p, BTreeMap<String, String>>,
     ) -> Option<BTreeMap<String, String>> {
-        if let Some((_, _, bindings)) = self.origins.get(key) {
+        if let Some(Origin { bindings, .. }) = self.origins.get(key) {
             return Some(bindings.as_ref().clone());
         }
         self.source_bindings_with(side, key, previous_providers)
@@ -610,7 +623,12 @@ impl<'a> Merger<'a> {
         key: &str,
         previous: &BTreeMap<String, String>,
     ) -> Option<Bindings> {
-        if let Some((side, original, peers)) = self.origins.get(key) {
+        if let Some(Origin {
+            side,
+            original,
+            bindings: peers,
+        }) = self.origins.get(key)
+        {
             let metadata = self.context_metadata(*side, original)?;
             return Some(Bindings {
                 peers: peers.clone(),
@@ -1161,11 +1179,20 @@ impl<'a> Merger<'a> {
             }
         }
         let previous = self.generated.insert(key.into(), body);
-        let origin = self
-            .origins
-            .insert(key.into(), (side, original.into(), bindings.clone().into()));
+        let origin = self.origins.insert(
+            key.into(),
+            Origin {
+                side,
+                original: original.into(),
+                bindings: bindings.clone().into(),
+            },
+        );
         if let Some(records) = &mut self.provisional {
-            records.push((key.into(), previous, origin));
+            records.push(SavedRecord {
+                key: key.into(),
+                body: previous,
+                origin,
+            });
         }
         Some(())
     }

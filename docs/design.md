@@ -107,7 +107,7 @@ snapshots:
 
 The root project selects `a@3.0.0`, `b@2.0.0`, and one instance of `lib@1.0.0`. The `lib` release declares `a` and `b` as peers; the snapshot records that this instance receives `a@3.0.0` and `b@2.0.0`. Another project could use the same `lib@1.0.0` release with `a@2.0.0` and get a second snapshot.
 
-Reachability matters. Only importers are entry points. A package or snapshot that no importer can reach is dead weight, and a missing record on a reachable path makes the lockfile invalid. Locksmith's operations preserve reachable records and prune the rest.
+Reachability matters. Only importers are entry points. A package or snapshot that no importer can reach is dead weight, and a missing record on a reachable path makes the lockfile invalid. Merge prunes records that no importer reaches. Scoped convergence preserves unrelated orphans from the baseline. Repair checks the closure of the workspace importers and leaves unrelated records in place. The standalone validator checks references in every record.
 
 ## 3. merge
 
@@ -203,7 +203,7 @@ For a cross-major pnpm upgrade, declare the exact pnpm version in each root mani
 3. Removed dependencies drop their now-unreachable records.
 4. Rebind peers per consumer. A consumer whose provider changed gets a new snapshot; unrelated consumers keep their baseline bindings. If a cycle or shared instance requires incompatible bindings, convergence keeps the installed peer assignments on those paths and can still restore unrelated child pins.
 5. For workspace rule edits, identify the projects affected by each catalog, override, or package-extension change. Keep the installed edges where the new rule requires them and restore the rest. For an unchanged parent release with matching patch and peers, a locked instance is evidence for its child pins; for an upgraded parent, published dependency ranges can justify reusing an earlier child after integrity and override checks.
-6. Prune unreachable records and validate the result.
+6. Prune records made unreachable by the edit. Preserve pre-existing orphans outside its scope and check the resulting dependency graph.
 
 ### Comparison with pnpm
 
@@ -242,7 +242,7 @@ Baseline: `foo@1.0.0` depends on `leaf@1.0.0`; the app also depends on `bar@1.0.
    - Registry metadata. A published release can supply its package record or a peer-only snapshot.
    - A contextual resolution of the current lock against the parents. This fallback uses at most two parents and handles records whose exact peer or patch identity only appears in a combination of inputs.
 5. Reapply package extensions and peer bindings, then repeat until the graph is stable.
-6. If the input was healthy, return it byte-for-byte.
+6. Keep unrelated, unreachable records in the source. If the workspace closure needs no repair, return the original bytes.
 
 ### Comparison with pnpm
 
@@ -282,7 +282,7 @@ Duplicate snapshot recovery is a search over interpretations. The budget bounds 
 
 ### Determinism and validation
 
-Unchanged records are reused rather than re-rendered. Override order is preserved because it affects precedence. Before output is written, the serialized YAML is deserialized again and compared with the in-memory value; a mismatch is an error, not a partial file.
+Unchanged records are reused rather than re-rendered. Override order is preserved because it affects precedence. The writer reuses matching source bytes directly. When it renders YAML, it compares the output with the intended document. An output mismatch is an error.
 
 ### Supported formats
 
@@ -292,7 +292,7 @@ Locksmith does not install packages, does not support older lockfile formats, an
 
 ### Failure contract
 
-Standalone commands write YAML to stdout on success and diagnostics to stderr. Exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement; other errors use `2`. The Git driver returns `1` on failure and writes the text merge back to the lockfile, leaving Git's conflict in place. No operation writes a partial result.
+On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text or JSON report, including when it finds unmet peers. `validate` is silent on success and returns `1` for an invalid lock or workspace mismatch. For the other standalone commands, `1` indicates a conflict, unresolved selection or unmet peer requirement. Errors that prevent a command from completing use `2`. Diagnostics go to stderr. On failure the Git driver returns `1` and writes Git’s text merge to the lockfile, leaving the conflict for the user.
 
 ### Code map
 

@@ -74,7 +74,7 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
         ]);
         let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{},"a":{},"b":{}}});
         let cfg = if ignored {
-            let settings = json!({"ignoredOptionalDependencies":["plugin"]});
+            let settings = json!({"ignoredOptionalDependencies":["plug*","!plugin-tools"]});
             doc["ignoredOptionalDependencies"] = settings["ignoredOptionalDependencies"].clone();
             WorkspaceConfig::from_pnpm(&settings).unwrap()
         } else {

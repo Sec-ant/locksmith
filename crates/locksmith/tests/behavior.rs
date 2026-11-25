@@ -20,6 +20,129 @@ fn dep(version: &str) -> Value {
     json!({"specifier":version.split('(').next().unwrap(),"version":version})
 }
 
+#[test]
+fn plain_merge_preserves_a_one_sided_change_in_override_precedence() {
+    let rules = ["  'lib@^7': 5.0.0\n", "  'lib@7': 6.0.0\n"];
+    // An unused override still applies to the next install. Reordering it is a
+    // change even when no importer or snapshot changed on either branch.
+    let make = |order: [usize; 2]| {
+        Lockfile::parse(&format!(
+            "lockfileVersion: '9.0'\noverrides:\n{}{}importers: {{.: {{}}}}\n",
+            rules[order[0]], rules[order[1]]
+        ))
+        .unwrap()
+    };
+    let base = make([0, 1]);
+    let edited = make([1, 0]);
+    for (ours, theirs) in [(&base, &edited), (&edited, &base)] {
+        let merged = merge(&base, ours, theirs, None).unwrap();
+        let output = Lockfile::parse(&merged.to_yaml().unwrap()).unwrap();
+        let keys: Vec<_> = output.project().unwrap()["overrides"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, ["lib@7", "lib@^7"]);
+    }
+}
+
+#[test]
+fn both_merge_modes_make_shared_snapshots_required_along_a_new_required_path() {
+    let make = |optional: bool, other: bool| {
+        let mut importers = json!({".":{},"a":{},"b":{}});
+        let group = if optional {
+            "optionalDependencies"
+        } else {
+            "dependencies"
+        };
+        importers["a"][group]["lib"] = dep("1.0.0");
+        if other {
+            importers["b"]["dependencies"]["lib"] = dep("1.0.0");
+        }
+        let mut snapshots =
+            json!({"lib@1.0.0":{"dependencies":{"child":"1.0.0"}}, "child@1.0.0":{}});
+        if optional && !other {
+            for record in snapshots.as_object_mut().unwrap().values_mut() {
+                record["optional"] = json!(true);
+            }
+        }
+        lock(graph(importers, snapshots))
+    };
+    let (base, optional, required) = (make(false, false), make(true, false), make(false, true));
+    let config = locksmith::WorkspaceConfig::default();
+    let manifests = std::collections::BTreeMap::from([
+        (".".into(), json!({})),
+        ("a".into(), json!({"optionalDependencies":{"lib":"1.0.0"}})),
+        ("b".into(), json!({"dependencies":{"lib":"1.0.0"}})),
+    ]);
+    let context = locksmith::MergeContext {
+        target: locksmith::MergeTarget::Ours,
+        manifests: &manifests,
+        configuration: &config,
+        configurations: [&config; 3],
+        patches: &Default::default(),
+        registry: None,
+    };
+    let expected = make(true, true);
+    for (ours, theirs) in [(&optional, &required), (&required, &optional)] {
+        for ctx in [None, Some(&context)] {
+            let merged = merge(&base, ours, theirs, ctx).unwrap();
+            for section in ["importers", "snapshots"] {
+                assert_eq!(
+                    merged.project().unwrap()[section],
+                    expected.project().unwrap()[section]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn plain_merge_combines_ordered_rule_insertions_and_reports_incompatible_reorders() {
+    let rules = |keys: &[&str]| {
+        let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        for key in keys {
+            doc["overrides"][*key] = json!("1.0.0");
+        }
+        lock(doc)
+    };
+    let base = rules(&["lib@1", "lib@2", "lib@3"]);
+    let ours = rules(&["lib@1", "first", "lib@2", "lib@3"]);
+    let theirs = rules(&["lib@1", "lib@2", "second", "lib@3"]);
+    let merged = merge(&base, &ours, &theirs, None).unwrap();
+    let output = Lockfile::parse(&merged.to_yaml().unwrap()).unwrap();
+    let keys: Vec<_> = output.project().unwrap()["overrides"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["lib@1", "first", "lib@2", "second", "lib@3"]);
+
+    let reordered = rules(&["lib@2", "lib@1", "lib@3"]);
+    let inserted = rules(&["prefix", "lib@1", "lib@2", "lib@3", "suffix"]);
+    for (left, right) in [(&reordered, &inserted), (&inserted, &reordered)] {
+        let merged = merge(&base, left, right, None).unwrap();
+        let output = Lockfile::parse(&merged.to_yaml().unwrap()).unwrap();
+        let keys: Vec<_> = output.project().unwrap()["overrides"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, ["prefix", "lib@2", "lib@1", "lib@3", "suffix"]);
+    }
+
+    // This insertion needs lib@1 before lib@2. The reorder reverses its anchors.
+    let between = rules(&["lib@1", "between", "lib@2", "lib@3"]);
+    let issues = conflicts(merge(&base, &reordered, &between, None).unwrap_err());
+    assert_eq!(issues[0].path, ["overrides"]);
+
+    let ours = rules(&["lib@2", "lib@1", "lib@3"]);
+    let theirs = rules(&["lib@1", "lib@3", "lib@2"]);
+    let issues = conflicts(merge(&base, &ours, &theirs, None).unwrap_err());
+    assert_eq!(issues[0].path, ["overrides"]);
+}
+
 fn conflicts(error: LockfileError) -> Vec<locksmith::Conflict> {
     match error {
         LockfileError::Conflicts(conflicts) => conflicts,
