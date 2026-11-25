@@ -27,6 +27,21 @@ pub(crate) fn extensions(
     })
 }
 
+pub(crate) fn extensions_match(config: &crate::WorkspaceConfig, recorded: Option<&Value>) -> bool {
+    let configured = config
+        .resolution
+        .package_extensions
+        .as_ref()
+        .filter(|value| value.as_object().is_none_or(|rules| !rules.is_empty()));
+    match (configured, recorded) {
+        (None, None) => true,
+        (Some(rules), Some(Value::String(hash))) => {
+            extensions(rules, rules, hash, config.extension_checksum).as_deref() == Some(hash)
+        }
+        _ => false,
+    }
+}
+
 /// The CLI supplies hook contents keyed by path. A pure caller may instead
 /// supply a checksum it already verified.
 pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bool {

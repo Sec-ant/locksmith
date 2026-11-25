@@ -50,20 +50,7 @@ pub(super) fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String
 }
 
 pub(super) fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(), LockfileError> {
-    let extensions = cfg
-        .resolution
-        .package_extensions
-        .as_ref()
-        .filter(|v| v.as_object().is_none_or(|m| !m.is_empty()));
-    let hash = doc.get("packageExtensionsChecksum");
-    let valid = match (extensions, hash) {
-        (None, None) => true,
-        (Some(v), Some(h)) => h.as_str().is_some_and(|s| {
-            crate::checksum::extensions(v, v, s, cfg.extension_checksum).as_deref() == Some(s)
-        }),
-        _ => false,
-    };
-    if valid {
+    if crate::checksum::extensions_match(cfg, doc.get("packageExtensionsChecksum")) {
         Ok(())
     } else {
         Err(missing(

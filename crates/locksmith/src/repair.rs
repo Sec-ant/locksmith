@@ -195,17 +195,12 @@ pub(crate) fn check_configuration(
     if manifest::rule_map(doc, "patchedDependencies") != metadata.get("patchedDependencies") {
         return Err(mismatch("patchedDependencies"));
     }
-    let ext = cfg
-        .resolution
-        .package_extensions
-        .as_ref()
-        .filter(|v| v.as_object().is_none_or(|m| !m.is_empty()));
-    match (ext, doc["packageExtensionsChecksum"].as_str()) {
-        (None, None) => (),
-        (Some(ext), Some(hash))
-            if crate::checksum::extensions(ext, ext, hash, cfg.extension_checksum).as_deref()
-                == Some(hash) => {}
-        _ => return Err(mismatch("packageExtensionsChecksum")),
+    if !crate::checksum::extensions_match(
+        cfg,
+        doc.get("packageExtensionsChecksum")
+            .filter(|hash| hash.is_string()),
+    ) {
+        return Err(mismatch("packageExtensionsChecksum"));
     }
     if !crate::checksum::hooks_match(
         cfg.resolution.pnpmfile_checksum.as_ref(),

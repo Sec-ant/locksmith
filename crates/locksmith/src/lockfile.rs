@@ -133,6 +133,23 @@ impl Lockfile {
                 "dependency settings differ",
             ));
         }
+        crate::repair::check_recorded_settings(document, config)?;
+        if !crate::checksum::extensions_match(config, document.get("packageExtensionsChecksum")) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "packageExtensionsChecksum differs",
+            ));
+        }
+        if config.resolution.ignored_optional_dependencies
+            != crate::config::ignored_optional_dependencies(document)?
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "ignoredOptionalDependencies differs",
+            ));
+        }
         let effective =
             crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
         let recorded_overrides = crate::manifest::rule_map(document, "overrides");
