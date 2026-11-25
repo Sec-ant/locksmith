@@ -1,3 +1,21 @@
+## 0.3.5 (2026-11-24)
+
+### Features
+
+- Match npm partial upper bounds such as `<=27`, which include every 27.x release. Rust APIs that take or return a pnpm version now use `nodejs_semver::Version` v7.
+- Check a pnpm lockfile for structural errors such as duplicate keys and missing snapshots with `locksmith validate` without installing dependencies.
+
+### Fixes
+
+- Match pnpm's peer declarations for newly added releases. Omit self-peers with pnpm 9.15.1 and later, retain unparseable peer ranges, and record metadata-only optional peers as `*`, including when an ignored optional dependency has the same name.
+- Honor `ignore-pnpmfile` and exclude ignored hooks from workspace change and conflict checks.
+- Read legacy `resolutions` alongside pnpm overrides in pnpm 9 and 10 workspaces.
+- Preserve pnpm's version-specific dependency group for local overrides of dependencies declared as both development dependencies and peers.
+- Accept omitted or range-valued catalog entries for linked workspace packages.
+- Recognize pnpm 12 hook checksums sorted by path.
+- Accept boolean deprecation metadata from registries when selecting published versions.
+- Resolve conflicting duplicate snapshots in a committed lockfile with `repair` when a three-way merge of its parents identifies an existing copy to keep.
+
 ## 0.3.4 (2026-11-22)
 
 ### Features
