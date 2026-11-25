@@ -1,8 +1,5 @@
 //! Select workspace pins, then bind each importer to its final peer providers.
-use super::{
-    GraphSources, MergeContext, accepts, authorized_patch, desired_patch, missing, opaque,
-    peer_names, reference,
-};
+use super::{GraphSources, MergeContext, accepts, missing, opaque, peer_names, reference};
 use crate::{
     LockfileError, Value, graph, manifest, peer,
     workspace_links::{WorkspaceLinks, injected},
@@ -31,7 +28,7 @@ pub(super) fn select(
     peers: &mut peer::Merger<'_>,
     preferences: &super::preference::Preferences,
 ) -> Result<SelectedImporters, LockfileError> {
-    let docs = sources.docs;
+    let docs = sources.documents();
     let mut importers = Map::new();
     let selector = PinSelector {
         context,
@@ -99,7 +96,7 @@ pub(super) fn select(
         });
         let has_witness = roots.values().any(|pin| {
             !pin.reference.starts_with("link:")
-                && !sources.unchanged_rules[pin.side]
+                && !sources.inputs[pin.side].unchanged_rules
                 && !configured_roots
                     .entry((pin.side, pin.key.clone()))
                     .or_insert_with(|| configured_peer_roots(&pin.key, pin.side, output, sources))
@@ -128,7 +125,7 @@ pub(super) fn select(
             }
             let available = peer::canonical_providers(&available);
             for (name, pin) in &mut roots {
-                if pin.reference.starts_with("link:") || sources.unchanged_rules[pin.side] {
+                if pin.reference.starts_with("link:") || sources.inputs[pin.side].unchanged_rules {
                     continue;
                 }
                 let witnesses = configured_roots
@@ -171,12 +168,12 @@ pub(super) fn select(
         }
         let original = roots.clone();
         for (name, pin) in &mut roots {
-            if pin.reference.starts_with("link:")
-                || authorized_patch(&pin.key, output, sources.docs)
-            {
+            if pin.reference.starts_with("link:") || sources.authorized_patch(&pin.key, output) {
                 continue;
             }
-            let hash = desired_patch(&pin.key, output, sources.docs).expect("selected patch");
+            let hash = sources
+                .desired_patch(&pin.key, output)
+                .expect("selected patch");
             pin.key = peers.repatch(pin.side, &pin.key, hash).ok_or_else(|| {
                 missing(
                     &["importers", id, name],
@@ -267,7 +264,7 @@ pub(super) fn select(
                     );
                     if graph::package_key(&key) != graph::package_key(&pin.key)
                         || peer::patch(&key) != peer::patch(&pin.key)
-                        || !sources.compatibility[other].accepts(&key)
+                        || !sources.inputs[other].compatibility.accepts(&key)
                         || docs[other]["packages"][graph::package_key(&key)]
                             != docs[pin.side]["packages"][graph::package_key(&pin.key)]
                         || docs[other].get("snapshots")?.get(&key).is_none()
@@ -339,7 +336,9 @@ pub(super) fn select(
                     };
                     (pin.side, key)
                 };
-                let hash = desired_patch(&rebound, output, sources.docs).expect("selected patch");
+                let hash = sources
+                    .desired_patch(&rebound, output)
+                    .expect("selected patch");
                 let rebound = peers
                     .repatch(resolved_side, &rebound, hash)
                     .ok_or_else(|| {
@@ -417,7 +416,7 @@ impl PinSelector<'_, '_> {
             output,
             workspace_packages,
         } = self;
-        let docs = sources.docs;
+        let docs = sources.documents();
         let resolved = workspace_packages.resolve(name, specifier, id, package)?;
         let local = resolved.as_ref().map(|(link, _)| link);
         if specifier.starts_with("workspace:") && !injected(name, package, context.configuration) {
@@ -461,15 +460,15 @@ impl PinSelector<'_, '_> {
         // the mainline's direct pin. Assembly still verifies its entire closure.
         if !alternative
             && context.configurations[target].matches_pnpm(context.configuration)
-            && !sources.unchanged_configuration[target]
-            && sources.unchanged_rules[target]
+            && !sources.inputs[target].matches_configuration
+            && sources.inputs[target].unchanged_rules
             && let Some(pin) = super::preference::dependency(docs[target], id, name)
             && accepts(name, specifier, pin, output)
         {
             let key = graph::snapshot_key(name, pin, graph::section(docs[target], "snapshots"));
-            if sources.compatibility[target].unchanged(&key)
+            if sources.inputs[target].compatibility.unchanged(&key)
                 && docs[target]["snapshots"].get(&key).is_some()
-                && authorized_patch(&key, output, sources.docs)
+                && sources.authorized_patch(&key, output)
             {
                 return Ok(preferred_local(&key).unwrap_or_else(|| Pin {
                     side: target,
@@ -496,7 +495,8 @@ impl PinSelector<'_, '_> {
             }
             for side in order {
                 if !sources.prefer_baseline
-                    && sources.unchanged_configuration[side] != matches!(pass, CandidatePass::Exact)
+                    && sources.inputs[side].matches_configuration
+                        != matches!(pass, CandidatePass::Exact)
                 {
                     continue;
                 }
@@ -522,8 +522,8 @@ impl PinSelector<'_, '_> {
                             reference,
                             graph::section(docs[side], "snapshots"),
                         );
-                        if !sources.compatibility[side].accepts(&key)
-                            || sources.compatibility[side].unchanged(&key)
+                        if !sources.inputs[side].compatibility.accepts(&key)
+                            || sources.inputs[side].compatibility.unchanged(&key)
                                 == matches!(pass, CandidatePass::Rebuild)
                         {
                             continue;
@@ -536,11 +536,9 @@ impl PinSelector<'_, '_> {
                             .get("snapshots")
                             .and_then(|records| records.get(&key))
                             .is_some()
-                            && desired_patch(&key, output, sources.docs).is_some()
+                            && sources.desired_patch(&key, output).is_some()
                         {
-                            if sources.prefer_baseline
-                                || authorized_patch(&key, output, sources.docs)
-                            {
+                            if sources.prefer_baseline || sources.authorized_patch(&key, output) {
                                 selected = Some((side, reference.to_owned(), key));
                                 break;
                             }
@@ -568,9 +566,9 @@ impl PinSelector<'_, '_> {
                         {
                             if source != side
                                 || graph::package_key(key) != locator
-                                || sources.compatibility[side].unchanged(key)
+                                || sources.inputs[side].compatibility.unchanged(key)
                                     == matches!(pass, CandidatePass::Rebuild)
-                                || !authorized_patch(key, output, sources.docs)
+                                || !sources.authorized_patch(key, output)
                                 || !super::preference::ordinary_edges_match(
                                     docs[context.target.index()],
                                     &old_key,
@@ -617,18 +615,18 @@ impl PinSelector<'_, '_> {
                 for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
                     if *side == super::PUBLISHED
                         || (!sources.prefer_baseline
-                            && sources.unchanged_configuration[*side]
+                            && sources.inputs[*side].matches_configuration
                                 != matches!(pass, CandidatePass::Exact))
-                        || sources.compatibility[*side].unchanged(key)
+                        || sources.inputs[*side].compatibility.unchanged(key)
                             == matches!(pass, CandidatePass::Rebuild)
                     {
                         continue;
                     }
                     let reference = reference(name, key);
                     if accepts(name, specifier, &reference, output)
-                        && desired_patch(key, output, sources.docs).is_some()
+                        && sources.desired_patch(key, output).is_some()
                     {
-                        if authorized_patch(key, output, sources.docs) {
+                        if sources.authorized_patch(key, output) {
                             selected = Some((*side, reference, (*key).into()));
                             borrowed = true;
                             break;
@@ -706,9 +704,9 @@ fn configured_peer_roots<'a>(
     if version.parse::<node_semver::Version>().is_err() {
         return Vec::new();
     }
-    let body = &sources.docs[side]["snapshots"][key];
-    let package = &sources.docs[side]["packages"][package_key];
-    let names = peer_names(sources.docs[side], key);
+    let body = &sources.inputs[side].document["snapshots"][key];
+    let package = &sources.inputs[side].document["packages"][package_key];
+    let names = peer_names(sources.inputs[side].document, key);
     let mut dependencies = Vec::new();
     for group in ["dependencies", "optionalDependencies"] {
         for (name, reference) in graph::section(body, group).into_iter().flatten() {
@@ -719,11 +717,11 @@ fn configured_peer_roots<'a>(
             {
                 continue;
             }
-            let before = sources.rules[side].relevant(name, parent, version);
+            let before = sources.inputs[side].rules.relevant(name, parent, version);
             let after = sources.final_rules.relevant(name, parent, version);
             let changed = before != after
                 || (after.len() > 1
-                    && sources.source_tie_breaks[side] != sources.override_tie_break);
+                    && sources.inputs[side].tie_break != sources.override_tie_break);
             dependencies.push((group, name, reference, after, changed));
         }
     }
@@ -739,13 +737,13 @@ fn configured_peer_roots<'a>(
         .filter(|(source, candidate)| {
             if *candidate == key
                 || graph::package_key(candidate) != package_key
-                || sources.docs[*source]["packages"][package_key] != *package
-                || !authorized_patch(candidate, metadata, sources.docs)
-                || peer_names(sources.docs[*source], candidate) == names
+                || sources.inputs[*source].document["packages"][package_key] != *package
+                || !sources.authorized_patch(candidate, metadata)
+                || peer_names(sources.inputs[*source].document, candidate) == names
             {
                 return false;
             }
-            let replacement = &sources.docs[*source]["snapshots"][*candidate];
+            let replacement = &sources.inputs[*source].document["snapshots"][*candidate];
             for group in ["dependencies", "optionalDependencies"] {
                 let before = graph::section(body, group);
                 let after = graph::section(replacement, group);
@@ -788,8 +786,11 @@ fn configured_peer_roots<'a>(
                 };
                 if *changed
                     && ((after.len() > 1
-                        && sources.source_tie_breaks[*source] != sources.override_tie_break)
-                        || sources.rules[*source].relevant(name, parent, version) != *after)
+                        && sources.inputs[*source].tie_break != sources.override_tie_break)
+                        || sources.inputs[*source]
+                            .rules
+                            .relevant(name, parent, version)
+                            != *after)
                 {
                     return false;
                 }

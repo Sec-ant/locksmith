@@ -75,10 +75,9 @@ pub(crate) fn resolve(
     if output.get("settings").is_none() {
         output["settings"] = json!({});
     }
-    output["settings"]["autoInstallPeers"] = json!(config.resolution.lock.auto_install_peers);
-    if config.resolution.lock.project_scoped_optional_peers
-        && config.resolution.dedupe_peer_dependents
-    {
+    let settings = config.recorded_settings();
+    output["settings"]["autoInstallPeers"] = json!(settings.auto_install_peers);
+    if settings.project_scoped_optional_peers {
         output["settings"]["projectScopedOptionalPeers"] = json!(true);
     } else {
         output["settings"]
@@ -86,7 +85,7 @@ pub(crate) fn resolve(
             .unwrap()
             .remove("projectScopedOptionalPeers");
     }
-    if config.resolution.lock.dedupe_peers {
+    if settings.dedupe_peers {
         output["settings"]["dedupePeers"] = json!(true);
     } else {
         output["settings"]
@@ -94,8 +93,7 @@ pub(crate) fn resolve(
             .unwrap()
             .remove("dedupePeers");
     }
-    output["settings"]["excludeLinksFromLockfile"] =
-        json!(config.resolution.lock.exclude_links_from_lockfile);
+    output["settings"]["excludeLinksFromLockfile"] = json!(settings.exclude_links_from_lockfile);
     for (field, lock_field, value, source_values) in [
         (
             "packageExtensions",

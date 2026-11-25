@@ -40,11 +40,16 @@ pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
 }
 
 pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
-    left.get("overrides") == right.get("overrides")
-        && graph::section(left, "overrides")
+    same_ordered_mapping(left.get("overrides"), right.get("overrides"))
+}
+
+pub(crate) fn same_ordered_mapping(left: Option<&Value>, right: Option<&Value>) -> bool {
+    left == right
+        && left
+            .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .eq(graph::section(right, "overrides").into_iter().flatten())
+            .eq(right.and_then(Value::as_object).into_iter().flatten())
 }
 
 /// pnpm precedence: optional > production > dev > auto-installed peers.
@@ -53,15 +58,7 @@ pub(crate) fn declarations<'a>(
     overrides: &Overrides<'a>,
     importer: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
-    importer_declarations(manifest, overrides, importer, &[])
-}
-
-fn importer_declarations<'a>(
-    manifest: &'a Value,
-    overrides: &Overrides<'a>,
-    importer: &str,
-    ignored_optional: &[&str],
-) -> Result<Declarations<'a>, LockfileError> {
+    let ignored_optional = overrides.ignored_optional_patterns()?;
     // pnpm 12 checks optional exclusions after peers have entered the production group.
     let exclude_peer = overrides
         .config
@@ -123,7 +120,10 @@ fn importer_declarations<'a>(
                 .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
             if filter_optional
                 && manifest["optionalDependencies"].get(name).is_some()
-                && crate::config::matches_patterns(ignored_optional.iter().copied(), name)
+                && crate::config::matches_patterns(
+                    ignored_optional.iter().map(String::as_str),
+                    name,
+                )
             {
                 continue;
             }
@@ -220,12 +220,7 @@ pub(crate) fn check_with_links(
         }
         _ => return Err(mismatch(importer, side, "missing importer")),
     };
-    let mut expected = importer_declarations(
-        manifest,
-        overrides,
-        importer,
-        workspace.map_or(&[], |ws| ws.ignored_optional.as_slice()),
-    )?;
+    let mut expected = declarations(manifest, overrides, importer)?;
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {
@@ -439,10 +434,33 @@ struct OverrideRule<'a> {
 pub(crate) struct Overrides<'a> {
     document: &'a Value,
     by_name: BTreeMap<&'a str, Vec<OverrideRule<'a>>>,
+    ignored_optional: std::cell::OnceCell<Vec<String>>,
     config: &'a WorkspaceConfig,
 }
 
 impl<'a> Overrides<'a> {
+    fn ignored_optional_patterns(&self) -> Result<&[String], LockfileError> {
+        if let Some(rules) = self.ignored_optional.get() {
+            return Ok(rules);
+        }
+        // pnpm 11.21+ sorts mixed exclusions before checking importer declarations.
+        let sorted = self
+            .config
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
+        let rules = crate::config::optional_patterns(
+            self.config
+                .resolution
+                .ignored_optional_dependencies
+                .as_ref(),
+            !sorted,
+        )?;
+        Ok(self
+            .ignored_optional
+            .get_or_init(|| rules.into_iter().map(str::to_owned).collect()))
+    }
+
     pub(crate) fn relevant(
         &self,
         name: &str,
@@ -475,6 +493,7 @@ impl<'a> Overrides<'a> {
         Self {
             document,
             by_name,
+            ignored_optional: Default::default(),
             config,
         }
     }

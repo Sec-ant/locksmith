@@ -16,8 +16,11 @@ pub(crate) const DEPENDENCIES: [&str; 5] = [
 /// complete peer and patch suffixes; linked workspace projects are included.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DependencyClosure {
+    /// Reachable workspace project paths, including the starting importers.
     pub importers: BTreeSet<String>,
+    /// Reachable installed instance IDs, including peer and patch suffixes.
     pub snapshots: BTreeSet<String>,
+    /// Package metadata keys used by the reachable snapshots.
     pub packages: BTreeSet<String>,
 }
 
@@ -183,39 +186,66 @@ pub(crate) fn linked_importer(from: &str, target: &str) -> String {
     }
 }
 
-/// A workspace link can point at the project's publish directory.
-pub(crate) fn linked_project(importers: Option<&Value>, from: &str, path: &str) -> String {
-    let target = linked_importer(from, path);
-    let Some(importers) = importers.and_then(Value::as_object) else {
-        return target;
-    };
-    if importers.contains_key(&target) {
-        return target;
-    }
-    let publishes_to_target = |id: &str, record: &Value| {
-        record["linkDirectory"] != false
-            && record["publishDirectory"]
-                .as_str()
-                .is_some_and(|dir| linked_importer(id, dir) == target)
-    };
-    let mut ancestor = target.as_str();
-    while ancestor != "." {
-        ancestor = ancestor.rsplit_once('/').map_or(".", |(parent, _)| parent);
-        if let Some(record) = importers.get(ancestor)
-            && publishes_to_target(ancestor, record)
-        {
-            return ancestor.to_owned();
+/// Resolve importer IDs and publish directories against one fixed workspace graph.
+pub(crate) struct LinkedProjects<'a> {
+    importers: Option<&'a Map<String, Value>>,
+    owners: std::cell::OnceCell<std::collections::HashMap<String, Option<&'a str>>>,
+}
+
+impl<'a> LinkedProjects<'a> {
+    pub(crate) fn new(importers: Option<&'a Value>) -> Self {
+        Self {
+            importers: importers.and_then(Value::as_object),
+            owners: Default::default(),
         }
     }
-    let mut owners = importers
-        .iter()
-        .filter(|(id, record)| publishes_to_target(id, record));
-    if let Some((owner, _)) = owners.next()
-        && owners.next().is_none()
-    {
-        return owner.clone();
+
+    pub(crate) fn resolve(&self, from: &str, path: &str) -> String {
+        let target = linked_importer(from, path);
+        let Some(importers) = self.importers else {
+            return target;
+        };
+        if importers.contains_key(&target) {
+            return target;
+        }
+        let publish_directory = |id: &str, record: &Value| {
+            record["publishDirectory"]
+                .as_str()
+                .filter(|_| record["linkDirectory"] != false)
+                .map(|directory| linked_importer(id, directory))
+        };
+        // An enclosing project owns its publish directory even when another
+        // project publishes to the same path from elsewhere.
+        let mut ancestor = target.as_str();
+        while ancestor != "." {
+            ancestor = ancestor.rsplit_once('/').map_or(".", |(parent, _)| parent);
+            if importers
+                .get(ancestor)
+                .and_then(|record| publish_directory(ancestor, record))
+                .as_deref()
+                == Some(&target)
+            {
+                return ancestor.to_owned();
+            }
+        }
+        let owners = self.owners.get_or_init(|| {
+            let mut owners = std::collections::HashMap::new();
+            for (id, record) in importers {
+                if let Some(directory) = publish_directory(id, record) {
+                    owners
+                        .entry(directory)
+                        .and_modify(|owner| *owner = None)
+                        .or_insert(Some(id.as_str()));
+                }
+            }
+            owners
+        });
+        owners
+            .get(&target)
+            .copied()
+            .flatten()
+            .map_or(target, str::to_owned)
     }
-    target
 }
 
 pub(crate) fn closure(
@@ -272,6 +302,7 @@ fn closure_with_snapshots(
     let mut issues = Vec::new();
     let mut importers: VecDeque<_> = roots.iter().cloned().collect();
     let mut queued_importers = roots.clone();
+    let links = LinkedProjects::new(importer_records);
     let mut traversal = Traversal {
         snapshots: section(document, "snapshots"),
         ..Traversal::default()
@@ -304,7 +335,7 @@ fn closure_with_snapshots(
         for (_, name, reference) in references(record, kind, source, key, include_dev, &mut issues)
         {
             if let Some(target) = reference.strip_prefix("link:") {
-                let target = linked_project(importer_records, link_base, target);
+                let target = links.resolve(link_base, target);
                 if importer_records.and_then(|map| map.get(&target)).is_some()
                     && queued_importers.insert(target.clone())
                 {
@@ -483,6 +514,7 @@ fn check_package(
 
 fn check_catalogs(
     document: &Value,
+    links: &LinkedProjects,
     importer: &Value,
     kind: DocumentKind,
     key: &str,
@@ -522,7 +554,7 @@ fn check_catalogs(
             };
             let pin = dependency["version"].as_str();
             let fits = if let Some(path) = pin.and_then(|v| v.strip_prefix("link:")) {
-                let target = linked_project(document.get("importers"), key, path);
+                let target = links.resolve(key, path);
                 document["importers"].get(&target).is_some()
                     && match (spec, entry) {
                         (Some(spec), Some(entry)) => {
@@ -582,9 +614,10 @@ pub(crate) fn validate_with_config(
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     let overrides = crate::manifest::unconditional_overrides(document);
+    let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_references(document, importer, kind, "importers", key, &mut issues);
-        check_catalogs(document, importer, kind, key, config, &mut issues);
+        check_catalogs(document, &links, importer, kind, key, config, &mut issues);
         check_overrides(&overrides, importer, kind, key, &mut issues);
     }
     // Validation scans all edges once, including unreachable records. It does
@@ -634,6 +667,20 @@ fn check_references(
 pub(crate) fn prune(document: &mut Value, kind: DocumentKind) -> Result<(), LockfileError> {
     let reached = closure(document, kind, &keys(document, "importers"))?;
     retain(document, kind, reached, None)
+}
+
+/// A parent's optional flags remain valid while its roots and snapshot edges are intact.
+pub(crate) fn refresh_merged_optional<'a>(
+    document: &mut Value,
+    parents: impl IntoIterator<Item = &'a Value>,
+) -> Result<(), LockfileError> {
+    if parents.into_iter().any(|parent| {
+        parent.get("importers") == document.get("importers")
+            && parent.get("snapshots") == document.get("snapshots")
+    }) {
+        return Ok(());
+    }
+    refresh_optional(document)
 }
 
 /// An instance is optional only when every path from the importers crosses an
@@ -772,8 +819,9 @@ fn retain(
     }
     let mut issues = Vec::new();
     let overrides = crate::manifest::unconditional_overrides(document);
+    let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
-        check_catalogs(document, importer, kind, key, config, &mut issues);
+        check_catalogs(document, &links, importer, kind, key, config, &mut issues);
         check_overrides(&overrides, importer, kind, key, &mut issues);
     }
     if !issues.is_empty() {

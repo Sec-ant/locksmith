@@ -6,6 +6,7 @@ case "$1" in
   converge) set -- converge HEAD ;;
   repair) set -- repair missing-snapshot ;;
   inspect) set -- inspect --json ../inspect.yaml ;;
+  inspect-external-1000|inspect-external-4000) set -- inspect --json "../external-${1##*-}.yaml" ;;
   *) exit 2 ;;
 esac
 exec "${LOCKSMITH_BIN:-locksmith}" "$@" > "${LOCKSMITH_OUTPUT:-/dev/null}"

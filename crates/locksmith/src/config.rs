@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 /// Callers select this explicitly; graph operations do not infer a pnpm version.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OverrideTieBreak {
+    /// Prefer the first matching declaration at equal specificity.
     First,
+    /// Prefer the last matching declaration at equal specificity.
     #[default]
     Last,
 }
@@ -37,7 +39,9 @@ pub enum PatchEncoding {
 /// Package-extension checksum written by the consuming package manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionChecksum {
+    /// MD5 checksum used by pnpm 9.
     Md5,
+    /// SHA-256 checksum used by pnpm 10 and later.
     Sha256,
 }
 
@@ -45,17 +49,23 @@ pub enum ExtensionChecksum {
 /// Adapters choose this explicitly when package-manager versions differ.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OptionalPeerScope {
+    /// Providers installed by any workspace member can satisfy an optional peer.
     #[default]
     Workspace,
+    /// Providers must be installed by the consuming project or an eligible workspace root.
     Project,
 }
 
 /// Settings that affect the meaning of importer dependency declarations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockSettings {
+    /// Include automatically installed required peers in importer declarations.
     pub auto_install_peers: bool,
+    /// Use the compact peer-reference encoding selected by pnpm.
     pub dedupe_peers: bool,
+    /// Restrict optional peer providers to the consuming project when peer dependents are deduplicated.
     pub project_scoped_optional_peers: bool,
+    /// Omit direct `link:` declarations from importer records.
     pub exclude_links_from_lockfile: bool,
 }
 impl Default for LockSettings {
@@ -92,14 +102,23 @@ impl LockSettings {
 /// additional parameters are equality constraints on the source graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionSettings {
+    /// Dependency settings represented in the lockfile header.
     pub lock: LockSettings,
+    /// Allow the workspace root to provide peers for member projects.
     pub workspace_root_peers: bool,
+    /// Allow compatible dependents to share peer instances across projects.
     pub dedupe_peer_dependents: bool,
+    /// Where to look for already-installed optional peer providers.
     pub optional_peer_scope: OptionalPeerScope,
+    /// Materialize workspace dependencies as directory packages by default.
     pub inject_workspace_packages: bool,
+    /// Package selectors mapped to dependency and peer metadata additions.
     pub package_extensions: Option<Value>,
+    /// Ordered package-name patterns for excluding optional dependencies.
     pub ignored_optional_dependencies: Option<Value>,
+    /// Hook identity used to decide whether source records can be reused.
     pub pnpmfile_checksum: Option<Value>,
+    /// Additional pnpm resolver settings keyed by their pnpm configuration names.
     pub parameters: BTreeMap<String, Value>,
 }
 impl Default for ResolutionSettings {
@@ -122,21 +141,32 @@ impl Default for ResolutionSettings {
 /// decode settings for a particular pnpm release with `from_pnpm_version`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfig {
+    /// Consolidate compatible locked releases when the workspace enables pnpm auto-deduplication.
     pub auto_dedupe: bool,
+    /// Settings used to interpret importers, snapshots and source compatibility.
     pub resolution: ResolutionSettings,
+    /// Catalog name to package declarations, with `default` for the unnamed catalog.
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
     /// Selector/replacement pairs in declaration order (ties can depend on it).
     pub overrides: Option<Vec<(String, String)>>,
+    /// Rule precedence when two override selectors match equally well.
     pub override_tie_break: OverrideTieBreak,
     /// pnpm release responsible for this resolution, when known.
     pub pnpm_version: Option<node_semver::Version>,
+    /// Path representation to use in peer snapshot identifiers.
     pub linked_peer_encoding: LinkedPeerEncoding,
+    /// Declared package selectors mapped to workspace-relative patch file paths.
     pub patches: Option<BTreeMap<String, String>>,
+    /// Hash algorithm and record shape for patches in this workspace.
     pub patch_encoding: PatchEncoding,
+    /// Checksum format for package extensions, when the package manager is known.
     pub extension_checksum: Option<ExtensionChecksum>,
 }
 impl WorkspaceConfig {
     /// Decode workspace settings using the lockfile conventions of this pnpm release.
+    ///
+    /// # Errors
+    /// Returns the configuration decoding errors described by [`Self::from_pnpm`].
     pub fn from_pnpm_version(
         value: &Value,
         v: &node_semver::Version,
@@ -178,6 +208,27 @@ impl WorkspaceConfig {
         })
     }
 
+    fn supported_lock_settings(&self, mut settings: LockSettings) -> LockSettings {
+        if self
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v < &node_semver::Version::from((12, 19, 0)))
+        {
+            settings.project_scoped_optional_peers = false;
+        }
+        settings
+    }
+
+    pub(crate) fn read_lock_settings(&self, document: &Value) -> LockSettings {
+        self.supported_lock_settings(LockSettings::from_document(document))
+    }
+
+    pub(crate) fn recorded_settings(&self) -> LockSettings {
+        let mut settings = self.supported_lock_settings(self.resolution.lock.clone());
+        settings.project_scoped_optional_peers &= self.resolution.dedupe_peer_dependents;
+        settings
+    }
+
     pub(crate) fn matches_catalog_ranges(&self) -> bool {
         self.since((11, 28, 12), (12, 20, 0))
     }
@@ -204,6 +255,9 @@ impl WorkspaceConfig {
 
     /// Decode one effective pnpm configuration object. Files, configuration
     /// precedence, and workspace-glob expansion belong to the caller.
+    ///
+    /// # Errors
+    /// Returns an error when a recognized setting has an invalid type or declaration.
     pub fn from_pnpm(value: &Value) -> Result<Self, LockfileError> {
         if !value.is_object() {
             return Err(LockfileError::InvalidDocument(

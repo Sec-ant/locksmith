@@ -13,8 +13,11 @@ mod workspace;
 /// candidate importer changes: peer declarations are not stored in importers.
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestChange<'a> {
+    /// Workspace-relative importer ID, or `.` for the root.
     pub importer: &'a str,
+    /// Baseline manifest, or `None` for a newly added project.
     pub before: Option<&'a Value>,
+    /// Installed workspace manifest, or `None` for a removed project.
     pub after: Option<&'a Value>,
 }
 
@@ -58,6 +61,10 @@ pub struct ConvergeOptions<'a> {
 /// extension edits. Each consumer retains its eligible peer bindings. Other
 /// resolution settings must agree. Registry evidence can supply the published
 /// child ranges of a new parent release or of a removed override.
+///
+/// # Errors
+/// Mismatched manifests or incompatible configuration changes return an error. Missing
+/// locked evidence can produce a resolution request. Incompatible graph records produce a conflict.
 pub fn converge(
     baseline: &Lockfile,
     candidate: &Lockfile,
@@ -69,6 +76,9 @@ pub fn converge(
 
 /// Converge with the final workspace's patch contents, keyed by relative path.
 /// A cross-major migration uses all final manifests and verifies patch identities.
+///
+/// # Errors
+/// Returns the errors of [`converge`] and rejects unavailable or inconsistent patch data.
 pub fn converge_with_patches(
     baseline: &Lockfile,
     candidate: &Lockfile,
@@ -256,7 +266,7 @@ fn select(
 fn check_baseline_manifest(
     overrides: &manifest::Overrides<'_>,
     change: &ManifestChange<'_>,
-    has_configuration: bool,
+    configuration: Option<&crate::WorkspaceConfig>,
 ) -> Result<(), LockfileError> {
     if change.before.is_none() && change.after.is_none() {
         return Err(LockfileError::InvalidManifest(change.importer.into()));
@@ -267,13 +277,20 @@ fn check_baseline_manifest(
         }
     }
     for field in ["pnpm", "packageManager", "devEngines"] {
+        if field == "pnpm"
+            && configuration
+                .and_then(|c| c.pnpm_version.as_ref())
+                .is_some_and(|v| v.major() >= 11)
+        {
+            continue;
+        }
         if field == "packageManager" && change.importer != "." {
             continue;
         }
         if get(change.before, field) != get(change.after, field) {
             if field == "pnpm"
                 && change.importer == "."
-                && has_configuration
+                && configuration.is_some()
                 && [change.before, change.after]
                     .iter()
                     .all(|m| get(*m, field).is_none_or(Value::is_object))
@@ -304,45 +321,59 @@ fn check_baseline_manifest(
     manifest::check(overrides, change.importer, change.before, "baseline")
 }
 
-fn converge_manifests(
-    original: &Lockfile,
-    baseline: Lockfile,
-    candidate: &Lockfile,
-    changes: &[ManifestChange<'_>],
-    options: ConvergeOptions<'_>,
-    configured: Option<&workspace::Projection>,
-) -> Result<Lockfile, LockfileError> {
+struct LocalGraph<'a> {
+    document: &'a Value,
+    projects: graph::LinkedProjects<'a>,
+}
+impl<'a> LocalGraph<'a> {
+    fn new(document: &'a Value) -> Self {
+        Self {
+            document,
+            projects: graph::LinkedProjects::new(document.get("importers")),
+        }
+    }
+    fn target(&self, importer: &str, name: &str, dep: &Value) -> Option<String> {
+        let reference = dep.get("version")?.as_str()?;
+        if let Some(path) = reference.strip_prefix("link:") {
+            return Some(self.projects.resolve(importer, path));
+        }
+        let key = graph::snapshot_key(name, reference, graph::section(self.document, "snapshots"));
+        local_package(self.document, &key)
+    }
+}
+
+type SpecifierEdits<'a> = BTreeMap<(&'a str, &'static str, &'a str), (&'a Value, &'a str)>;
+struct ManifestEdits<'a> {
+    changed: BTreeMap<&'a str, &'a ManifestChange<'a>>,
+    manifests: BTreeMap<&'a str, &'a ManifestChange<'a>>,
+    specifiers: SpecifierEdits<'a>,
+    only_specifiers: bool,
+    metadata_importers: BTreeSet<&'a str>,
+    providers: BTreeMap<String, BTreeSet<&'a str>>,
+    forced: BTreeSet<(&'a str, &'a str)>,
+}
+
+fn manifest_edits<'a>(
+    graphs: [&LocalGraph<'a>; 2],
+    rules: [&manifest::Overrides<'_>; 2],
+    changes: &'a [ManifestChange<'a>],
+    configured: Option<&'a workspace::Projection>,
+    baseline_configuration: Option<&crate::WorkspaceConfig>,
+) -> Result<ManifestEdits<'a>, LockfileError> {
+    let [base, donor] = graphs.map(|g| g.document);
+    let [baseline_rules, candidate_rules] = rules;
     let root_choices = configured.map(|p| &p.roots);
-    let default_config = crate::WorkspaceConfig::default();
-    let config = options.configuration.unwrap_or(&default_config);
-    let base = baseline.project().ok_or_else(|| {
-        LockfileError::InvalidDocument("missing baseline project document".into())
-    })?;
-    let donor = candidate.project().ok_or_else(|| {
-        LockfileError::InvalidDocument("missing candidate project document".into())
-    })?;
-    let baseline_rules = manifest::Overrides::new(
-        original.project().expect("baseline project"),
-        options.baseline_configuration.unwrap_or(config),
-    );
-    let candidate_rules = manifest::Overrides::new(donor, config);
     let mut changed = BTreeMap::new();
     let mut specifiers = BTreeMap::new();
     let mut only_specifiers = true;
     let mut metadata_importers = BTreeSet::new();
     let mut providers: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
-    let mut seen = BTreeSet::new();
     let mut manifests = BTreeMap::new();
     for change in changes {
-        if !seen.insert(change.importer) {
+        if manifests.insert(change.importer, change).is_some() {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        check_baseline_manifest(
-            &baseline_rules,
-            change,
-            options.baseline_configuration.is_some(),
-        )?;
-        manifests.insert(change.importer, change);
+        check_baseline_manifest(baseline_rules, change, baseline_configuration)?;
         let metadata = METADATA
             .iter()
             .any(|key| get(change.before, key) != get(change.after, key))
@@ -359,7 +390,7 @@ fn converge_manifests(
         {
             continue;
         }
-        manifest::check(&candidate_rules, change.importer, change.after, "candidate")?;
+        manifest::check(candidate_rules, change.importer, change.after, "candidate")?;
         if metadata || change.before.is_none() {
             metadata_importers.insert(change.importer);
         }
@@ -389,8 +420,8 @@ fn converge_manifests(
                 && let (Some(pin), Some(declaration)) =
                     (previous["version"].as_str(), next["specifier"].as_str())
                 && crate::reconcile::accepts(name, declaration, pin, base)
-                && local_target(base, change.importer, name, previous).is_none()
-                && local_target(donor, change.importer, name, next).is_none()
+                && graphs[0].target(change.importer, name, previous).is_none()
+                && graphs[1].target(change.importer, name, next).is_none()
             {
                 only_specifiers &= old_group == new_group;
                 specifiers.insert(
@@ -459,47 +490,34 @@ fn converge_manifests(
             }
         }
     }
-    if configured.is_none() {
-        baseline.validate_with_config(options.configuration)?;
-        if changed.is_empty() {
-            return Ok(baseline);
-        }
-    }
-    if only_specifiers {
-        let edits: Vec<_> = specifiers
-            .into_iter()
-            .filter(|(_, (old, spec))| old["specifier"].as_str() != Some(spec))
-            .map(|(key, (_, spec))| (key, spec))
-            .collect();
-        if edits.is_empty() && configured.is_none() {
-            return Ok(baseline);
-        }
-        let mut result = baseline;
-        let project = std::sync::Arc::make_mut(
-            result
-                .documents
-                .get_mut(&crate::DocumentKind::Project)
-                .expect("project checked"),
-        );
-        for ((id, group, name), specifier) in edits {
-            project["importers"][id][group][name]["specifier"] = Value::from(specifier);
-        }
-        if configured.is_some() {
-            graph::prune_scoped(
-                project,
-                crate::DocumentKind::Project,
-                original.project().unwrap(),
-                options.configuration,
-            )?;
-        }
-        return Ok(result);
-    }
+    Ok(ManifestEdits {
+        changed,
+        manifests,
+        specifiers,
+        only_specifiers,
+        metadata_importers,
+        providers,
+        forced,
+    })
+}
 
+struct LocalChanges {
+    affected: BTreeSet<String>,
+    consumers: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn local_changes(
+    graphs: [&LocalGraph; 2],
+    edits: &ManifestEdits,
+    candidate_rules: &manifest::Overrides,
+) -> Result<LocalChanges, LockfileError> {
+    let [base, donor] = graphs.map(|g| g.document);
     // Propagate local package changes through workspace consumers, including
     // injected/file packages. This changes edge provenance, not entire importers.
     let mut reverse: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut forward: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for document in [base, donor] {
+    for graph in graphs {
+        let document = graph.document;
         for (id, record) in graph::section(document, "importers").into_iter().flatten() {
             for group in manifest::GROUPS {
                 for (name, dep) in record
@@ -508,7 +526,7 @@ fn converge_manifests(
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(target) = local_target(document, id, name, dep) {
+                    if let Some(target) = graph.target(id, name, dep) {
                         reverse
                             .entry(target.clone())
                             .or_default()
@@ -519,7 +537,7 @@ fn converge_manifests(
             }
         }
     }
-    let mut affected: BTreeSet<String> = changed.keys().map(|s| (*s).into()).collect();
+    let mut affected: BTreeSet<String> = edits.changed.keys().map(|s| (*s).into()).collect();
     let mut queue: VecDeque<_> = affected.iter().cloned().collect();
     let mut descendants = affected.clone();
     while let Some(parent) = queue.pop_front() {
@@ -531,14 +549,14 @@ fn converge_manifests(
             let old = base.get("importers").and_then(|v| v.get(target));
             let new = donor.get("importers").and_then(|v| v.get(target));
             if old != new {
-                let context = manifests.get(target.as_str()).ok_or_else(|| {
+                let context = edits.manifests.get(target.as_str()).ok_or_else(|| {
                     manifest::mismatch(
                         target,
                         "candidate",
                         "include before/after manifests for this affected local dependency",
                     )
                 })?;
-                manifest::check(&candidate_rules, target, context.after, "candidate")?;
+                manifest::check(candidate_rules, target, context.after, "candidate")?;
                 affected.insert(target.clone());
             }
         }
@@ -551,10 +569,36 @@ fn converge_manifests(
             }
         }
     }
-    let mut local_base = affected_snapshots(base, &affected);
-    let mut local_donor = affected_snapshots(donor, &affected);
+    Ok(LocalChanges {
+        affected,
+        consumers: reverse,
+    })
+}
+
+struct SelectedEdges {
+    output: Value,
+    retained: Map<String, Value>,
+    adopted: Map<String, Value>,
+    local_base: BTreeSet<String>,
+    local_donor: BTreeSet<String>,
+}
+
+fn select_edges(
+    graphs: [&LocalGraph; 2],
+    edits: &ManifestEdits,
+    locals: LocalChanges,
+    configured: Option<&workspace::Projection>,
+    configuration: Option<&crate::WorkspaceConfig>,
+) -> Result<SelectedEdges, LockfileError> {
+    let [base, donor] = graphs.map(|g| g.document);
+    let LocalChanges {
+        affected,
+        consumers: reverse,
+    } = locals;
+    let local_base = affected_snapshots(base, &affected);
+    let local_donor = affected_snapshots(donor, &affected);
     let mut output = base.get("importers").cloned().unwrap_or_else(|| json!({}));
-    for (id, change) in &changed {
+    for (id, change) in &edits.changed {
         if change.after.is_none() {
             output.as_object_mut().unwrap().remove(*id);
         } else if change.before.is_none() {
@@ -564,12 +608,14 @@ fn converge_manifests(
     let mut retained = Map::new();
     let mut adopted = Map::new();
     for (id, record) in output.as_object_mut().expect("importer map") {
-        let workspace_root = root_choices.is_some_and(|roots| roots.contains_key(id));
+        let workspace_root = configured
+            .map(|p| &p.roots)
+            .is_some_and(|roots| roots.contains_key(id));
         let old = base.get("importers").and_then(|v| v.get(id));
         let new = donor.get("importers").and_then(|v| v.get(id));
         let mut old_edges = Map::new();
         let mut new_edges = Map::new();
-        let mut merged = if metadata_importers.contains(id.as_str()) {
+        let mut merged = if edits.metadata_importers.contains(id.as_str()) {
             new.expect("manifest-checked candidate").clone()
         } else {
             record.clone()
@@ -579,26 +625,31 @@ fn converge_manifests(
             let new_deps = new.and_then(|v| v.get(group)).and_then(Value::as_object);
             let names: BTreeSet<_> = old_deps
                 .into_iter()
-                .chain(new_deps.filter(|_| changed.contains_key(id.as_str()) || workspace_root))
+                .chain(
+                    new_deps.filter(|_| edits.changed.contains_key(id.as_str()) || workspace_root),
+                )
                 .flat_map(|v| v.keys())
                 .collect();
             let mut merged_deps = Map::new();
             let mut keep = Map::new();
             let mut take = Map::new();
             for name in names {
-                let retained_specifier = specifiers.get(&(id.as_str(), group, name.as_str()));
+                let retained_specifier = edits.specifiers.get(&(id.as_str(), group, name.as_str()));
                 let previous = retained_specifier
                     .map(|(old, _)| *old)
                     .or_else(|| old_deps.and_then(|v| v.get(name)));
                 let next = new_deps.and_then(|v| v.get(name));
-                let declared = changed.contains_key(id.as_str())
+                let declared = edits.changed.contains_key(id.as_str())
                     && previous.and_then(|v| v.get("specifier"))
                         != next.and_then(|v| v.get("specifier"));
-                let local = [previous.map(|v| (base, v)), next.map(|v| (donor, v))]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|(doc, dep)| local_target(doc, id, name, dep))
-                    .any(|target| affected.contains(&target));
+                let local = [
+                    previous.map(|v| (graphs[0], v)),
+                    next.map(|v| (graphs[1], v)),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|(doc, dep)| doc.target(id, name, dep))
+                .any(|target| affected.contains(&target));
                 let local_snapshot = affected.contains(id)
                     && [(base, previous, &local_base), (donor, next, &local_donor)]
                         .into_iter()
@@ -613,7 +664,7 @@ fn converge_manifests(
                                     ))
                                 })
                         });
-                let dependency_metadata = changed.get(id.as_str()).is_some_and(|change| {
+                let dependency_metadata = edits.changed.get(id.as_str()).is_some_and(|change| {
                     ["dependenciesMeta", "peerDependenciesMeta"]
                         .iter()
                         .any(|field| {
@@ -622,7 +673,7 @@ fn converge_manifests(
                         })
                 });
                 let installed_peer = previous != next
-                    && manifests.get(id.as_str()).is_some_and(|change| {
+                    && edits.manifests.get(id.as_str()).is_some_and(|change| {
                         get(change.after, "peerDependencies")
                             .and_then(|v| v.get(name))
                             .is_some()
@@ -630,14 +681,13 @@ fn converge_manifests(
                                 get(change.after, field).and_then(|v| v.get(name)).is_none()
                             })
                     })
-                    && providers.get(name).is_some_and(|sources| {
-                        let inherit = options
-                            .configuration
-                            .is_none_or(|c| c.resolution.workspace_root_peers);
+                    && edits.providers.get(name).is_some_and(|sources| {
+                        let inherit =
+                            configuration.is_none_or(|c| c.resolution.workspace_root_peers);
                         (inherit && sources.contains("."))
                             || supplied_by_consumer(id, name, sources, &reverse, donor)
                     });
-                let workspace_choice = forced.contains(&(id.as_str(), name.as_str()));
+                let workspace_choice = edits.forced.contains(&(id.as_str(), name.as_str()));
                 let use_candidate = workspace_choice
                     || (declared && retained_specifier.is_none())
                     || dependency_metadata
@@ -646,7 +696,7 @@ fn converge_manifests(
                     || installed_peer;
                 if use_candidate
                     && !workspace_choice
-                    && !changed.contains_key(id.as_str())
+                    && !edits.changed.contains_key(id.as_str())
                     && previous.and_then(|v| v.get("specifier"))
                         != next.and_then(|v| v.get("specifier"))
                 {
@@ -685,6 +735,93 @@ fn converge_manifests(
         retained.insert(id.clone(), Value::Object(old_edges));
         adopted.insert(id.clone(), Value::Object(new_edges));
     }
+    Ok(SelectedEdges {
+        output,
+        retained,
+        adopted,
+        local_base,
+        local_donor,
+    })
+}
+
+fn converge_manifests(
+    original: &Lockfile,
+    baseline: Lockfile,
+    candidate: &Lockfile,
+    changes: &[ManifestChange<'_>],
+    options: ConvergeOptions<'_>,
+    configured: Option<&workspace::Projection>,
+) -> Result<Lockfile, LockfileError> {
+    let default_config = crate::WorkspaceConfig::default();
+    let config = options.configuration.unwrap_or(&default_config);
+    let base = baseline.project().ok_or_else(|| {
+        LockfileError::InvalidDocument("missing baseline project document".into())
+    })?;
+    let donor = candidate.project().ok_or_else(|| {
+        LockfileError::InvalidDocument("missing candidate project document".into())
+    })?;
+    let baseline_rules = manifest::Overrides::new(
+        original.project().expect("baseline project"),
+        options.baseline_configuration.unwrap_or(config),
+    );
+    let candidate_rules = manifest::Overrides::new(donor, config);
+    let base_graph = LocalGraph::new(base);
+    let donor_graph = LocalGraph::new(donor);
+    let graphs = [&base_graph, &donor_graph];
+    let edits = manifest_edits(
+        graphs,
+        [&baseline_rules, &candidate_rules],
+        changes,
+        configured,
+        options.baseline_configuration,
+    )?;
+    if configured.is_none() {
+        baseline.validate_with_config(options.configuration)?;
+        if edits.changed.is_empty() {
+            return Ok(baseline);
+        }
+    }
+    if edits.only_specifiers {
+        let edits: Vec<_> = edits
+            .specifiers
+            .into_iter()
+            .filter(|(_, (old, spec))| old["specifier"].as_str() != Some(spec))
+            .map(|((id, group, name), (_, spec))| {
+                ((id.to_owned(), group, name.to_owned()), Value::from(spec))
+            })
+            .collect();
+        if edits.is_empty() && configured.is_none() {
+            return Ok(baseline);
+        }
+        let mut result = baseline;
+        let project = std::sync::Arc::make_mut(
+            result
+                .documents
+                .get_mut(&crate::DocumentKind::Project)
+                .expect("project checked"),
+        );
+        for ((id, group, name), specifier) in edits {
+            project["importers"][id][group][name]["specifier"] = specifier;
+        }
+        if configured.is_some() {
+            graph::prune_scoped(
+                project,
+                crate::DocumentKind::Project,
+                original.project().unwrap(),
+                options.configuration,
+            )?;
+        }
+        return Ok(result);
+    }
+
+    let locals = local_changes(graphs, &edits, &candidate_rules)?;
+    let SelectedEdges {
+        mut output,
+        mut retained,
+        mut adopted,
+        mut local_base,
+        mut local_donor,
+    } = select_edges(graphs, &edits, locals, configured, options.configuration)?;
     let generated = peers::bind(
         [base, donor],
         &mut output,
@@ -750,19 +887,6 @@ fn importer_dependency<'a>(
     manifest::GROUPS
         .into_iter()
         .find_map(|group| importer[group].get(name).map(|dep| (group, dep)))
-}
-
-fn local_target(document: &Value, importer: &str, name: &str, dep: &Value) -> Option<String> {
-    let reference = dep.get("version")?.as_str()?;
-    if let Some(path) = reference.strip_prefix("link:") {
-        return Some(graph::linked_project(
-            document.get("importers"),
-            importer,
-            path,
-        ));
-    }
-    let key = graph::snapshot_key(name, reference, graph::section(document, "snapshots"));
-    local_package(document, &key)
 }
 
 fn local_package(document: &Value, key: &str) -> Option<String> {

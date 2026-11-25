@@ -6,7 +6,9 @@ use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value
 
 /// A parsed lockfile or its original YAML text.
 pub enum MergeInput<'a> {
+    /// Reuse an already parsed lockfile.
     Parsed(&'a Lockfile),
+    /// Parse the supplied YAML as part of the merge.
     Yaml(&'a str),
 }
 
@@ -28,6 +30,11 @@ impl<'a> From<&'a str> for MergeInput<'a> {
 ///
 /// Pass parsed lockfiles or YAML slices. Contextual merges of raw YAML can recover
 /// duplicate snapshot keys when every interpretation yields the same result.
+///
+/// # Errors
+/// Returns [`LockfileError::Conflicts`] for incompatible branch edits, or
+/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select a pin.
+/// Malformed inputs and invalid dependency graphs also return errors.
 pub fn merge<'a>(
     base: impl Into<MergeInput<'a>>,
     ours: impl Into<MergeInput<'a>>,
@@ -111,6 +118,12 @@ fn three_way(
                 }
             }
             crate::assembly::complete(&mut document, kind, None, &mut context.conflicts)?;
+            if kind == DocumentKind::Project && context.conflicts.is_empty() {
+                graph::refresh_merged_optional(
+                    &mut document,
+                    [ours, theirs].into_iter().filter_map(Lockfile::project),
+                )?;
+            }
             documents.insert(kind, std::sync::Arc::new(document));
         }
         conflicts.extend(context.conflicts);
@@ -160,14 +173,26 @@ impl Context<'_> {
         // deletion could remove an entry that a new importer still references.
         let container = path.is_empty()
             || (path.len() == 1 && ["packages", "snapshots"].contains(&path[0].as_str()));
-        if !container || ours == theirs {
-            if ours == theirs {
-                return ours.cloned();
+        let ordered = path.len() == 1 && path[0] == "overrides";
+        let equal = |left: Option<&Value>, right: Option<&Value>| {
+            if ordered {
+                crate::manifest::same_ordered_mapping(left, right)
+            } else {
+                left == right
+                    && (!path.is_empty()
+                        || left
+                            .zip(right)
+                            .is_none_or(|(a, b)| crate::manifest::same_override_order(a, b)))
             }
-            if ours == base {
+        };
+        if equal(ours, theirs) {
+            return ours.cloned();
+        }
+        if !container {
+            if equal(ours, base) {
                 return theirs.cloned();
             }
-            if theirs == base {
+            if equal(theirs, base) {
                 return ours.cloned();
             }
         }
@@ -190,17 +215,36 @@ impl Context<'_> {
             && base.is_none_or(Value::is_object);
         if recurse {
             let mut result = Map::new();
-            // Keep the first parent's root/field order. Entry sections are sorted
-            // when emitted, matching pnpm's output.
-            let mut seen = BTreeSet::new();
-            let names: Vec<_> = ours
-                .into_iter()
-                .chain(theirs)
-                .chain(base)
-                .flat_map(|value| value.as_object().expect("mapping was checked").keys())
-                .filter(|key| seen.insert((*key).clone()))
-                .cloned()
-                .collect();
+            let (left, right) = (
+                ours.unwrap().as_object().unwrap(),
+                theirs.unwrap().as_object().unwrap(),
+            );
+            let base_map = base.and_then(Value::as_object);
+            let names = if ordered {
+                override_keys(base_map, left, right)
+            } else {
+                // Keep the first parent's field order. The writer sorts graph sections.
+                let mut seen = BTreeSet::new();
+                Some(
+                    left.keys()
+                        .chain(right.keys())
+                        .chain(base_map.into_iter().flat_map(Map::keys))
+                        .filter(|key| seen.insert(*key))
+                        .cloned()
+                        .collect(),
+                )
+            };
+            let Some(names) = names else {
+                self.conflicts.push(Conflict {
+                    document: self.kind,
+                    path: path.clone(),
+                    kind: ConflictKind::BothChanged,
+                    base: base.cloned(),
+                    ours: ours.cloned(),
+                    theirs: theirs.cloned(),
+                });
+                return ours.cloned();
+            };
             for name in names {
                 path.push(name.clone());
                 let value = self.value(
@@ -226,10 +270,10 @@ impl Context<'_> {
                 Some(theirs.unwrap_or(&empty)),
             );
         }
-        if ours == base {
+        if equal(ours, base) {
             return theirs.cloned();
         }
-        if theirs == base {
+        if equal(theirs, base) {
             return ours.cloned();
         }
         self.conflicts.push(Conflict {
@@ -248,4 +292,43 @@ impl Context<'_> {
         // Conflicted candidates never escape through the public API.
         ours.or(theirs).cloned()
     }
+}
+
+// Combine independent insertions around shared keys, preserving the order each
+// branch authored. A single reordered branch also owns the order when the other
+// branch only edited values. Incompatible order edits require a decision.
+fn override_keys(
+    base: Option<&Map<String, Value>>,
+    ours: &Map<String, Value>,
+    theirs: &Map<String, Value>,
+) -> Option<Vec<String>> {
+    if let Some(base) = base {
+        for (unchanged, edited) in [(ours, theirs), (theirs, ours)] {
+            if unchanged.keys().eq(base.keys()) {
+                return Some(
+                    edited
+                        .keys()
+                        .chain(unchanged.keys().filter(|k| !edited.contains_key(*k)))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
+    }
+    let mut left = ours.keys().peekable();
+    let mut right = theirs.keys().peekable();
+    let mut keys = Vec::new();
+    while left.peek().is_some() || right.peek().is_some() {
+        if left.peek().is_some_and(|k| !theirs.contains_key(*k)) {
+            keys.push(left.next()?.clone());
+        } else if right.peek().is_some_and(|k| !ours.contains_key(*k)) {
+            keys.push(right.next()?.clone());
+        } else if left.peek() == right.peek() {
+            keys.push(left.next()?.clone());
+            right.next();
+        } else {
+            return None;
+        }
+    }
+    Some(keys)
 }

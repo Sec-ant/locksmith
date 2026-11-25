@@ -1,4 +1,5 @@
 //! Reconcile ordinary versions brought together by an autoDedupe workspace merge.
+use super::PUBLISHED;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use node_semver::Version;
@@ -45,9 +46,12 @@ pub(super) fn reconcile(
                 .iter()
                 .map(|(_, key)| *key)
                 .filter(|new| {
-                    sources.docs[..3].iter().all(|doc| {
-                        doc["packages"].get(old).is_none() || doc["packages"].get(new).is_none()
-                    })
+                    sources.inputs[..PUBLISHED]
+                        .iter()
+                        .map(|input| input.document)
+                        .all(|doc| {
+                            doc["packages"].get(old).is_none() || doc["packages"].get(new).is_none()
+                        })
                 })
                 .collect();
             if !newer.is_empty() {
@@ -141,12 +145,16 @@ fn allows(
 ) -> Result<bool, LockfileError> {
     let parent = graph::package_key(edge.parent);
     let pkg = &output["packages"][parent];
-    let witnessed = sources.docs[..3].iter().enumerate().any(|(side, doc)| {
-        sources.unchanged_rules[side]
-            && sources.compatibility[side].unchanged(parent)
-            && doc["packages"][parent]["resolution"] == pkg["resolution"]
-            && doc["snapshots"][edge.parent][edge.group][edge.name] == pin
-    });
+    let witnessed = sources.inputs[..PUBLISHED]
+        .iter()
+        .map(|input| input.document)
+        .enumerate()
+        .any(|(side, doc)| {
+            sources.inputs[side].unchanged_rules
+                && sources.inputs[side].compatibility.unchanged(parent)
+                && doc["packages"][parent]["resolution"] == pkg["resolution"]
+                && doc["snapshots"][edge.parent][edge.group][edge.name] == pin
+        });
     if witnessed {
         return Ok(true);
     }

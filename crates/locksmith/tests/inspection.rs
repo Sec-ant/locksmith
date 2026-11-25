@@ -8,6 +8,37 @@ use std::collections::{BTreeMap, BTreeSet};
 fn lock(doc: &Value) -> Lockfile {
     Lockfile::parse(&doc.to_string()).unwrap()
 }
+
+#[test]
+fn external_links_respect_exact_members_ancestors_and_unique_publish_directories() {
+    let doc = json!({"lockfileVersion":"9.0","importers":{
+        ".":{"dependencies":{
+            "exact":{"specifier":"link:member","version":"link:member"},
+            "nested":{"specifier":"link:owner/dist","version":"link:owner/dist"},
+            "unique":{"specifier":"link:out/one","version":"link:out/one"},
+            "ambiguous":{"specifier":"link:out/two","version":"link:out/two"},
+            "disabled":{"specifier":"link:out/unused","version":"link:out/unused"}
+        }},
+        "member":{}, "also-member":{"publishDirectory":"../member"},
+        "owner":{"publishDirectory":"dist"}, "other":{"publishDirectory":"../owner/dist"},
+        "one":{"publishDirectory":"../out/one"},
+        "two":{"publishDirectory":"../out/two"}, "three":{"publishDirectory":"../out/two"},
+        "unused":{"publishDirectory":"../out/unused","linkDirectory":false}
+    }});
+    let lock = lock(&doc);
+    let closure = lock.dependency_closure(".").unwrap();
+    assert_eq!(
+        closure.importers,
+        [".", "member", "owner", "one"].map(String::from).into()
+    );
+    let report = inspect(&lock, &PeerRules::default(), None).unwrap();
+    let outside: Vec<_> = report
+        .external_links
+        .iter()
+        .map(|link| link.target.as_str())
+        .collect();
+    assert_eq!(outside, ["out/two", "out/unused"]);
+}
 fn binding(wanted: &str, pin: &str, package: Value) -> Value {
     let snapshot = format!("plugin@1.0.0(host@{pin})");
     json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1","version":snapshot.strip_prefix("plugin@").unwrap()}}}},

@@ -225,7 +225,7 @@ fn check_manifests(
         if !supplied.insert(change.importer) {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        super::check_baseline_manifest(&baseline_rules, change, true)?;
+        super::check_baseline_manifest(&baseline_rules, change, Some(before))?;
         manifest::check(&candidate_rules, change.importer, change.after, "candidate")?;
     }
     // Importer pins can legitimately drift without a manifest change. A new

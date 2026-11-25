@@ -14,7 +14,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 type PeerRequirements = BTreeMap<String, BTreeSet<String>>;
-const PUBLISHED: usize = 3;
+#[derive(Clone, Copy)]
+enum Source {
+    Base,
+    Ours,
+    Theirs,
+    Published,
+}
+
+impl Source {
+    const ALL: [Self; 4] = [Self::Base, Self::Ours, Self::Theirs, Self::Published];
+}
+const PUBLISHED: usize = Source::Published as usize;
+
 #[derive(Default)]
 struct PeerChanges {
     // Requirements introduced by selection, with locked provider evidence.
@@ -38,19 +50,24 @@ struct RepairedSnapshot {
 /// throughout the merge, so a single result can contain pins from both branches.
 #[derive(Debug, Clone, Copy)]
 pub enum MergeTarget {
+    /// Prefer the first branch over the second for equally suitable pins.
     Ours,
+    /// Prefer the second branch over the first for equally suitable pins.
     Theirs,
 }
 
 impl MergeTarget {
     fn other_index(self) -> usize {
-        3 - self.index()
+        match self {
+            Self::Ours => Source::Theirs as usize,
+            Self::Theirs => Source::Ours as usize,
+        }
     }
 
     fn index(self) -> usize {
         match self {
-            Self::Ours => 1,
-            Self::Theirs => 2,
+            Self::Ours => Source::Ours as usize,
+            Self::Theirs => Source::Theirs as usize,
         }
     }
 }
@@ -64,10 +81,15 @@ impl MergeTarget {
 pub struct MergeContext<'a> {
     /// Published release data supplied by the caller. Locked graphs take precedence.
     pub registry: Option<&'a crate::RegistryMetadata>,
+    /// Branch with priority when compatible pins tie.
     pub target: MergeTarget,
+    /// Final package manifests keyed by importer path, including `.`.
     pub manifests: &'a BTreeMap<String, Value>,
+    /// Effective configurations for the common ancestor, first branch and second branch, in that order.
     pub configurations: [&'a crate::WorkspaceConfig; 3],
+    /// Effective workspace configuration after merging the manifests and settings.
     pub configuration: &'a crate::WorkspaceConfig,
+    /// Final patch contents keyed by their declared workspace-relative paths.
     pub patches: &'a BTreeMap<String, String>,
 }
 
@@ -141,10 +163,11 @@ fn resolve_sources(
     let docs = docs.map(|d| d.ok_or_else(|| missing(&[], "missing project document")));
     let [b, o, t] = docs;
     let docs = [b?, o?, t?];
-    let mut order = match context.target {
-        MergeTarget::Ours => [1, 2, 0],
-        MergeTarget::Theirs => [2, 1, 0],
-    };
+    let mut order = [
+        context.target.index(),
+        context.target.other_index(),
+        Source::Base as usize,
+    ];
     let target = order[0];
     let matching_configuration = context.configurations.map(|source| {
         source.matches_pnpm(context.configuration)
@@ -167,31 +190,44 @@ fn resolve_sources(
     // Migration convergence keeps admissible baseline pins. Headers and the
     // bootstrap graph still come from the final package manager.
     if prefer_baseline {
-        order = [1, 2, 0];
+        order = [Source::Ours, Source::Theirs, Source::Base].map(|source| source as usize);
     }
     let [first, second, third] = order;
-    let order = [first, second, third, 3];
-    let [b, o, t] = docs;
-    let docs = [b, o, t, &evidence];
-    let [b, o, t] = context.configurations;
-    let configs = [b, o, t, context.configuration];
-    let [b, o, t] = matching_configuration;
-    let matching_configuration = [b, o, t, true];
-    let compatibility = std::array::from_fn(|side| {
-        crate::config::ResolutionCompatibility::new(
-            &configs[side].resolution,
-            &context.configuration.resolution,
-            docs[side],
-        )
-    });
+    let order = [first, second, third, PUBLISHED];
     let final_override_document = json!({"overrides":metadata.get("overrides")});
     let final_rules = manifest::Overrides::new(&final_override_document, context.configuration);
-    let rules = std::array::from_fn(|side| manifest::Overrides::new(docs[side], configs[side]));
-    let matching_overrides: [bool; 4] =
-        std::array::from_fn(|side| rules[side].same_rules(&final_rules));
+    let inputs = Source::ALL.map(|id| {
+        let (doc, config, matches_configuration) = match id {
+            Source::Published => (&evidence, context.configuration, true),
+            branch => {
+                let i = branch as usize;
+                (
+                    docs[i],
+                    context.configurations[i],
+                    matching_configuration[i],
+                )
+            }
+        };
+        let rules = manifest::Overrides::new(doc, config);
+        let same_overrides = rules.same_rules(&final_rules);
+        GraphSource {
+            document: doc,
+            rules,
+            same_overrides,
+            compatibility: crate::config::ResolutionCompatibility::new(
+                &config.resolution,
+                &context.configuration.resolution,
+                doc,
+            ),
+            matches_configuration,
+            unchanged_rules: same_overrides
+                && doc.get("patchedDependencies") == metadata.get("patchedDependencies"),
+            tie_break: config.override_tie_break,
+        }
+    });
     let mut source_order = order;
     if !prefer_baseline {
-        source_order.sort_by_key(|side| !matching_overrides[*side]);
+        source_order.sort_by_key(|side| !inputs[*side].same_overrides);
     }
     let unqualified: Map<_, _> = graph::section(&metadata, "overrides")
         .into_iter()
@@ -202,26 +238,22 @@ fn resolve_sources(
     let unqualified = json!({"overrides": unqualified});
     let sources = GraphSources {
         prefer_baseline,
-        docs,
-        rules,
+        inputs,
         final_rules,
         unqualified_rules: manifest::Overrides::new(&unqualified, context.configuration),
         order,
         candidates: std::cell::OnceCell::new(),
         registry: context.registry,
-        compatibility: &compatibility,
         configuration: context.configuration,
-        unchanged_configuration: matching_configuration,
-        unchanged_rules: std::array::from_fn(|side| {
-            matching_overrides[side]
-                && docs[side].get("patchedDependencies") == metadata.get("patchedDependencies")
-        }),
         override_tie_break: context.configuration.override_tie_break,
-        source_tie_breaks: configs.map(|config| config.override_tie_break),
     };
     // All attempts use the same input indexes and final configuration. A retry
     // changes only the preferences and the graph assembled from them.
-    let peer_index = peer::PeerIndex::new(docs.map(|doc| (!doc.is_null()).then_some(doc)));
+    let peer_index = peer::PeerIndex::new(
+        sources
+            .documents()
+            .map(|doc| (!doc.is_null()).then_some(doc)),
+    );
     let attempt = |preferences: &preference::Preferences| {
         let mut output = metadata.clone();
         let mut peers = peer::Merger::with_index(peer_index.clone());
@@ -262,6 +294,8 @@ fn resolve_sources(
         }
         if extended || context.configuration.auto_dedupe {
             graph::refresh_optional(&mut output)?;
+        } else {
+            graph::refresh_merged_optional(&mut output, docs)?;
         }
         let overrides = manifest::Overrides::new(&output, context.configuration);
         for (id, value) in context.manifests {
@@ -282,7 +316,7 @@ fn resolve_sources(
         Ok(result)
     };
     let mut preferences = preference::Preferences::default();
-    let branches = [docs[0], docs[1], docs[2]];
+    let branches = docs;
     loop {
         match attempt(&preferences) {
             Err(error) if preferences.extend(&error, branches, context) => continue,
@@ -399,10 +433,6 @@ fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
     };
     manifest::matches_version(range, Some(version))
 }
-fn authorized_patch(key: &str, metadata: &Value, docs: [&Value; 4]) -> bool {
-    desired_patch(key, metadata, docs) == Some(peer::patch(key))
-}
-
 // The outer None denotes competing selectors without a unique applicable patch.
 fn desired_patch<'a>(key: &str, metadata: &'a Value, docs: [&Value; 4]) -> Option<Option<&'a str>> {
     let package = graph::package_key(key);
@@ -493,34 +523,51 @@ pub(crate) fn peer_names(doc: &Value, key: &str) -> BTreeSet<String> {
 }
 type PackageCandidates<'a> = HashMap<&'a str, Vec<(usize, &'a str)>>;
 
+struct GraphSource<'a> {
+    document: &'a Value,
+    rules: manifest::Overrides<'a>,
+    compatibility: crate::config::ResolutionCompatibility<'a>,
+    same_overrides: bool,
+    matches_configuration: bool,
+    unchanged_rules: bool,
+    tie_break: crate::OverrideTieBreak,
+}
+
 struct GraphSources<'a> {
     prefer_baseline: bool,
     registry: Option<&'a crate::RegistryMetadata>,
-    docs: [&'a Value; 4],
-    rules: [manifest::Overrides<'a>; 4],
+    inputs: [GraphSource<'a>; 4],
     final_rules: manifest::Overrides<'a>,
     unqualified_rules: manifest::Overrides<'a>,
     order: [usize; 4],
     candidates: std::cell::OnceCell<PackageCandidates<'a>>,
-    compatibility: &'a [crate::config::ResolutionCompatibility<'a>; 4],
     configuration: &'a crate::WorkspaceConfig,
-    unchanged_configuration: [bool; 4],
-    unchanged_rules: [bool; 4],
     override_tie_break: crate::OverrideTieBreak,
-    source_tie_breaks: [crate::OverrideTieBreak; 4],
 }
 
 impl<'a> GraphSources<'a> {
+    fn authorized_patch(&self, key: &str, metadata: &Value) -> bool {
+        self.desired_patch(key, metadata) == Some(peer::patch(key))
+    }
+
+    fn desired_patch<'m>(&self, key: &str, metadata: &'m Value) -> Option<Option<&'m str>> {
+        desired_patch(key, metadata, self.documents())
+    }
+
+    fn documents(&self) -> [&'a Value; 4] {
+        self.inputs.each_ref().map(|input| input.document)
+    }
+
     fn candidates(&self) -> &PackageCandidates<'a> {
         self.candidates.get_or_init(|| {
             let mut candidates: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
             for side in self.order {
-                for key in graph::section(self.docs[side], "snapshots")
+                for key in graph::section(self.inputs[side].document, "snapshots")
                     .into_iter()
                     .flatten()
                     .map(|(k, _)| k.as_str())
                 {
-                    if !self.compatibility[side].accepts(key) {
+                    if !self.inputs[side].compatibility.accepts(key) {
                         continue;
                     }
                     if let Some((name, _)) = graph::package_key(key).rsplit_once('@') {
@@ -532,7 +579,7 @@ impl<'a> GraphSources<'a> {
                 records.sort_by_key(|(side, key)| {
                     (
                         *side == PUBLISHED,
-                        !self.compatibility[*side].unchanged(key),
+                        !self.inputs[*side].compatibility.unchanged(key),
                     )
                 });
             }

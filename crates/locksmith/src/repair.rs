@@ -21,10 +21,15 @@ use crate::{
 /// Parents are (lock, effective configuration) pairs. Their order does not
 /// authorize replacing a valid pin in the current lock.
 pub struct RepairContext<'a> {
+    /// Final manifests keyed by importer path, including the root at `.`.
     pub manifests: &'a BTreeMap<String, Value>,
+    /// Effective configuration for the lock being repaired.
     pub configuration: &'a WorkspaceConfig,
+    /// Patch contents keyed by declared workspace-relative path.
     pub patches: &'a BTreeMap<String, String>,
+    /// Additional locked graphs and the effective configuration of each graph.
     pub parents: &'a [(&'a Lockfile, &'a WorkspaceConfig)],
+    /// Optional published metadata supplied by the caller for missing resolutions.
     pub registry: Option<&'a RegistryMetadata>,
 }
 
@@ -33,6 +38,13 @@ pub struct RepairInput(Lockfile);
 
 /// Repair the supplied YAML against the final workspace. A healthy input is
 /// returned byte-for-byte. Missing or ambiguous evidence produces an error.
+/// Records outside the workspace dependency closure are preserved. Use
+/// [`Lockfile::validate`] to check references in the entire output.
+///
+/// # Errors
+/// Invalid YAML or an unsupported format fails during parsing. Incompatible settings,
+/// missing resolutions or ambiguous repairs return [`LockfileError::ResolutionRequired`].
+/// Graph and output errors are returned when the repair cannot be verified.
 pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
     RepairInput::parse(text)?.apply(context)
 }
@@ -52,12 +64,18 @@ impl RepairInput {
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].
+    ///
+    /// # Errors
+    /// Malformed YAML, unsupported versions or conflicting duplicate records return an error.
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
         edit::parse_for_repair(text, None).map(Self)
     }
 
     /// Use a reconciled lock to select an existing copy of a conflicting
     /// project snapshot. Each selected record must already appear in the input.
+    ///
+    /// # Errors
+    /// Returns an error when the input cannot be parsed or a duplicated snapshot has no unambiguous match.
     pub fn parse_with_snapshot_reference(
         text: &str,
         reference: &Lockfile,
@@ -66,6 +84,9 @@ impl RepairInput {
     }
 
     /// Repair the original source against this context.
+    ///
+    /// # Errors
+    /// Returns the workspace, graph and resolution errors described by [`repair`].
     pub fn apply(&self, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
         let lock = &self.0;
         let doc = lock
@@ -198,7 +219,7 @@ pub(crate) fn check_configuration(
             "workspace configuration differs from the lock; its effects extend beyond a broken record",
         )
     };
-    if crate::LockSettings::from_document(doc) != crate::LockSettings::from_document(metadata) {
+    if cfg.read_lock_settings(doc) != cfg.read_lock_settings(metadata) {
         return Err(mismatch("settings"));
     }
     check_recorded_settings(doc, cfg)?;

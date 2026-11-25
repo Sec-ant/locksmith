@@ -21,6 +21,8 @@
 //! # Ok::<(), locksmith::LockfileError>(())
 //! ```
 
+#![warn(missing_docs)]
+
 mod assembly;
 mod checksum;
 mod config;

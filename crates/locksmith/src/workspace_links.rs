@@ -56,7 +56,7 @@ type LinkedManifest<'a> = dyn Fn(&str) -> Result<Option<Value>, LockfileError> +
 pub(crate) struct FrozenWorkspace<'a> {
     read_linked: &'a LinkedManifest<'a>,
     pub links: WorkspaceLinks<'a>,
-    pub ignored_optional: Vec<&'a str>,
+    projects: graph::LinkedProjects<'a>,
     external_members: &'a BTreeSet<String>,
 }
 
@@ -64,25 +64,16 @@ impl<'a> FrozenWorkspace<'a> {
     pub(crate) fn new(
         manifests: &'a BTreeMap<String, Value>,
         config: &'a WorkspaceConfig,
+        document: &'a Value,
         external: &'a BTreeSet<String>,
         read_linked: &'a LinkedManifest<'a>,
-    ) -> Result<Self, LockfileError> {
-        let links = WorkspaceLinks::new(manifests, config);
-        // pnpm 11.21+ sorts these rules in place before checking frozen importers.
-        let sorted = config
-            .pnpm_version
-            .as_ref()
-            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
-        let ignored_optional = crate::config::optional_patterns(
-            config.resolution.ignored_optional_dependencies.as_ref(),
-            !sorted,
-        )?;
-        Ok(Self {
-            links,
+    ) -> Self {
+        Self {
+            links: WorkspaceLinks::new(manifests, config),
+            projects: graph::LinkedProjects::new(document.get("importers")),
             external_members: external,
             read_linked,
-            ignored_optional,
-        })
+        }
     }
 
     pub(crate) fn check_pin(
@@ -109,7 +100,7 @@ impl<'a> FrozenWorkspace<'a> {
             {
                 let (package, range) = manifest::registry_request(name, effective);
                 if range.parse::<node_semver::Range>().is_ok() {
-                    let target = graph::linked_project(document.get("importers"), importer, path);
+                    let target = self.projects.resolve(importer, path);
                     if !self.range_link_matches(&target, package, range)? {
                         return Err(mismatch());
                     }

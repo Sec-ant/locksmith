@@ -32,6 +32,7 @@ impl<'a> Impact<'a> {
         };
         let workspaces = nodes("importers");
         let snapshots = nodes("snapshots");
+        let links = graph::LinkedProjects::new(doc.get("importers"));
         let roots: Vec<_> = workspaces.values().copied().collect();
         let mut direct = vec![Vec::new(); roots.len()];
         let mut external_links = BTreeSet::new();
@@ -54,7 +55,7 @@ impl<'a> Impact<'a> {
                 ) {
                     let target = if let Some(relative) = pin.strip_prefix("link:") {
                         let base = if is_workspace { key } else { "." };
-                        let id = graph::linked_project(doc.get("importers"), base, relative);
+                        let id = links.resolve(base, relative);
                         let Some(target) = workspaces.get(id.as_str()) else {
                             external_links.insert(ExternalLink {
                                 source_kind: kind,

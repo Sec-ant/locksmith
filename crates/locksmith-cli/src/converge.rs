@@ -36,8 +36,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
-    let policy = Policy::from_manifest(&working.root);
-    let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;
+    let policy = Policy::from_project(&working);
+    let base_config = Policy::from_project(&project).configuration(&project.config)?;
     let config = policy.configuration(&working.config)?;
     let upgrade = base_config.changes_pnpm_major(&config);
     for key in project
@@ -93,26 +93,28 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let working_text = fs::read_to_string("pnpm-lock.yaml")?;
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
-    let (baseline, candidate, [before, after]) = std::thread::scope(|scope| -> Result<_> {
-        let parallel = candidate_text
-            .as_ref()
-            .is_some_and(|text| crate::parallel_parse(text.len() as u64));
-        let baseline = scope.spawn(move || Lockfile::try_from(baseline_text));
-        let manifests = || workspace_manifests(&project, &working, blobs, tree, prefix);
-        let candidate = || candidate_text.map(Lockfile::try_from).transpose();
-        let (manifests, candidate) = if parallel {
-            let worker = scope.spawn(candidate);
-            (
-                manifests()?,
-                worker.join().expect("lockfile parser panicked"),
-            )
-        } else {
-            (manifests()?, candidate())
-        };
-        let baseline = baseline.join().expect("lockfile parser panicked")?;
-        let candidate = candidate?.unwrap_or_else(|| baseline.clone());
-        Ok((baseline, candidate, manifests))
-    })?;
+    let (baseline, candidate, [mut before, mut after]) =
+        std::thread::scope(|scope| -> Result<_> {
+            let parallel = candidate_text
+                .as_ref()
+                .is_some_and(|text| crate::parallel_parse(text.len() as u64));
+            let baseline = scope.spawn(move || Lockfile::try_from(baseline_text));
+            let manifests = || workspace_manifests(&project, &working, blobs, tree, prefix);
+            let candidate = || candidate_text.map(Lockfile::try_from).transpose();
+            let (manifests, candidate) = if parallel {
+                let worker = scope.spawn(candidate);
+                (
+                    manifests()?,
+                    worker.join().expect("lockfile parser panicked"),
+                )
+            } else {
+                (manifests()?, candidate())
+            };
+            let baseline = baseline.join().expect("lockfile parser panicked")?;
+            let candidate = candidate?.unwrap_or_else(|| baseline.clone());
+            Ok((baseline, candidate, manifests))
+        })?;
+    include_generated_members(&working, &baseline, &candidate, &mut before, &mut after)?;
     let importers: BTreeSet<_> = before.keys().chain(after.keys()).collect();
     let changes: Vec<_> = importers
         .into_iter()
@@ -162,4 +164,81 @@ fn workspace_manifests(
         }
     }
     Ok([before, after])
+}
+
+/// Installed importers can name generated projects whose manifests Git ignores.
+fn include_generated_members(
+    project: &Project,
+    baseline: &Lockfile,
+    candidate: &Lockfile,
+    before: &mut BTreeMap<String, Value>,
+    after: &mut BTreeMap<String, Value>,
+) -> Result<()> {
+    if !project.workspace {
+        return Ok(());
+    }
+    let [base, installed] =
+        [baseline, candidate].map(|lock| lock.project().and_then(|d| d["importers"].as_object()));
+    let unknown: BTreeSet<_> = base
+        .into_iter()
+        .flatten()
+        .filter(|(id, _)| !before.contains_key(*id))
+        .chain(
+            installed
+                .into_iter()
+                .flatten()
+                .filter(|(id, _)| !after.contains_key(*id)),
+        )
+        .map(|(id, _)| id)
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let directories =
+        Members::directories_on_disk(project, &std::env::current_dir()?.canonicalize()?)?;
+    let patterns = Members::new(project)?;
+    for id in unknown {
+        if !patterns.contains(id) {
+            continue;
+        }
+        if !after.contains_key(id)
+            && directories.contains_key(id)
+            && let Some(manifest) = workspace::read_manifest(id, working_file)?
+        {
+            after.insert(id.clone(), manifest);
+        }
+        if !before.contains_key(id)
+            && let Some(record) = base.and_then(|base| base.get(id))
+        {
+            // Git cannot supply an earlier generated manifest. An unchanged importer
+            // can use the current declarations. For an edit or removal, convergence
+            // checks the dependency specifiers recorded in the baseline importer.
+            let old = match after.get(id) {
+                Some(current) if installed.and_then(|map| map.get(id)) == Some(record) => {
+                    current.clone()
+                }
+                _ => locked_manifest(id, record)?,
+            };
+            before.insert(id.clone(), old);
+        }
+    }
+    Ok(())
+}
+
+fn locked_manifest(id: &str, record: &Value) -> Result<Value> {
+    let mut manifest = serde_json::json!({});
+    for group in ["dependencies", "devDependencies", "optionalDependencies"] {
+        if let Some(entries) = record.get(group) {
+            for (name, edge) in entries
+                .as_object()
+                .ok_or_else(|| format!("invalid baseline importer {id}/{group}"))?
+            {
+                let spec = edge["specifier"]
+                    .as_str()
+                    .ok_or_else(|| format!("missing baseline specifier for {id}/{group}/{name}"))?;
+                manifest[group][name] = Value::from(spec);
+            }
+        }
+    }
+    Ok(manifest)
 }

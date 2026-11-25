@@ -65,6 +65,15 @@ add_root_react ../ours.yaml > ../merged.yaml
 # Give the installed graph a real peer mismatch across the replicated sites.
 sed "s/immer: '>=9\.0[^']*'/immer: '^11.0.0'/" pnpm-lock.yaml > ../inspect.yaml
 
+# External links exercise publish-directory lookup once per workspace member.
+for size in 1000 4000; do
+  awk -v size="$size" 'BEGIN {
+    print "lockfileVersion: \0479.0\047\nimporters:"
+    for (i = 1; i <= size; i++)
+      printf "  apps/p%d: {dependencies: {tool: {specifier: link:../../shared/tool, version: link:../../shared/tool}}}\n", i
+  }' > "../external-$size.yaml"
+done
+
 export LOCKSMITH_BENCH_DIR
 LOCKSMITH_BENCH_DIR=$(cd .. && pwd)
 export LOCKSMITH_OUTPUT="$LOCKSMITH_BENCH_DIR/actual.yaml"
@@ -75,3 +84,6 @@ cmp ../ours.yaml ../actual.yaml
 "$bench/cli" repair
 cmp ../base.yaml ../actual.yaml
 "$bench/cli" inspect
+for size in 1000 4000; do
+  "$bench/cli" "inspect-external-$size"
+done

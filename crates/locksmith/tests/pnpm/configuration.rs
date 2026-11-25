@@ -473,6 +473,12 @@ fn reordered_overrides_merge_without_a_frozen_install_rewrite() {
         ours_version
     );
     let (dir, manifest) = prepare("merged", &after);
+    for (left, right) in [(&base, &ours), (&ours, &base)] {
+        let plain = merge(&base, left, right, None).unwrap().to_yaml().unwrap();
+        assert_eq!(plain, ours.to_yaml().unwrap());
+        fs::write(dir.join("pnpm-lock.yaml"), plain).unwrap();
+        install(&dir, &store, true);
+    }
     let converged = locksmith::converge(
         &ours,
         &ours,

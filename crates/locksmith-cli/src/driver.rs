@@ -105,11 +105,11 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let project = Project::read(&mut blobs, &tree, prefix, None)?;
     project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
-    let policy = policy::Policy::from_manifest(&project.root);
+    let policy = policy::Policy::from_project(&project);
     let config = policy.configuration(&project.config)?;
     let [base, ours, theirs] = sources
         .each_ref()
-        .map(|p| policy::Policy::from_manifest(&p.root).configuration(&p.config));
+        .map(|p| policy::Policy::from_project(p).configuration(&p.config));
     let configurations = [base?, ours?, theirs?];
     let patches = workspace::patches(&config, prefix, |file| blobs.read(&tree, file))?;
     let target = git::preferred_target(&inputs)?;
