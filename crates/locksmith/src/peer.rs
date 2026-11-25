@@ -6,8 +6,8 @@ pub(crate) use exact::same_binding;
 mod identity;
 use identity::{HashStyle, context, context_tokens, encode, link_peer_id};
 pub(crate) use identity::{
-    context as explicit_bindings, matches_bindings, patch, patch_hash, projected_identity,
-    root_provider,
+    checked_patch, context as explicit_bindings, matches_bindings, patch, patch_hash,
+    projected_identity, root_provider,
 };
 mod bindings;
 pub(crate) use bindings::optional_requirement;

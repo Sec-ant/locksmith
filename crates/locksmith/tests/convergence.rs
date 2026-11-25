@@ -28,6 +28,27 @@ fn change<'a>(id: &'a str, before: &'a Value, after: &'a Value) -> ManifestChang
 }
 
 #[test]
+fn convergence_rejects_a_reachable_snapshot_with_an_undeclared_patch() {
+    let base = lock(json!({".":{}}), json!({}));
+    let candidate = lock(
+        json!({".":{"dependencies":{"foo":{"specifier":"1.0.0","version":"1.0.0(patch_hash=h)"}}}}),
+        json!({"foo@1.0.0(patch_hash=h)":{}}),
+    );
+    let result = converge(
+        &base,
+        &candidate,
+        &[change(
+            ".",
+            &json!({}),
+            &json!({"dependencies":{"foo":"1.0.0"}}),
+        )],
+        Default::default(),
+    );
+    assert!(matches!(result, Err(LockfileError::InvalidGraph(issues))
+        if issues.iter().any(|issue| issue.path == ["snapshots", "foo@1.0.0(patch_hash=h)"])));
+}
+
+#[test]
 fn unchanged_pnpm_configuration_can_be_supplied_once() {
     let input = lock(json!({".": {}}), json!({}));
     let before = json!({"packageManager":"pnpm@12.21.0"});

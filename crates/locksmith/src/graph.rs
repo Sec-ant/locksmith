@@ -327,7 +327,7 @@ fn closure_with_snapshots(
             )
         } else if let Some((key, snapshot)) = traversal.pending.pop() {
             reached.packages.insert(package_key(key).to_owned());
-            check_package(document, kind, key, &mut issues);
+            check_snapshot(document, kind, key, &mut issues);
             ("snapshots", key, snapshot, false, ".")
         } else {
             break;
@@ -479,6 +479,27 @@ fn check_package(
     }
 }
 
+fn check_snapshot(
+    document: &Value,
+    kind: DocumentKind,
+    key: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    check_package(document, kind, key, issues);
+    let message = match crate::peer::checked_patch(key) {
+        Err(message) => message,
+        Ok(actual)
+            if (actual.is_some() || document.get("patchedDependencies").is_some())
+                && crate::reconcile::desired_patch(key, document, [document; 4])
+                    != Some(actual) =>
+        {
+            "snapshot patch hash differs from the applicable patchedDependencies selector"
+        }
+        Ok(_) => return,
+    };
+    issues.push(issue(kind, &["snapshots", key], message));
+}
+
 fn check_catalogs(
     document: &Value,
     links: &LinkedProjects,
@@ -596,17 +617,7 @@ pub(crate) fn validate_with_config(
     // Validation scans all edges once, including unreachable records. It does
     // not need a reachability walk or a per-edge diagnostic allocation on success.
     for (key, snapshot) in section(document, "snapshots").into_iter().flatten() {
-        check_package(document, kind, key, &mut issues);
-        if (document.get("patchedDependencies").is_some() || crate::peer::patch(key).is_some())
-            && crate::reconcile::desired_patch(key, document, [document; 4])
-                != Some(crate::peer::patch(key))
-        {
-            issues.push(issue(
-                kind,
-                &["snapshots", key],
-                "snapshot patch hash differs from the applicable patchedDependencies selector",
-            ));
-        }
+        check_snapshot(document, kind, key, &mut issues);
         check_references(document, snapshot, kind, "snapshots", key, &mut issues);
     }
     for name in ["importers", "snapshots", "packages"] {

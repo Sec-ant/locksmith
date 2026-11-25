@@ -277,6 +277,20 @@ fn patch_hashes_must_be_declared() {
 }
 
 #[test]
+fn a_snapshot_patch_marker_needs_a_hash_and_closing_parenthesis() {
+    for reference in ["1.0.0(patch_hash=abc", "1.0.0(patch_hash=)"] {
+        let key = format!("pkg@{reference}");
+        let mut document = graph(
+            json!({".":{"dependencies":{"pkg":dep(reference)}}}),
+            json!({key:{}}),
+        );
+        assert!(lock(document.clone()).validate().is_err(), "{reference}");
+        document["patchedDependencies"] = json!({"pkg@1.0.0":"abc"});
+        assert!(lock(document).validate().is_err(), "{reference}");
+    }
+}
+
+#[test]
 fn missing_snapshot_package_or_version_is_an_error() {
     let baseline = graph(
         json!({"app":{"dependencies":{"pkg":dep("1.0.0")}}}),
