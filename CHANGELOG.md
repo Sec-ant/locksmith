@@ -1,3 +1,16 @@
+## 0.3.7 (2026-11-25)
+
+### Fixes
+
+- Speed up `inspect` on large workspaces with links to directories outside the recorded graph.
+- Check the effective `projectScopedOptionalPeers` header in `validate --workspace` for pnpm versions that record it.
+- Preserve edits and removals of Git-ignored workspace members in `converge`, including their effective dependency specifiers, unchanged peer pins, dependency metadata, publish directories, and `devEngines`.
+- Honor version-specific `ignoredOptionalDependencies` rules in `converge`, `repair`, and contextual merges, including negated patterns and sorted lockfile headers.
+- Preserve override precedence when one branch reorders rules and the other inserts rules. Report incompatible orderings during three-way merges.
+- Update snapshot optionality when merging branches adds or removes a required dependency path.
+- Apply optional dependency exclusion patterns when reconstructing snapshots from package extensions or registry metadata. Required extension dependencies remain available after an override is removed.
+- Ignore legacy `package.json#pnpm` settings in pnpm 11 and 12 workspaces, including when the bootstrap lock supplies the version or the caller supplies one unchanged configuration to `converge`.
+
 ## 0.3.6 (2026-11-25)
 
 ### Features
