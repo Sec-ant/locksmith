@@ -75,7 +75,7 @@ export type LockfileError = Error & (
   | { code: 'GLOBAL_CONFIGURATION_CHANGED'; details: { importer: string; field: string } }
   | { code: 'UNSUPPORTED_VERSION'; details: { version: unknown } }
   | { code: 'UNMET_PEERS'; details: { issues: PeerIssue[] } }
-  | { code: 'INVALID_YAML' | 'INVALID_DOCUMENT' | 'SERIALIZATION_FAILED' | 'OUTPUT_MISMATCH'; details: null }
+  | { code: 'INVALID_YAML' | 'INVALID_DOCUMENT' | 'WORKSPACE_INPUT' | 'SERIALIZATION_FAILED' | 'OUTPUT_MISMATCH'; details: null }
 )
 
 export function parse(yaml: string): Promise<Lockfile>

@@ -59,7 +59,7 @@ pub fn read_manifest(
     Ok(None)
 }
 
-fn parse_manifest(path: &str, text: &str) -> Result<Value> {
+pub(crate) fn parse_manifest(path: &str, text: &str) -> Result<Value> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let value: Value = if path.ends_with(".json5") {
         json5::from_str(text).map_err(|e| format!("{path}: {e}"))?
@@ -386,6 +386,7 @@ pub struct Members {
     include: Vec<Pattern>,
     exclude: Vec<Pattern>,
     descend: BTreeMap<String, Vec<Pattern>>,
+    excluded_trees: Vec<Pattern>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
@@ -397,6 +398,7 @@ impl Members {
             include: vec![],
             exclude: vec![],
             descend: BTreeMap::new(),
+            excluded_trees: Vec::new(),
         };
         if !project.workspace {
             return Ok(this);
@@ -447,11 +449,17 @@ impl Members {
                         let parents = parts.iter().take_while(|&&p| p == "..").count();
                         let descend = this.descend.entry(parts[..parents].join("/")).or_default();
                         for (index, part) in parts.iter().enumerate().skip(parents) {
-                            descend.push(Pattern::new(&parts[..=index].join("/"))?);
-                            if *part == "**" {
-                                break;
+                            if index + 1 < parts.len() || *part == "**" {
+                                descend.push(Pattern::new(&parts[..=index].join("/"))?);
                             }
                         }
+                    } else if on_disk && let Some(prefix) = parts.strip_suffix(&["**"]) {
+                        let tree = if prefix.is_empty() {
+                            "**".to_owned()
+                        } else {
+                            prefix.join("/")
+                        };
+                        this.excluded_trees.push(Pattern::new(&tree)?);
                     }
                 }
             }
@@ -490,20 +498,21 @@ impl Members {
     }
 
     /// Discover manifests from disk, including projects absent from Git or the lockfile.
-    pub fn directories_on_disk(project: &Project, root: &Path) -> Result<BTreeSet<String>> {
+    pub fn directories_on_disk(
+        project: &Project,
+        root: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>> {
         let members = Self::from_patterns(project, true)?;
-        let mut found = BTreeSet::new();
+        let mut found = BTreeMap::new();
         for (id, descend) in &members.descend {
             let path = root.join(id).canonicalize()?;
             let mut ancestors = BTreeSet::from([path.clone()]);
-            let mut matched = BTreeSet::new();
-            members.visit(&path, id, descend, &mut ancestors, &mut matched)?;
-            found.extend(
-                matched
-                    .into_iter()
-                    .map(|path| importer_id(root, &path))
-                    .filter(|id| !id.is_empty()),
-            );
+            members.visit(&path, id, descend, &mut ancestors, &mut |id, directory| {
+                let id = importer_id(root, id);
+                if !id.is_empty() {
+                    found.insert(id, directory.to_owned());
+                }
+            })?;
         }
         Ok(found)
     }
@@ -514,7 +523,7 @@ impl Members {
         id: &str,
         descend: &[Pattern],
         ancestors: &mut BTreeSet<PathBuf>,
-        found: &mut BTreeSet<String>,
+        found: &mut impl FnMut(&str, &Path),
     ) -> Result<()> {
         let entries =
             fs::read_dir(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
@@ -523,7 +532,7 @@ impl Members {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if MANIFEST_NAMES.contains(&name) && !id.is_empty() && self.contains(id) {
-                found.insert(id.to_owned());
+                found(id, directory);
             }
             if matches!(name, ".git" | "node_modules" | "bower_components") {
                 continue;
@@ -533,18 +542,16 @@ impl Members {
             } else {
                 format!("{id}/{name}")
             };
-            if !descend.iter().any(|p| {
-                p.matches_with(
-                    &child,
-                    MatchOptions {
-                        require_literal_leading_dot: false,
-                        ..GLOB_OPTIONS
-                    },
-                )
-            }) {
+            let kind = entry.file_type()?;
+            if !kind.is_dir() && !kind.is_symlink() {
                 continue;
             }
-            let kind = entry.file_type()?;
+            let matches = |p: &Pattern| p.matches_with(&child, GLOB_OPTIONS);
+            if self.excluded_trees.iter().any(matches)
+                || !(self.contains(&child) || descend.iter().any(matches))
+            {
+                continue;
+            }
             let path = if kind.is_symlink() {
                 match entry.path().canonicalize() {
                     Ok(target) if fs::metadata(&target)?.is_dir() => target,

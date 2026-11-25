@@ -57,9 +57,7 @@ impl Repo {
         String::from_utf8(out.stdout).unwrap()
     }
     fn write(&self, path: &str, value: &str) {
-        let path = self.0.path().join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, value).unwrap();
+        write_input(self.0.path(), path, value);
     }
     fn commit(&self, name: &str) {
         self.git(&["add", "-A"]);
@@ -1283,13 +1281,13 @@ fn validate_workspace_detects_manifest_and_membership_drift() {
     let member = root.join("apps/web");
     fs::create_dir_all(root.join("apps/example")).unwrap();
     fs::create_dir_all(&member).unwrap();
-    fs::write(root.join("package.json"), r#"{"private":true}"#).unwrap();
-    fs::write(root.join("apps/example/package.json"), "{}").unwrap();
-    fs::write(
-        root.join("pnpm-workspace.yaml"),
+    write_input(&root, "package.json", r#"{"private":true}"#);
+    write_input(&root, "apps/example/package.json", "{}");
+    write_input(
+        &root,
+        "pnpm-workspace.yaml",
         "packages: ['apps/*', '!apps/example']\n",
-    )
-    .unwrap();
+    );
     let manifest = member.join("package.json");
     let current = r#"{"dependencies":{"foo":"^1.0.0"}}"#;
     fs::write(&manifest, current).unwrap();
@@ -1359,18 +1357,16 @@ fn validate_checks_workspace_members_without_a_root_manifest() {
         fs::create_dir(root.join(name)).unwrap();
         fs::write(root.join(name).join("package.json"), manifest).unwrap();
     }
-    fs::write(root.join("pnpm-workspace.yaml"), "packages: [app, lib]\n").unwrap();
+    write_input(root, "pnpm-workspace.yaml", "packages: [app, lib]\n");
     let mut lock = json!({"lockfileVersion":"9.0","importers":{
         "app":{"dependencies":{"lib":{"specifier":"workspace:*","version":"link:../lib"}}},"lib":{}
     }});
-    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-    let result = validate_workspace_in(root);
-    assert!(result.status.success(), "{}", report(&result));
+    write_input(root, "pnpm-lock.yaml", &lock);
+    check_workspace(root, 0, ());
 
     lock["importers"]["."] = json!({});
-    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-    let result = validate_workspace_in(root);
-    assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+    write_input(root, "pnpm-lock.yaml", &lock);
+    let result = check_workspace(root, 1, ());
     assert!(String::from_utf8_lossy(&result.stderr).contains("absent project"));
 }
 
@@ -1378,21 +1374,21 @@ fn validate_checks_workspace_members_without_a_root_manifest() {
 fn validate_checks_the_member_selected_by_a_workspace_link() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(
-        root.join("pnpm-workspace.yaml"),
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
         "packages: [lib, other]\ncatalog: {alias: 'workspace:@local/lib@^1'}\n",
-    )
-    .unwrap();
+    );
     let member =
         json!({"name":"@local/lib","version":"1.2.0","publishConfig":{"directory":"dist"}});
     fs::create_dir(root.join("lib")).unwrap();
     fs::create_dir(root.join("other")).unwrap();
-    fs::write(root.join("lib/package.json"), member.to_string()).unwrap();
-    fs::write(
-        root.join("other/package.json"),
+    write_input(root, "lib/package.json", &member);
+    write_input(
+        root,
+        "other/package.json",
         r#"{"name":"@local/lib","version":"2.0.0"}"#,
-    )
-    .unwrap();
+    );
     for (name, specifier, target, expected) in [
         ("@local/lib", "workspace:^1", "lib/dist", 0),
         ("@local/lib", "workspace:^1", "other", 1),
@@ -1406,23 +1402,17 @@ fn validate_checks_the_member_selected_by_a_workspace_link() {
         ("alias", "workspace:./unbuilt", "unbuilt", 0),
         ("alias", "link:../external", "../external", 0),
     ] {
-        fs::write(
-            root.join("package.json"),
-            json!({"dependencies":{name:specifier}}).to_string(),
-        )
-        .unwrap();
+        write_input(
+            root,
+            "package.json",
+            json!({"dependencies":{name:specifier}}),
+        );
         let lock = json!({"lockfileVersion":"9.0","importers":{
             ".":{"dependencies":{name:{"specifier":specifier,"version":format!("link:{target}")}}},
             "lib":{"publishDirectory":"dist"},"other":{}
         }});
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(expected),
-            "{name}@{specifier} -> {target}: {}",
-            report(&result)
-        );
+        write_input(root, "pnpm-lock.yaml", &lock);
+        let result = check_workspace(root, expected, (name, specifier, target));
         if expected == 1 {
             assert!(String::from_utf8_lossy(&result.stderr).contains(name));
         }
@@ -1434,11 +1424,11 @@ fn validate_allows_omitted_implicit_workspace_links_supported_by_pnpm() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::create_dir(root.join("lib")).unwrap();
-    fs::write(
-        root.join("lib/package.json"),
+    write_input(
+        root,
+        "lib/package.json",
         r#"{"name":"lib","version":"1.0.0"}"#,
-    )
-    .unwrap();
+    );
     for (pnpm, linking, name, spec, status) in [
         ("10.33.2", true, "lib", "^1", 1),
         ("11.28.10", true, "lib", "^1", 1),
@@ -1453,21 +1443,21 @@ fn validate_allows_omitted_implicit_workspace_links_supported_by_pnpm() {
         ("12.18.0", true, "lib", "workspace:^1", 1),
         ("12.18.0", false, "lib", "^1", 1),
     ] {
-        fs::write(
-            root.join("package.json"),
-            json!({"packageManager":format!("pnpm@{pnpm}"),"dependencies":{name:spec}}).to_string(),
-        )
-        .unwrap();
-        fs::write(root.join("pnpm-workspace.yaml"),format!("packages: [lib]\nexcludeLinksFromLockfile: true\nlinkWorkspacePackages: {linking}\ncatalog: {{lib: '^1'}}\n")).unwrap();
-        let lock = json!({"lockfileVersion":"9.0","settings":{"excludeLinksFromLockfile":true},"importers":{".":{},"lib":{}}});
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(status),
-            "pnpm {pnpm}, {name}@{spec}: {}",
-            report(&result)
+        write_input(
+            root,
+            "package.json",
+            json!({"packageManager":format!("pnpm@{pnpm}"),"dependencies":{name:spec}}),
         );
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
+            format!(
+                "packages: [lib]\nexcludeLinksFromLockfile: true\nlinkWorkspacePackages: {linking}\ncatalog: {{lib: '^1'}}\n"
+            ),
+        );
+        let lock = json!({"lockfileVersion":"9.0","settings":{"excludeLinksFromLockfile":true},"importers":{".":{},"lib":{}}});
+        write_input(root, "pnpm-lock.yaml", &lock);
+        check_workspace(root, status, (pnpm, name, spec));
     }
 }
 
@@ -1475,19 +1465,19 @@ fn validate_allows_omitted_implicit_workspace_links_supported_by_pnpm() {
 fn validate_requires_a_local_resolution_for_workspace_dependencies() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(
-        root.join("pnpm-workspace.yaml"),
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
         "packages: [app, lib]\ncatalog: {alias: 'workspace:lib@^1'}\n",
-    )
-    .unwrap();
-    fs::write(root.join("package.json"), "{}").unwrap();
+    );
+    write_input(root, "package.json", "{}");
     fs::create_dir(root.join("app")).unwrap();
     fs::create_dir(root.join("lib")).unwrap();
-    fs::write(
-        root.join("lib/package.json"),
+    write_input(
+        root,
+        "lib/package.json",
         r#"{"name":"lib","version":"1.2.0"}"#,
-    )
-    .unwrap();
+    );
     let registry = ("1.2.0", "lib@1.2.0", None);
     let local = ("file:lib", "lib@file:lib", Some("lib"));
     let alias = ("lib@file:lib", "lib@file:lib", Some("lib"));
@@ -1508,11 +1498,11 @@ fn validate_requires_a_local_resolution_for_workspace_dependencies() {
         ("lib", "workspace:^1", wrong_record, 1),
     ] {
         let meta = json!({name:{"injected":true}});
-        fs::write(
-            root.join("app/package.json"),
-            json!({"dependencies":{name:specifier},"dependenciesMeta":meta}).to_string(),
-        )
-        .unwrap();
+        write_input(
+            root,
+            "app/package.json",
+            json!({"dependencies":{name:specifier},"dependenciesMeta":meta}),
+        );
         let resolution = directory.map_or_else(
             || json!({"integrity":"sha512-abc"}),
             |path| json!({"type":"directory","directory":path}),
@@ -1524,14 +1514,8 @@ fn validate_requires_a_local_resolution_for_workspace_dependencies() {
             lock["catalogs"] =
                 json!({"default":{"alias":{"specifier":"workspace:lib@^1","version":"file:lib"}}});
         }
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(expected),
-            "{name}@{specifier} -> {pin}: {}",
-            report(&result)
-        );
+        write_input(root, "pnpm-lock.yaml", &lock);
+        check_workspace(root, expected, (name, specifier, pin));
     }
 }
 
@@ -1539,28 +1523,22 @@ fn validate_requires_a_local_resolution_for_workspace_dependencies() {
 fn validate_compares_unused_recorded_catalog_specifiers() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
+    write_input(root, "package.json", "{}");
     let lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"catalogs":{
         "tools":{"foo":{"specifier":"^1","version":"1.2.0"}}
     }});
-    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+    write_input(root, "pnpm-lock.yaml", &lock);
     for (config, expected) in [
         ("catalogs: {tools: {foo: '^1', bar: '*'}}", 0),
         ("catalogs: {tools: {foo: '^1.1'}}", 1),
         ("catalog: {foo: '^1'}", 1),
     ] {
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: []\n{config}\n"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(expected),
-            "{config}: {}",
-            report(&result)
         );
+        let result = check_workspace(root, expected, config);
         if expected == 1 {
             assert!(String::from_utf8_lossy(&result.stderr).contains("tools/foo"));
         }
@@ -1571,24 +1549,22 @@ fn validate_compares_unused_recorded_catalog_specifiers() {
 fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
-    fs::write(
-        root.join(".npmrc"),
+    write_input(root, "package.json", "{}");
+    write_input(
+        root,
+        ".npmrc",
         "auto-install-peers=false\nignore-pnpmfile=true\n",
-    )
-    .unwrap();
+    );
     let project = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
-    fs::write(
-        root.join("pnpm-lock.yaml"),
+    write_input(
+        root,
+        "pnpm-lock.yaml",
         with_recorded_manager("11.28.12", &format!("{project}\n")),
-    )
-    .unwrap();
-    let result = validate_workspace_in(root);
-    assert!(result.status.success(), "{}", report(&result));
+    );
+    check_workspace(root, 0, ());
 
-    fs::write(root.join(".pnpmfile.mjs"), "export const hooks = {}\n").unwrap();
-    let result = validate_workspace_in(root);
-    assert_eq!(result.status.code(), Some(2), "{}", report(&result));
+    write_input(root, ".pnpmfile.mjs", "export const hooks = {}\n");
+    let result = check_workspace(root, 2, ());
     assert!(String::from_utf8_lossy(&result.stderr).contains("effective manifests"));
 }
 
@@ -1606,29 +1582,23 @@ fn with_recorded_manager(version: &str, project: &str) -> String {
 fn validate_rejects_a_dedupe_peers_setting_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
-    fs::write(
-        root.join("pnpm-workspace.yaml"),
+    write_input(root, "package.json", "{}");
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
         "packages: []\ndedupePeers: true\n",
-    )
-    .unwrap();
+    );
     for (settings, status) in [
         ("", 1),
         ("settings: {dedupePeers: false}\n", 1),
         ("settings: {dedupePeers: true}\n", 0),
     ] {
-        fs::write(
-            root.join("pnpm-lock.yaml"),
+        write_input(
+            root,
+            "pnpm-lock.yaml",
             format!("lockfileVersion: '9.0'\n{settings}importers: {{.: {{}}}}\n"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(status),
-            "{settings}: {}",
-            report(&result)
         );
+        check_workspace(root, status, settings);
     }
 }
 
@@ -1647,30 +1617,24 @@ fn validate_rejects_mismatched_recorded_resolution_settings() {
         ("10.33.2", "peersSuffixMaxLength", json!(1000), json!(750)),
         ("12.15.0", "addMissingPeerTypes", json!(false), json!(true)),
     ] {
-        fs::write(
-            root.join("package.json"),
-            json!({"packageManager": format!("pnpm@{version}")}).to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        write_input(
+            root,
+            "package.json",
+            json!({"packageManager": format!("pnpm@{version}")}),
+        );
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: []\n{field}: {configured}\n"),
-        )
-        .unwrap();
+        );
         for (value, status) in [
             (json!({}), 1),
             (json!({field: default}), 1),
             (json!({field: configured}), 0),
         ] {
             lock["settings"] = value;
-            fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-            let result = validate_workspace_in(root);
-            assert_eq!(
-                result.status.code(),
-                Some(status),
-                "{field}: {}",
-                report(&result)
-            );
+            write_input(root, "pnpm-lock.yaml", &lock);
+            let result = check_workspace(root, status, field);
             if status == 1 {
                 assert!(String::from_utf8_lossy(&result.stderr).contains(field));
             }
@@ -1682,11 +1646,7 @@ fn validate_rejects_mismatched_recorded_resolution_settings() {
 fn validate_detects_added_changed_and_removed_package_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(
-        root.join("package.json"),
-        r#"{"packageManager":"pnpm@10.33.2"}"#,
-    )
-    .unwrap();
+    write_input(root, "package.json", r#"{"packageManager":"pnpm@10.33.2"}"#);
     // Generated by pnpm 10.33.2 for the extension below.
     let checksum = "sha256-gFzag6IRsulpdTRdkb1wLQgmLSEoJT1a56wBrteXILs=";
     let extension = "packageExtensions:\n  'unused-probe@*':\n    dependencies: {dummy: '1.0.0'}\n";
@@ -1704,14 +1664,13 @@ fn validate_detects_added_changed_and_removed_package_extensions() {
         if let Some(recorded) = recorded {
             lock["packageExtensionsChecksum"] = json!(recorded);
         }
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        write_input(root, "pnpm-lock.yaml", &lock);
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: []\n{configured}"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        );
+        let result = check_workspace(root, status, ());
         if status == 1 {
             assert!(String::from_utf8_lossy(&result.stderr).contains("packageExtensionsChecksum"));
         }
@@ -1733,29 +1692,22 @@ fn validate_compares_patch_declarations_and_contents() {
         (json!({}), json!(hash)),
     ] {
         let lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"patchedDependencies":{"unused@1.0.0":record}});
-        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        fs::write(root.join("probe.patch"), contents).unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        write_input(root, "package.json", &manifest);
+        write_input(root, "pnpm-lock.yaml", &lock);
+        write_input(root, "probe.patch", contents);
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             "packages: []\npatchedDependencies: {'unused@1.0.0': ./probe.patch}\n",
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert!(result.status.success(), "{}", report(&result));
+        );
+        check_workspace(root, 0, ());
 
-        fs::write(
-            root.join("probe.patch"),
-            contents.replace("+new", "+edited"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+        write_input(root, "probe.patch", contents.replace("+new", "+edited"));
+        let result = check_workspace(root, 1, ());
         assert!(String::from_utf8_lossy(&result.stderr).contains("patchedDependencies"));
 
-        fs::write(root.join("pnpm-workspace.yaml"), "packages: []\n").unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+        write_input(root, "pnpm-workspace.yaml", "packages: []\n");
+        let result = check_workspace(root, 1, ());
         assert!(String::from_utf8_lossy(&result.stderr).contains("patchedDependencies"));
     }
 }
@@ -1793,12 +1745,12 @@ fn validate_filters_ignored_optional_declarations_before_selecting_the_dependenc
     ] {
         let mut manifest = manifest.clone();
         manifest["packageManager"] = json!(format!("pnpm@{manager}"));
-        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
-            json!({"packages":[], "ignoredOptionalDependencies":rules}).to_string(),
-        )
-        .unwrap();
+        write_input(root, "package.json", &manifest);
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
+            json!({"packages":[], "ignoredOptionalDependencies":rules}),
+        );
         let mut recorded = rules.clone();
         recorded.sort_unstable();
         let mut lock = json!({"lockfileVersion":"9.0","ignoredOptionalDependencies":recorded,"importers":{".":{}}});
@@ -1807,14 +1759,8 @@ fn validate_filters_ignored_optional_declarations_before_selecting_the_dependenc
             lock["packages"] = json!({"foo@1.0.0":{"resolution":{}}});
             lock["snapshots"] = json!({"foo@1.0.0":{}});
         }
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(status),
-            "{manifest}, {rules:?}: {}",
-            report(&result)
-        );
+        write_input(root, "pnpm-lock.yaml", &lock);
+        check_workspace(root, status, (&manifest, &rules));
     }
 }
 
@@ -1858,17 +1804,12 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
             0,
         ),
     ] {
-        fs::write(
-            root.join("package.json"),
-            json!({"packageManager":format!("pnpm@{manager}"),"dependencies":{"lib":spec}})
-                .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
-            json!({"packages":globs}).to_string(),
-        )
-        .unwrap();
+        write_input(
+            &root,
+            "package.json",
+            json!({"packageManager":format!("pnpm@{manager}"),"dependencies":{"lib":spec}}),
+        );
+        write_input(&root, "pnpm-workspace.yaml", json!({"packages":globs}));
         let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":format!("link:{member}")}}}}});
         if has_importer {
             lock["importers"][member] = json!({});
@@ -1876,32 +1817,42 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
         if globs.contains(&"packages/*") {
             lock["importers"]["packages/internal"] = json!({});
         }
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(&root);
-        assert_eq!(
-            result.status.code(),
-            Some(status),
-            "{manager} {member} {spec}: {}",
-            report(&result)
-        );
+        write_input(&root, "pnpm-lock.yaml", &lock);
+        check_workspace(&root, status, (manager, member, spec));
     }
+    write_input(
+        &root,
+        "package.json",
+        json!({"packageManager":"pnpm@12.19.0","dependencies":{"lib":"^1"}}),
+    );
+    write_input(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages: ['linked/*']\nlinkWorkspacePackages: true\nexcludeLinksFromLockfile: true",
+    );
+    write_input(
+        &root,
+        "pnpm-lock.yaml",
+        json!({"lockfileVersion":"9.0","settings":{"excludeLinksFromLockfile":true},"importers":{".":{},"linked/nested":{}}}),
+    );
+    check_workspace(&root, 0, "excluded implicit workspace link");
+    write_input(&root, "pnpm-workspace.yaml", "packages: ['linked/*']");
     fs::write(
         external.join("nested/package.json"),
         r#"{"name":"lib","version":"1.0.0","dependencies":{"child":"link:./child"}}"#,
     )
     .unwrap();
-    fs::write(
-        root.join("package.json"),
+    write_input(
+        &root,
+        "package.json",
         r#"{"packageManager":"pnpm@10.28.1"}"#,
-    )
-    .unwrap();
-    fs::write(
-        root.join("pnpm-lock.yaml"),
+    );
+    write_input(
+        &root,
+        "pnpm-lock.yaml",
         r#"{"lockfileVersion":"9.0","importers":{".":{}}}"#,
-    )
-    .unwrap();
-    let result = validate_workspace_in(&root);
-    assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+    );
+    assert!(report(&check_workspace(&root, 1, ())).contains("child"));
 }
 
 #[test]
@@ -1938,16 +1889,10 @@ fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() 
             lock["importers"]["."]["dependencies"] =
                 json!({"lib":{"specifier":"workspace:*","version":"link:../shared"}});
         }
-        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
-        fs::write(root.join("pnpm-workspace.yaml"), yaml).unwrap();
-        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
-        let result = validate_workspace_in(&root);
-        assert_eq!(
-            result.status.code(),
-            Some(code),
-            "{version} {yaml}: {}",
-            report(&result)
-        );
+        write_input(&root, "package.json", &manifest);
+        write_input(&root, "pnpm-workspace.yaml", yaml);
+        write_input(&root, "pnpm-lock.yaml", &lock);
+        check_workspace(&root, code, (version, yaml));
     }
 }
 
@@ -1956,21 +1901,25 @@ fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() 
 fn validate_resolves_only_symlinks_selected_by_a_workspace_pattern() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
-    fs::write(
-        root.join("pnpm-lock.yaml"),
+    write_input(root, "package.json", "{}");
+    write_input(
+        root,
+        "pnpm-lock.yaml",
         "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
-    )
-    .unwrap();
+    );
     std::os::unix::fs::symlink("scratch", root.join("scratch")).unwrap();
-    for (pattern, code) in [("app", 0), ("scratch", 2)] {
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+    for (pattern, code) in [
+        ("app", 0),
+        ("'*', '!scratch'", 0),
+        ("'**', '!scratch/**'", 0),
+        ("scratch", 2),
+    ] {
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: [{pattern}]"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(code), "{}", report(&result));
+        );
+        check_workspace(root, code, ());
     }
 }
 
@@ -1991,30 +1940,29 @@ fn validate_checks_recorded_range_links_for_the_releases_that_verify_them() {
         ("11.27.1", true, "^1", "2.0.0", 0),
         ("11.28.0", true, "^1", "2.0.0", 1),
     ] {
-        fs::write(
-            root.join("lib/package.json"),
-            json!({"name":"lib","version":target_version}).to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("package.json"),
-            json!({"packageManager":format!("pnpm@{version}"),"dependencies":{"lib":spec}})
-                .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
-            format!("packages: [lib]\nlinkWorkspacePackages: {enabled}\n"),
-        )
-        .unwrap();
-        fs::write(root.join("pnpm-lock.yaml"),json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":"link:lib"}}},"lib":{}}}).to_string()).unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(
-            result.status.code(),
-            Some(code),
-            "{version}, {spec}: {}",
-            report(&result)
+        write_input(
+            root,
+            "lib/package.json",
+            json!({"name":"lib","version":target_version}),
         );
+        write_input(
+            root,
+            "package.json",
+            json!({"packageManager":format!("pnpm@{version}"),"dependencies":{"lib":spec}}),
+        );
+        for members in ["lib", ""] {
+            write_input(
+                root,
+                "pnpm-workspace.yaml",
+                format!("packages: [{members}]\nlinkWorkspacePackages: {enabled}\n"),
+            );
+            let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":"link:lib"}}}}});
+            if !members.is_empty() {
+                lock["importers"][members] = json!({});
+            }
+            write_input(root, "pnpm-lock.yaml", &lock);
+            check_workspace(root, code, (version, spec, members));
+        }
     }
 }
 
@@ -2022,7 +1970,7 @@ fn validate_checks_recorded_range_links_for_the_releases_that_verify_them() {
 fn validate_compares_ignored_optional_dependencies_as_an_unordered_list() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
+    write_input(root, "package.json", "{}");
     for (recorded, configured, status) in [
         ("", "[]", 0),
         ("", "[fsevents]", 1),
@@ -2033,18 +1981,17 @@ fn validate_compares_ignored_optional_dependencies_as_an_unordered_list() {
         ),
         ("ignoredOptionalDependencies: [fsevents]\n", "[]", 1),
     ] {
-        fs::write(
-            root.join("pnpm-lock.yaml"),
+        write_input(
+            root,
+            "pnpm-lock.yaml",
             format!("lockfileVersion: '9.0'\n{recorded}importers: {{.: {{}}}}\n"),
-        )
-        .unwrap();
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        );
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: []\nignoredOptionalDependencies: {configured}\n"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        );
+        let result = check_workspace(root, status, ());
         if status == 1 {
             assert!(
                 String::from_utf8_lossy(&result.stderr).contains("ignoredOptionalDependencies")
@@ -2057,39 +2004,52 @@ fn validate_compares_ignored_optional_dependencies_as_an_unordered_list() {
 fn validate_rejects_reordered_overrides() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("package.json"), "{}").unwrap();
+    write_input(root, "package.json", "{}");
     let rules = [
         "  'foo@^1.0.0': '2.0.0'\n",
         "  'foo@>=1.0.0 <2.0.0': '3.0.0'\n",
     ];
-    fs::write(
-        root.join("pnpm-lock.yaml"),
+    write_input(
+        root,
+        "pnpm-lock.yaml",
         format!(
             "lockfileVersion: '9.0'\nimporters: {{.: {{}}}}\noverrides:\n{}{}",
             rules[0], rules[1]
         ),
-    )
-    .unwrap();
+    );
     for (first, second, status) in [(rules[0], rules[1], 0), (rules[1], rules[0], 1)] {
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
             format!("packages: []\noverrides:\n{first}{second}"),
-        )
-        .unwrap();
-        let result = validate_workspace_in(root);
-        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        );
+        let result = check_workspace(root, status, ());
         if status == 1 {
             assert!(String::from_utf8_lossy(&result.stderr).contains("overrides differ"));
         }
     }
 }
 
-fn validate_workspace_in(root: &Path) -> Output {
-    Command::new(CLI)
+fn write_input(root: &Path, name: &str, contents: impl std::fmt::Display) {
+    let path = root.join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents.to_string()).unwrap();
+}
+
+#[track_caller]
+fn check_workspace(root: &Path, expected: i32, case: impl std::fmt::Debug) -> Output {
+    let result = Command::new(CLI)
         .current_dir(root)
         .args(["validate", "--workspace"])
         .output()
-        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(expected),
+        "{case:?}: {}",
+        report(&result)
+    );
+    result
 }
 
 #[test]

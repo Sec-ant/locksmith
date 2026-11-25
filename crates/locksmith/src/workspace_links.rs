@@ -14,7 +14,6 @@ pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceCo
 pub(crate) struct WorkspaceLinks<'a> {
     manifests: &'a BTreeMap<String, Value>,
     config: &'a WorkspaceConfig,
-    external_members: Option<&'a BTreeSet<String>>,
     by_name: HashMap<&'a str, Vec<&'a str>>,
 }
 
@@ -52,6 +51,157 @@ fn link_directory(id: &str, package: &Value) -> String {
     }
 }
 
+type LinkedManifest<'a> = dyn Fn(&str) -> Result<Option<Value>, LockfileError> + 'a;
+
+pub(crate) struct FrozenWorkspace<'a> {
+    read_linked: &'a LinkedManifest<'a>,
+    pub links: WorkspaceLinks<'a>,
+    pub ignored_optional: Vec<&'a str>,
+    external_members: &'a BTreeSet<String>,
+}
+
+impl<'a> FrozenWorkspace<'a> {
+    pub(crate) fn new(
+        manifests: &'a BTreeMap<String, Value>,
+        config: &'a WorkspaceConfig,
+        external: &'a BTreeSet<String>,
+        read_linked: &'a LinkedManifest<'a>,
+    ) -> Result<Self, LockfileError> {
+        let links = WorkspaceLinks::new(manifests, config);
+        // pnpm 11.21+ sorts these rules in place before checking frozen importers.
+        let sorted = config
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
+        let ignored_optional = crate::config::optional_patterns(
+            config.resolution.ignored_optional_dependencies.as_ref(),
+            !sorted,
+        )?;
+        Ok(Self {
+            links,
+            external_members: external,
+            read_linked,
+            ignored_optional,
+        })
+    }
+
+    pub(crate) fn check_pin(
+        &self,
+        document: &Value,
+        importer: &str,
+        name: &str,
+        specifier: &str,
+        version: &str,
+    ) -> Result<(), LockfileError> {
+        let effective = self.links.catalog_specifier(name, specifier)?;
+
+        let mismatch = || {
+            manifest::mismatch(
+                importer,
+                "workspace",
+                format!("{name}: {version} does not satisfy {effective}"),
+            )
+        };
+        let Some(request) = effective.strip_prefix("workspace:").map(str::trim) else {
+            if let Some(path) = version.strip_prefix("link:")
+                && self.links.links_workspace_packages()
+                && self.links.config.since((11, 28, 0), (12, 19, 0))
+            {
+                let (package, range) = manifest::registry_request(name, effective);
+                if range.parse::<node_semver::Range>().is_ok() {
+                    let target = graph::linked_project(document.get("importers"), importer, path);
+                    if !self.range_link_matches(&target, package, range)? {
+                        return Err(mismatch());
+                    }
+                }
+            }
+            return Ok(());
+        };
+        let (target, pinned_name) = if let Some(path) = version.strip_prefix("link:") {
+            (graph::linked_importer(importer, path), None)
+        } else {
+            let (package, path) = graph::file_pin(name, version).ok_or_else(mismatch)?;
+            let resolution = &document["packages"][format!("{package}@file:{path}")]["resolution"];
+            let directory = resolution["directory"].as_str().ok_or_else(mismatch)?;
+            let target = graph::linked_importer(".", path);
+            if resolution["type"] != "directory" || graph::linked_importer(".", directory) != target
+            {
+                return Err(mismatch());
+            }
+            (target, Some(package))
+        };
+        let fits = if request.starts_with('.') {
+            target == graph::linked_importer(importer, request)
+                && pinned_name
+                    .zip(
+                        self.links
+                            .manifests
+                            .get(&target)
+                            .and_then(|m| m["name"].as_str()),
+                    )
+                    .is_none_or(|(actual, expected)| actual == expected)
+        } else {
+            let (package, range) = workspace_request(name, request);
+            pinned_name.is_none_or(|n| n == package)
+                && self
+                    .links
+                    .by_name
+                    .get(package)
+                    .into_iter()
+                    .flatten()
+                    .any(|&id| {
+                        let member = &self.links.manifests[id];
+                        !(self.external_members.contains(id)
+                            && self
+                                .links
+                                .config
+                                .pnpm_version
+                                .as_ref()
+                                .is_some_and(|v| v >= &node_semver::Version::from((12, 15, 0))))
+                            && link_directory(id, member) == target
+                            && (matches!(range, "^" | "~")
+                                || local_version_matches(range, member["version"].as_str()))
+                    })
+        };
+        if fits { Ok(()) } else { Err(mismatch()) }
+    }
+
+    fn range_link_matches(&self, id: &str, name: &str, range: &str) -> Result<bool, LockfileError> {
+        let modern = self
+            .links
+            .config
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() >= 12);
+        if modern && self.external_members.contains(id) {
+            return Ok(false);
+        }
+        let disk;
+        let member = if let Some(member) = self.links.manifests.get(id) {
+            member
+        } else {
+            disk = (self.read_linked)(id)?;
+            // pnpm 12 permits a sparse checkout but still checks a present directory.
+            let Some(member) = disk.as_ref() else {
+                return Ok(modern);
+            };
+            member
+        };
+        Ok((!modern || member["name"] == name)
+            && local_version_matches(range, member["version"].as_str()))
+    }
+
+    pub(crate) fn can_omit_empty_importer(&self, id: &str) -> bool {
+        self.external_members.contains(id)
+            && self
+                .links
+                .config
+                .pnpm_version
+                .as_ref()
+                .is_none_or(|v| v.major() < 12 || v >= &node_semver::Version::from((12, 8, 0)))
+    }
+}
+
 impl<'a> WorkspaceLinks<'a> {
     pub(crate) fn new(manifests: &'a BTreeMap<String, Value>, config: &'a WorkspaceConfig) -> Self {
         let mut by_name = HashMap::<_, Vec<_>>::new();
@@ -64,40 +214,7 @@ impl<'a> WorkspaceLinks<'a> {
             manifests,
             config,
             by_name,
-            external_members: None,
         }
-    }
-
-    pub(crate) fn for_validation(
-        manifests: &'a BTreeMap<String, Value>,
-        config: &'a WorkspaceConfig,
-        external: &'a BTreeSet<String>,
-    ) -> Self {
-        let mut links = Self::new(manifests, config);
-        // Since 12.15 an in-root alias cannot resolve a named pin outside the root.
-        // An explicit workspace path can still point to an external directory.
-        if !external.is_empty()
-            && config
-                .pnpm_version
-                .as_ref()
-                .is_some_and(|v| v >= &node_semver::Version::from((12, 15, 0)))
-        {
-            for candidates in links.by_name.values_mut() {
-                candidates.retain(|id| !external.contains(*id));
-            }
-        }
-        links.external_members = Some(external);
-        links
-    }
-
-    pub(crate) fn can_omit_empty_importer(&self, id: &str) -> bool {
-        self.external_members
-            .is_some_and(|external| external.contains(id))
-            && self
-                .config
-                .pnpm_version
-                .as_ref()
-                .is_none_or(|v| v.major() < 12 || v >= &node_semver::Version::from((12, 8, 0)))
     }
 
     fn catalog_specifier<'s>(
@@ -124,74 +241,6 @@ impl<'a> WorkspaceLinks<'a> {
                     "final workspace has no declaration",
                 )
             })
-    }
-
-    pub(crate) fn check_pin(
-        &self,
-        document: &Value,
-        importer: &str,
-        name: &str,
-        specifier: &str,
-        version: &str,
-    ) -> Result<(), LockfileError> {
-        let effective = self.catalog_specifier(name, specifier)?;
-
-        let mismatch = || {
-            manifest::mismatch(
-                importer,
-                "workspace",
-                format!("{name}: {version} does not satisfy {effective}"),
-            )
-        };
-        let Some(request) = effective.strip_prefix("workspace:").map(str::trim) else {
-            if let Some(path) = version.strip_prefix("link:")
-                && self.links_workspace_packages()
-                && let Some(v) = self.config.pnpm_version.as_ref()
-                && (v.major() == 11 && v >= &node_semver::Version::from((11, 28, 0))
-                    || v >= &node_semver::Version::from((12, 19, 0)))
-            {
-                let (package, range) = manifest::registry_request(name, effective);
-                if range.parse::<node_semver::Range>().is_ok() {
-                    let id = graph::linked_project(document.get("importers"), importer, path);
-                    if let Some(member) = self.manifests.get(&id)
-                        && (!local_version_matches(range, member["version"].as_str())
-                            || v.major() >= 12 && member["name"] != package)
-                    {
-                        return Err(mismatch());
-                    }
-                }
-            }
-            return Ok(());
-        };
-        let (target, pinned_name) = if let Some(path) = version.strip_prefix("link:") {
-            (graph::linked_importer(importer, path), None)
-        } else {
-            let (package, path) = graph::file_pin(name, version).ok_or_else(mismatch)?;
-            let resolution = &document["packages"][format!("{package}@file:{path}")]["resolution"];
-            let directory = resolution["directory"].as_str().ok_or_else(mismatch)?;
-            let target = graph::linked_importer(".", path);
-            if resolution["type"] != "directory" || graph::linked_importer(".", directory) != target
-            {
-                return Err(mismatch());
-            }
-            (target, Some(package))
-        };
-        let fits = if request.starts_with('.') {
-            target == graph::linked_importer(importer, request)
-                && pinned_name
-                    .zip(self.manifests.get(&target).and_then(|m| m["name"].as_str()))
-                    .is_none_or(|(actual, expected)| actual == expected)
-        } else {
-            let (package, range) = workspace_request(name, request);
-            pinned_name.is_none_or(|n| n == package)
-                && self.by_name.get(package).into_iter().flatten().any(|&id| {
-                    let member = &self.manifests[id];
-                    link_directory(id, member) == target
-                        && (matches!(range, "^" | "~")
-                            || local_version_matches(range, member["version"].as_str()))
-                })
-        };
-        if fits { Ok(()) } else { Err(mismatch()) }
     }
 
     fn links_workspace_packages(&self) -> bool {

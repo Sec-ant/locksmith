@@ -163,60 +163,31 @@ impl WorkspaceConfig {
         } else {
             LinkedPeerEncoding::Filename
         };
-        if v.major() < 11
-            || (v.major() == 11 && v < &node_semver::Version::from((11, 28, 12)))
-            || (v.major() == 12 && v < &node_semver::Version::from((12, 19, 0)))
-        {
+        if !config.since((11, 28, 12), (12, 19, 0)) {
             config.resolution.optional_peer_scope = OptionalPeerScope::Workspace;
         }
         Ok(config)
     }
 
-    /// pnpm 11.21+ sorts its ignore list in place before checking frozen importers.
-    pub(crate) fn frozen_importer_config(&self) -> std::borrow::Cow<'_, Self> {
-        let sorts_patterns = self
-            .pnpm_version
-            .as_ref()
-            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
-        if sorts_patterns
-            && self
-                .resolution
-                .ignored_optional_dependencies
-                .as_ref()
-                .and_then(Value::as_array)
-                .is_some_and(|patterns| !patterns.is_sorted_by(|a, b| a.as_str() <= b.as_str()))
-        {
-            let mut sorted = self.clone();
-            sort_patterns(&mut sorted.resolution.ignored_optional_dependencies);
-            std::borrow::Cow::Owned(sorted)
-        } else {
-            std::borrow::Cow::Borrowed(self)
-        }
+    /// Some frozen-lockfile checks shipped separately on the pnpm 11 and 12 lines.
+    pub(crate) fn since(&self, pnpm11: (u64, u64, u64), pnpm12: (u64, u64, u64)) -> bool {
+        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
+            11 => v >= &pnpm11.into(),
+            12 => v >= &pnpm12.into(),
+            major => major > 12,
+        })
     }
 
     pub(crate) fn matches_catalog_ranges(&self) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
-            11 => v >= &node_semver::Version::from((11, 28, 12)),
-            12 => v >= &node_semver::Version::from((12, 20, 0)),
-            major => major > 12,
-        })
+        self.since((11, 28, 12), (12, 20, 0))
     }
 
-    /// Releases whose frozen check can recover an omitted local pin from the workspace.
     pub(crate) fn supports_omitted_workspace_link(&self, catalog: bool) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
-            11 => v >= &node_semver::Version::from((11, 28, 11)),
-            12 => v >= &node_semver::Version::from((12, if catalog { 18 } else { 6 }, 0)),
-            major => major > 12,
-        })
+        self.since((11, 28, 11), (12, if catalog { 18 } else { 6 }, 0))
     }
 
     pub(crate) fn records_link_directory(&self) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
-            11 => v >= &node_semver::Version::from((11, 26, 0)),
-            12 => v >= &node_semver::Version::from((12, 3, 2)),
-            major => major > 12,
-        })
+        self.since((11, 26, 0), (12, 3, 2))
     }
 
     /// Whether both configurations name pnpm releases in different major versions.
@@ -268,7 +239,11 @@ impl WorkspaceConfig {
                 inject_workspace_packages: decode(value, "injectWorkspacePackages")?
                     .unwrap_or(false),
                 package_extensions: value.get("packageExtensions").cloned(),
-                ignored_optional_dependencies: ignored_optional_dependencies(value)?,
+                ignored_optional_dependencies: {
+                    let patterns =
+                        optional_patterns(value.get("ignoredOptionalDependencies"), true)?;
+                    (!patterns.is_empty()).then(|| Value::from(patterns))
+                },
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
                 parameters: [
                     "peersSuffixMaxLength",
@@ -292,59 +267,48 @@ impl WorkspaceConfig {
     }
 }
 
-fn ignored_optional_dependencies(value: &Value) -> Result<Option<Value>, LockfileError> {
-    let names = decode::<Option<Vec<String>>>(value, "ignoredOptionalDependencies")?.flatten();
-    Ok(names.filter(|names| !names.is_empty()).map(|mut names| {
-        // Within a single polarity order has no effect on which packages match.
-        if names.iter().all(|p| p.starts_with('!')) || names.iter().all(|p| !p.starts_with('!')) {
-            names.sort_unstable();
-        }
-        Value::from(names)
-    }))
+/// Order matters only for mixed positive and negative patterns. Serialized
+/// pnpm headers can be sorted even when the configured matcher uses authored order.
+pub(crate) fn optional_patterns(
+    value: Option<&Value>,
+    preserve_mixed_order: bool,
+) -> Result<Vec<&str>, LockfileError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let invalid = || {
+        LockfileError::InvalidDocument(
+            "ignoredOptionalDependencies must be an array of strings".into(),
+        )
+    };
+    let mut names: Vec<_> = value
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|v| v.as_str().ok_or_else(invalid))
+        .collect::<Result<_, _>>()?;
+    if !preserve_mixed_order
+        || names.iter().all(|n| n.starts_with('!'))
+        || names.iter().all(|n| !n.starts_with('!'))
+    {
+        names.sort_unstable();
+    }
+    Ok(names)
 }
 
 impl ResolutionSettings {
-    pub(crate) fn ignores_optional_dependency(&self, name: &str) -> bool {
-        self.ignored_optional_dependencies
-            .as_ref()
-            .and_then(Value::as_array)
-            .is_some_and(|patterns| {
-                matches_patterns(patterns.iter().filter_map(Value::as_str), name)
-            })
-    }
-
     pub(crate) fn ignored_optional_dependencies_match(
         &self,
         document: &Value,
         preserve_mixed_order: bool,
     ) -> Result<bool, LockfileError> {
-        let mut recorded = ignored_optional_dependencies(document)?;
-        if recorded == self.ignored_optional_dependencies {
-            return Ok(true);
-        }
-        if preserve_mixed_order
-            && self
-                .ignored_optional_dependencies
-                .as_ref()
-                .and_then(Value::as_array)
-                .is_some_and(|rules| {
-                    let negative = |rule: &Value| rule.as_str().is_some_and(|s| s.starts_with('!'));
-                    rules.iter().any(negative) && !rules.iter().all(negative)
-                })
-        {
-            return Ok(false);
-        }
-        // pnpm can sort the lockfile header even though its matcher uses configuration order.
-        let mut configured = self.ignored_optional_dependencies.clone();
-        sort_patterns(&mut recorded);
-        sort_patterns(&mut configured);
-        Ok(recorded == configured)
-    }
-}
-
-fn sort_patterns(list: &mut Option<Value>) {
-    if let Some(patterns) = list.as_mut().and_then(Value::as_array_mut) {
-        patterns.sort_unstable_by(|a, b| a.as_str().cmp(&b.as_str()));
+        Ok(optional_patterns(
+            document.get("ignoredOptionalDependencies"),
+            preserve_mixed_order,
+        )? == optional_patterns(
+            self.ignored_optional_dependencies.as_ref(),
+            preserve_mixed_order,
+        )?)
     }
 }
 

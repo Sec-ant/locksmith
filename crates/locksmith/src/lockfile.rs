@@ -113,13 +113,16 @@ impl Lockfile {
     /// Check the graph and compare its importers against the complete set of
     /// workspace manifests and configured patch files, keyed by declared path.
     /// External members are paths inside the workspace whose symlinks lead outside the root.
-    /// Callers supply effective manifests if hooks apply.
+    /// Callers supply effective manifests if hooks apply. For a range pinned to a
+    /// directory outside the member set, `read_linked` supplies its manifest,
+    /// `None` for an absent directory, or an error for unreadable inputs.
     pub fn validate_workspace(
         &self,
         manifests: &BTreeMap<String, Value>,
         external_members: &BTreeSet<String>,
         config: &crate::WorkspaceConfig,
         patches: &BTreeMap<String, String>,
+        read_linked: impl Fn(&str) -> Result<Option<Value>, LockfileError>,
     ) -> Result<(), LockfileError> {
         self.validate_with_config(Some(config))?;
         let document = self
@@ -215,8 +218,7 @@ impl Lockfile {
                 "overrides differ",
             ));
         }
-        let frozen = config.frozen_importer_config();
-        let overrides = crate::manifest::Overrides::new(document, &frozen);
+        let overrides = crate::manifest::Overrides::new(document, config);
         for id in graph::section(document, "importers")
             .into_iter()
             .flat_map(|m| m.keys())
@@ -225,18 +227,19 @@ impl Lockfile {
                 crate::manifest::check(&overrides, id, None, "workspace")?;
             }
         }
-        let links = crate::workspace_links::WorkspaceLinks::for_validation(
+        let workspace = crate::workspace_links::FrozenWorkspace::new(
             manifests,
-            &frozen,
+            config,
             external_members,
-        );
+            &read_linked,
+        )?;
         for (id, manifest) in manifests {
             crate::manifest::check_with_links(
                 &overrides,
                 id,
                 Some(manifest),
                 "workspace",
-                Some(&links),
+                Some(&workspace),
             )?;
         }
         Ok(())
