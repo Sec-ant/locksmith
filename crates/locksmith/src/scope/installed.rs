@@ -2,7 +2,7 @@
 //! graphs would give one instance incompatible contents.
 use std::collections::{BTreeSet, HashSet};
 
-use super::ManifestChange;
+use super::{ChangeSet, ManifestChange};
 use crate::{
     DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, assembly, config, graph,
     manifest, peer, reconcile,
@@ -11,7 +11,7 @@ use crate::{
 pub(super) fn converge(
     baseline: &Lockfile,
     candidate: &Lockfile,
-    changes: &[ManifestChange<'_>],
+    inputs: ChangeSet<'_>,
     before: &WorkspaceConfig,
     after: &WorkspaceConfig,
 ) -> Result<Lockfile, LockfileError> {
@@ -19,7 +19,7 @@ pub(super) fn converge(
     candidate.validate_with_config(Some(after))?;
     let base = baseline.project().expect("workspace project checked");
     let donor = candidate.project().expect("workspace project checked");
-    check_manifests([base, donor], changes, before, after)?;
+    check_manifests([base, donor], inputs, before, after)?;
     let policy = config::ResolutionCompatibility::new(&before.resolution, &after.resolution, base);
     let overrides = super::workspace::override_names([base, donor]);
     super::workspace::check_installed_rules([base, donor], [before, after], &policy, &overrides)?;
@@ -29,7 +29,7 @@ pub(super) fn converge(
     // make a previously overlapping subtree portable on the next pass.
     loop {
         let current = output.as_ref().unwrap_or(donor);
-        let plan = restorations(base, current, changes, after, &policy, &overrides);
+        let plan = restorations(base, current, inputs.manifests, after, &policy, &overrides);
         if plan.edges.is_empty() {
             break;
         }
@@ -214,18 +214,18 @@ impl Restorations<'_> {
 
 fn check_manifests(
     [base, donor]: [&Value; 2],
-    changes: &[ManifestChange<'_>],
+    inputs: ChangeSet<'_>,
     before: &WorkspaceConfig,
     after: &WorkspaceConfig,
 ) -> Result<(), LockfileError> {
     let baseline_rules = manifest::Overrides::new(base, before);
     let candidate_rules = manifest::Overrides::new(donor, after);
     let mut supplied = HashSet::new();
-    for change in changes {
+    for change in inputs.manifests {
         if !supplied.insert(change.importer) {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        super::check_baseline_manifest(&baseline_rules, change, Some(before))?;
+        super::check_baseline_manifest(&baseline_rules, change, Some(before), inputs)?;
         manifest::check(&candidate_rules, change.importer, change.after, "candidate")?;
     }
     // Importer pins can legitimately drift without a manifest change. A new

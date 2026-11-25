@@ -114,7 +114,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             let candidate = candidate?.unwrap_or_else(|| baseline.clone());
             Ok((baseline, candidate, manifests))
         })?;
-    include_generated_members(&working, &baseline, &candidate, &mut before, &mut after)?;
+    let recorded =
+        include_generated_members(&working, &baseline, &candidate, &mut before, &mut after)?;
     let importers: BTreeSet<_> = before.keys().chain(after.keys()).collect();
     let changes: Vec<_> = importers
         .into_iter()
@@ -130,7 +131,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         &working.config,
         &after["."],
         |registry| {
-            locksmith::converge_with_patches(
+            locksmith::converge_with_recorded_baselines(
                 &baseline,
                 &candidate,
                 &changes,
@@ -140,6 +141,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                     registry,
                 },
                 &patches,
+                &recorded,
             )
         },
     )?;
@@ -173,9 +175,10 @@ fn include_generated_members(
     candidate: &Lockfile,
     before: &mut BTreeMap<String, Value>,
     after: &mut BTreeMap<String, Value>,
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
+    let mut recorded = BTreeSet::new();
     if !project.workspace {
-        return Ok(());
+        return Ok(recorded);
     }
     let [base, installed] =
         [baseline, candidate].map(|lock| lock.project().and_then(|d| d["importers"].as_object()));
@@ -192,7 +195,7 @@ fn include_generated_members(
         .map(|(id, _)| id)
         .collect();
     if unknown.is_empty() {
-        return Ok(());
+        return Ok(recorded);
     }
     let directories =
         Members::directories_on_disk(project, &std::env::current_dir()?.canonicalize()?)?;
@@ -210,28 +213,53 @@ fn include_generated_members(
         if !before.contains_key(id)
             && let Some(record) = base.and_then(|base| base.get(id))
         {
-            // Git cannot supply an earlier generated manifest. An unchanged importer
-            // can use the current declarations. For an edit or removal, convergence
-            // checks the dependency specifiers recorded in the baseline importer.
-            let old = match after.get(id) {
-                Some(current) if installed.and_then(|map| map.get(id)) == Some(record) => {
-                    current.clone()
-                }
-                current => locked_manifest(id, record, current)?,
-            };
+            let old = locked_manifest(
+                id,
+                record,
+                installed.and_then(|map| map.get(id)),
+                after.get(id),
+            )?;
             before.insert(id.clone(), old);
+            recorded.insert(id.clone());
         }
     }
-    Ok(())
+    Ok(recorded)
 }
 
-fn locked_manifest(id: &str, record: &Value, current: Option<&Value>) -> Result<Value> {
+fn locked_manifest(
+    id: &str,
+    record: &Value,
+    installed: Option<&Value>,
+    current: Option<&Value>,
+) -> Result<Value> {
+    // An unchanged importer can supply the current peer and package context.
+    // Its locked specifiers can still differ from the authored declarations.
+    let groups = ["dependencies", "devDependencies", "optionalDependencies"];
+    let same_importer = installed == Some(record);
     let mut manifest = serde_json::json!({});
-    // Git has no earlier copy of these settings. Compare the declarations the
-    // lock records without treating missing history as a settings edit.
-    for field in ["devEngines", "pnpm"] {
-        if let Some(value) = current.and_then(|m| m.get(field)) {
-            manifest[field] = value.clone();
+    if let Some(current) = current {
+        for (field, value) in current.as_object().expect("parsed workspace manifest") {
+            if matches!(field.as_str(), "devEngines" | "pnpm")
+                || same_importer && !groups.contains(&field.as_str())
+            {
+                manifest[field] = value.clone();
+            }
+        }
+        // pnpm records an auto-installed peer in dependencies. Its pin may
+        // drift even when both lockfiles record the same effective range.
+        if !same_importer && let Some(peers) = current["peerDependencies"].as_object() {
+            for (name, specifier) in peers {
+                let before = record["dependencies"]
+                    .get(name)
+                    .and_then(|dep| dep.get("specifier"));
+                let after = installed.and_then(|r| r["dependencies"].get(name)?.get("specifier"));
+                if before.is_some()
+                    && before == after
+                    && groups.iter().all(|g| current[g].get(name).is_none())
+                {
+                    manifest["peerDependencies"][name] = specifier.clone();
+                }
+            }
         }
     }
     if let Some(meta) = record.get("dependenciesMeta") {
@@ -243,7 +271,7 @@ fn locked_manifest(id: &str, record: &Value, current: Option<&Value>) -> Result<
             manifest["publishConfig"]["linkDirectory"] = link.clone();
         }
     }
-    for group in ["dependencies", "devDependencies", "optionalDependencies"] {
+    for group in groups {
         if let Some(entries) = record.get(group) {
             for (name, edge) in entries
                 .as_object()

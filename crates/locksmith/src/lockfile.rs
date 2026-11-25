@@ -240,12 +240,12 @@ impl Lockfile {
             &read_linked,
         );
         for (id, manifest) in manifests {
-            crate::manifest::check_with_links(
+            crate::manifest::check_manifest(
                 &overrides,
                 id,
                 Some(manifest),
                 "workspace",
-                Some(&workspace),
+                crate::manifest::ManifestCheck::Frozen(&workspace),
             )?;
         }
         Ok(())

@@ -63,5 +63,8 @@ pub use merge::{MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
 pub use repair::{RepairContext, RepairInput, repair};
-pub use scope::{ConvergeOptions, ManifestChange, converge, converge_with_patches};
+pub use scope::{
+    ConvergeOptions, ManifestChange, converge, converge_with_patches,
+    converge_with_recorded_baselines,
+};
 pub use serde_json::Value;

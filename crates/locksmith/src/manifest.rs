@@ -186,16 +186,57 @@ pub(crate) fn check(
     manifest: Option<&Value>,
     side: &'static str,
 ) -> Result<(), LockfileError> {
-    check_with_links(overrides, importer, manifest, side, None)
+    check_manifest(overrides, importer, manifest, side, ManifestCheck::Authored)
 }
 
-pub(crate) fn check_with_links(
+pub(crate) enum ManifestCheck<'a> {
+    Authored,
+    RecordedBaseline,
+    Frozen(&'a crate::workspace_links::FrozenWorkspace<'a>),
+}
+
+fn recorded_declarations<'a>(
+    manifest: &'a Value,
+    id: &str,
+) -> Result<Declarations<'a>, LockfileError> {
+    let mut expected = Declarations::new();
+    for group in GROUPS {
+        let Some(entries) = manifest.get(group) else {
+            continue;
+        };
+        let entries = entries
+            .as_object()
+            .ok_or_else(|| LockfileError::InvalidManifest(id.into()))?;
+        for (name, specifier) in entries {
+            let specifier = specifier
+                .as_str()
+                .ok_or_else(|| LockfileError::InvalidManifest(id.into()))?;
+            if expected
+                .insert(name, (group, Cow::Borrowed(specifier)))
+                .is_some()
+            {
+                return Err(mismatch(
+                    id,
+                    "baseline",
+                    format!("duplicate dependency {name}"),
+                ));
+            }
+        }
+    }
+    Ok(expected)
+}
+
+pub(crate) fn check_manifest(
     overrides: &Overrides<'_>,
     importer: &str,
     manifest: Option<&Value>,
     side: &'static str,
-    workspace: Option<&crate::workspace_links::FrozenWorkspace<'_>>,
+    mode: ManifestCheck<'_>,
 ) -> Result<(), LockfileError> {
+    let workspace = match mode {
+        ManifestCheck::Frozen(ws) => Some(ws),
+        _ => None,
+    };
     let document = overrides.document;
     let record = document.get("importers").and_then(|map| map.get(importer));
     let Some(manifest) = manifest else {
@@ -221,7 +262,10 @@ pub(crate) fn check_with_links(
         }
         _ => return Err(mismatch(importer, side, "missing importer")),
     };
-    let mut expected = declarations(manifest, overrides, importer)?;
+    let mut expected = match mode {
+        ManifestCheck::RecordedBaseline => recorded_declarations(manifest, importer)?,
+        _ => declarations(manifest, overrides, importer)?,
+    };
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {

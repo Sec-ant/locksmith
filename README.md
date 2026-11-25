@@ -85,7 +85,7 @@ pnpm locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers after overrides, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 

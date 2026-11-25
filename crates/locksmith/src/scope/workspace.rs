@@ -65,7 +65,7 @@ pub(super) fn apply(
     candidate: &Lockfile,
     before: &WorkspaceConfig,
     after: &WorkspaceConfig,
-    manifests: &[super::ManifestChange],
+    inputs: super::ChangeSet<'_>,
     registry: Option<&crate::RegistryMetadata>,
 ) -> Result<Option<(Lockfile, Projection)>, ProjectionError> {
     fn rules(c: &WorkspaceConfig) -> Option<&serde_json::Map<String, Value>> {
@@ -80,6 +80,7 @@ pub(super) fn apply(
     let donor = candidate
         .project()
         .ok_or_else(|| missing(&[], "missing installed project lockfile"))?;
+    let manifests = inputs.manifests;
     let root = manifests.iter().find(|m| m.importer == ".");
     let root_reference_changed = after
         .overrides
@@ -287,9 +288,10 @@ pub(super) fn apply(
                         .into());
                     }
                     if current.get("specifier") != dep.get("specifier")
-                        && manifests
-                            .iter()
-                            .any(|m| m.importer == id && m.before != m.after)
+                        && (inputs.recorded.contains(id)
+                            || manifests
+                                .iter()
+                                .any(|m| m.importer == id && m.before != m.after))
                     {
                         let fits = current["specifier"]
                             .as_str()

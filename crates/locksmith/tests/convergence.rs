@@ -70,6 +70,52 @@ fn unchanged_pnpm_configuration_can_be_supplied_once() {
         matches!(result, Err(LockfileError::GlobalConfigurationChanged{field,..}) if field=="pnpm")
     );
 }
+
+#[test]
+fn recorded_and_authored_baselines_validate_their_own_specifiers() {
+    let input = lock(
+        json!({"app":{"dependencies":{"lib":{"specifier":"2.0.0","version":"2.0.0"}}}}),
+        json!({"lib@2.0.0":{}}),
+    );
+    let mut doc = input.project().unwrap().clone();
+    doc["overrides"] = json!({"lib@1.0.0":"2.0.0","lib@2.0.0":"3.0.0"});
+    let lock = parse(doc);
+    let authored = json!({"dependencies":{"lib":"1.0.0"}});
+    let recorded = json!({"dependencies":{"lib":"2.0.0"}});
+    let reconstructed = std::collections::BTreeSet::from(["app".to_owned()]);
+    let check = |before: &Value, after: &Value| {
+        locksmith::converge_with_recorded_baselines(
+            &lock,
+            &lock,
+            &[change("app", before, after)],
+            Default::default(),
+            &Default::default(),
+            &reconstructed,
+        )
+    };
+    assert!(check(&recorded, &authored).is_ok());
+    for (before, after, side) in [
+        (&authored, &authored, "baseline"),
+        (&recorded, &recorded, "candidate"),
+    ] {
+        assert!(
+            matches!(check(before, after), Err(LockfileError::ManifestMismatch {side: actual,..}) if actual == side)
+        );
+    }
+    assert!(matches!(
+        converge(
+            &lock,
+            &lock,
+            &[change("app", &recorded, &authored)],
+            Default::default()
+        ),
+        Err(LockfileError::ManifestMismatch {
+            side: "baseline",
+            ..
+        })
+    ));
+}
+
 fn fixture() -> (Lockfile, Lockfile, Value, Value) {
     let before = json!({"dependencies":{"foo":"1.0.0","bar":"^1.0.0"}});
     let after = json!({"dependencies":{"foo":"2.0.0","bar":"^1.0.0"}});

@@ -86,6 +86,57 @@ pub fn converge_with_patches(
     options: ConvergeOptions<'_>,
     patches: &BTreeMap<String, String>,
 ) -> Result<Lockfile, LockfileError> {
+    converge_with_recorded_baselines(
+        baseline,
+        candidate,
+        changes,
+        options,
+        patches,
+        &BTreeSet::new(),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ChangeSet<'a> {
+    manifests: &'a [ManifestChange<'a>],
+    recorded: &'a BTreeSet<String>,
+}
+
+impl ChangeSet<'_> {
+    fn check_baseline(
+        &self,
+        rules: &manifest::Overrides<'_>,
+        change: &ManifestChange<'_>,
+    ) -> Result<(), LockfileError> {
+        let mode = if self.recorded.contains(change.importer) {
+            manifest::ManifestCheck::RecordedBaseline
+        } else {
+            manifest::ManifestCheck::Authored
+        };
+        manifest::check_manifest(rules, change.importer, change.before, "baseline", mode)
+    }
+}
+
+/// Converge when some baseline manifests were reconstructed from their lockfile
+/// importers. For each ID in `recorded_baselines`, the dependency groups in
+/// `ManifestChange::before` contain the effective specifiers recorded by pnpm.
+/// The final manifests and all other baseline manifests contain authored declarations.
+///
+/// # Errors
+/// Returns the errors of [`converge_with_patches`], including mismatches between
+/// a reconstructed baseline and its recorded groups, specifiers, or metadata.
+pub fn converge_with_recorded_baselines(
+    baseline: &Lockfile,
+    candidate: &Lockfile,
+    changes: &[ManifestChange<'_>],
+    options: ConvergeOptions<'_>,
+    patches: &BTreeMap<String, String>,
+    recorded_baselines: &BTreeSet<String>,
+) -> Result<Lockfile, LockfileError> {
+    let inputs = ChangeSet {
+        manifests: changes,
+        recorded: recorded_baselines,
+    };
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
         crate::repair::check_recorded_settings(project, config)?;
     }
@@ -106,7 +157,7 @@ pub fn converge_with_patches(
             if !seen.insert(change.importer) {
                 return Err(LockfileError::InvalidManifest(change.importer.into()));
             }
-            manifest::check(&baseline_rules, change.importer, change.before, "baseline")?;
+            inputs.check_baseline(&baseline_rules, change)?;
             manifest::check(&rules, change.importer, change.after, "candidate")?;
             if let Some(manifest) = change.after {
                 manifests.insert(change.importer.to_owned(), manifest.clone());
@@ -134,7 +185,7 @@ pub fn converge_with_patches(
             },
         );
     }
-    let mut result = select(baseline, candidate, changes, options)?;
+    let mut result = select(baseline, candidate, inputs, options)?;
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
         crate::repair::check_recorded_settings(project, config)?;
@@ -188,7 +239,7 @@ pub fn converge_with_patches(
 fn select(
     baseline: &Lockfile,
     candidate: &Lockfile,
-    changes: &[ManifestChange<'_>],
+    inputs: ChangeSet<'_>,
     options: ConvergeOptions<'_>,
 ) -> Result<Lockfile, LockfileError> {
     let configured = if let Some(before) = options.baseline_configuration {
@@ -198,18 +249,11 @@ fn select(
                 "the final workspace configuration is required",
             )
         })?;
-        match workspace::apply(
-            baseline,
-            candidate,
-            before,
-            after,
-            changes,
-            options.registry,
-        ) {
+        match workspace::apply(baseline, candidate, before, after, inputs, options.registry) {
             Ok(plan) => plan,
             Err(workspace::ProjectionError::Input(error)) => return Err(error),
             Err(workspace::ProjectionError::MixedPeers) => {
-                return installed::converge(baseline, candidate, changes, before, after);
+                return installed::converge(baseline, candidate, inputs, before, after);
             }
         }
     } else {
@@ -223,7 +267,7 @@ fn select(
         baseline,
         projected,
         candidate,
-        changes,
+        inputs,
         options,
         configured.as_ref(),
     ) {
@@ -237,7 +281,7 @@ fn select(
             return installed::converge(
                 baseline,
                 candidate,
-                changes,
+                inputs,
                 options.baseline_configuration.unwrap(),
                 options.configuration.unwrap(),
             );
@@ -257,7 +301,7 @@ fn select(
         result.project().unwrap(),
         options.configuration.unwrap_or(&default_config),
     );
-    for change in changes {
+    for change in inputs.manifests {
         manifest::check(&overrides, change.importer, change.after, "output")?;
     }
     Ok(result)
@@ -267,6 +311,7 @@ fn check_baseline_manifest(
     overrides: &manifest::Overrides<'_>,
     change: &ManifestChange<'_>,
     baseline_configuration: Option<&crate::WorkspaceConfig>,
+    inputs: ChangeSet<'_>,
 ) -> Result<(), LockfileError> {
     if change.before.is_none() && change.after.is_none() {
         return Err(LockfileError::InvalidManifest(change.importer.into()));
@@ -320,7 +365,7 @@ fn check_baseline_manifest(
             });
         }
     }
-    manifest::check(overrides, change.importer, change.before, "baseline")
+    inputs.check_baseline(overrides, change)
 }
 
 struct LocalGraph<'a> {
@@ -358,7 +403,7 @@ struct ManifestEdits<'a> {
 fn manifest_edits<'a>(
     graphs: [&LocalGraph<'a>; 2],
     rules: [&manifest::Overrides<'_>; 2],
-    changes: &'a [ManifestChange<'a>],
+    inputs: ChangeSet<'a>,
     configured: Option<&'a workspace::Projection>,
     baseline_configuration: Option<&crate::WorkspaceConfig>,
 ) -> Result<ManifestEdits<'a>, LockfileError> {
@@ -371,47 +416,64 @@ fn manifest_edits<'a>(
     let mut metadata_importers = BTreeSet::new();
     let mut providers: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     let mut manifests = BTreeMap::new();
-    for change in changes {
+    for change in inputs.manifests {
         if manifests.insert(change.importer, change).is_some() {
             return Err(LockfileError::InvalidManifest(change.importer.into()));
         }
-        check_baseline_manifest(baseline_rules, change, baseline_configuration)?;
+        check_baseline_manifest(baseline_rules, change, baseline_configuration, inputs)?;
+        let recorded = inputs.recorded.contains(change.importer);
         let metadata = METADATA
             .iter()
             .any(|key| get(change.before, key) != get(change.after, key))
             || get(change.before, "scripts").and_then(|v| v.get("prepare"))
                 != get(change.after, "scripts").and_then(|v| v.get("prepare"));
-        let declarations = manifest::GROUPS
-            .iter()
-            .any(|key| get(change.before, key) != get(change.after, key));
-        if change.before.is_some()
+        let same_project = change.before.is_some()
             && change.after.is_some()
             && !metadata
-            && !declarations
-            && root_choices.and_then(|r| r.get(change.importer)).is_none()
+            && root_choices.and_then(|r| r.get(change.importer)).is_none();
+        if same_project
+            && !recorded
+            && manifest::GROUPS
+                .iter()
+                .all(|key| get(change.before, key) == get(change.after, key))
         {
             continue;
         }
         manifest::check(candidate_rules, change.importer, change.after, "candidate")?;
-        if metadata || change.before.is_none() {
-            metadata_importers.insert(change.importer);
-        }
-        only_specifiers &= !metadata && change.before.is_some() && change.after.is_some();
         let mut names = BTreeSet::new();
         for field in manifest::GROUPS.into_iter().chain(["peerDependencies"]) {
-            for manifest in [change.before, change.after].into_iter().flatten() {
+            // The verified importer contains the candidate's effective specifiers.
+            // Peer declarations are only available in the manifest itself.
+            let from_importer = recorded && field != "peerDependencies";
+            let after = if from_importer {
+                donor["importers"].get(change.importer)
+            } else {
+                change.after
+            };
+            for manifest in [change.before, after].into_iter().flatten() {
                 for name in graph::section(manifest, field)
                     .into_iter()
                     .flat_map(|deps| deps.keys())
                 {
-                    if get(change.before, field).and_then(|v| v.get(name))
-                        != get(change.after, field).and_then(|v| v.get(name))
-                    {
+                    let next = get(after, field).and_then(|v| v.get(name));
+                    let specifier = if from_importer {
+                        next.and_then(|v| v.get("specifier"))
+                    } else {
+                        next
+                    };
+                    if get(change.before, field).and_then(|v| v.get(name)) != specifier {
                         names.insert(name);
                     }
                 }
             }
         }
+        if same_project && names.is_empty() {
+            continue;
+        }
+        if metadata || change.before.is_none() {
+            metadata_importers.insert(change.importer);
+        }
+        only_specifiers &= !metadata && change.before.is_some() && change.after.is_some();
         for name in names {
             let old = importer_dependency(base, change.importer, name);
             let new = importer_dependency(donor, change.importer, name);
@@ -750,7 +812,7 @@ fn converge_manifests(
     original: &Lockfile,
     baseline: Lockfile,
     candidate: &Lockfile,
-    changes: &[ManifestChange<'_>],
+    inputs: ChangeSet<'_>,
     options: ConvergeOptions<'_>,
     configured: Option<&workspace::Projection>,
 ) -> Result<Lockfile, LockfileError> {
@@ -773,7 +835,7 @@ fn converge_manifests(
     let edits = manifest_edits(
         graphs,
         [&baseline_rules, &candidate_rules],
-        changes,
+        inputs,
         configured,
         options.baseline_configuration,
     )?;

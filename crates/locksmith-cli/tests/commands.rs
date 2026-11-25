@@ -2102,6 +2102,123 @@ fn converge_tracks_an_installed_git_ignored_member_from_addition_to_removal() {
 }
 
 #[test]
+fn converge_uses_recorded_specifiers_once_for_generated_members() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let overrides = json!({"is-number@5.0.0":"6.0.0","is-number@6.0.0":"7.0.0"});
+    r.write(
+        "pnpm-workspace.yaml",
+        &json!({"packages":["apps/*"],"overrides":overrides}).to_string(),
+    );
+    let id = "apps/generated";
+    let path = "apps/generated/package.json";
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    lock["overrides"] = overrides.clone();
+    let importer = |version: &str| json!({"dependencies":{"is-number":{"specifier":version,"version":version}}});
+    let manifest = |version: &str| json!({"dependencies":{"is-number":version}}).to_string();
+    r.write(path, &manifest("5.0.0"));
+    lock["importers"][id] = importer("6.0.0");
+    lock["packages"]["is-number@6.0.0"] = json!({"resolution":{}});
+    lock["snapshots"]["is-number@6.0.0"] = json!({});
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    check_workspace(r.0.path(), 0, "baseline");
+    r.commit("record the overridden importer");
+
+    r.write(path, &manifest("6.0.0"));
+    let stale = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(!stale.status.success(), "{}", report(&stale));
+    lock["importers"][id] = importer("7.0.0");
+    lock["packages"]["is-number@7.0.0"] = json!({"resolution":{}});
+    lock["snapshots"]["is-number@7.0.0"] = json!({});
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let edit = r.cmd(CLI, &["converge", "HEAD"]);
+
+    fs::remove_file(r.0.path().join(path)).unwrap();
+    lock["importers"].as_object_mut().unwrap().remove(id);
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let remove = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(
+        edit.status.success() && remove.status.success(),
+        "edit: {}\nremove: {}",
+        report(&edit),
+        report(&remove)
+    );
+    assert_eq!(graph(&edit.stdout)["importers"][id], importer("7.0.0"));
+    assert!(graph(&remove.stdout)["importers"].get(id).is_none());
+
+    // A rule and an authored specifier can change while the locked importer stays identical.
+    r.write(path, &manifest("6.0.0"));
+    lock["importers"][id] = importer("6.0.0");
+    lock["overrides"] = json!({"is-number@5.0.0":"6.0.0"});
+    r.write(
+        "pnpm-workspace.yaml",
+        &json!({"packages":["apps/*"],"overrides":lock["overrides"]}).to_string(),
+    );
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let unchanged = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(unchanged.status.success(), "{}", report(&unchanged));
+    assert_eq!(graph(&unchanged.stdout)["importers"][id], importer("6.0.0"));
+
+    // The new extension affects only the release the manifest just stopped using.
+    lock["overrides"] = overrides;
+    let settings = json!({"packages":["apps/*"],"overrides":lock["overrides"],
+        "packageExtensions":{"is-number@6":{"dependencies":{"is-buffer":"2.0.5"}}}});
+    r.write("pnpm-workspace.yaml", &settings.to_string());
+    // Recorded by pnpm 10.34.9 for the extension above.
+    lock["packageExtensionsChecksum"] =
+        json!("sha256-zWdDqa44lCRfRipKQcYOcX1RGy6x468mGsfynbmxO5k=");
+    lock["importers"][id] = importer("7.0.0");
+    for section in ["packages", "snapshots"] {
+        lock[section]
+            .as_object_mut()
+            .unwrap()
+            .remove("is-number@6.0.0");
+    }
+    r.write("pnpm-lock.yaml", &lock.to_string());
+    let replaced = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(replaced.status.success(), "{}", report(&replaced));
+    assert_eq!(graph(&replaced.stdout)["importers"][id], importer("7.0.0"));
+}
+
+#[test]
+fn converge_keeps_a_generated_members_peer_pin_across_an_unrelated_edit() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let id = "apps/generated";
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    for (range, pin, link, expected) in [
+        ("^1", "1.0.0", "link:../before", "1.0.0"),
+        ("^1", "1.1.0", "link:../after", "1.0.0"),
+        (">=1", "1.1.0", "link:../after", "1.1.0"),
+    ] {
+        r.write(
+            "apps/generated/package.json",
+            &json!({"peerDependencies":{"foo":range},"dependencies":{"local":link}}).to_string(),
+        );
+        lock["importers"][id] = json!({"dependencies":{"foo":{"specifier":range,"version":pin},"local":{"specifier":link,"version":link}}});
+        let key = format!("foo@{pin}");
+        lock["packages"][&key] = json!({"resolution":{}});
+        lock["snapshots"][&key] = json!({});
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        if pin == "1.0.0" {
+            r.commit("record the generated member's peer");
+            continue;
+        }
+        let result = r.cmd(CLI, &["converge", "HEAD"]);
+        assert!(result.status.success(), "{}", report(&result));
+        let doc = graph(&result.stdout);
+        assert_eq!(
+            doc["importers"][id]["dependencies"]["foo"]["version"], expected,
+            "{range}"
+        );
+        assert_eq!(
+            doc["importers"][id]["dependencies"]["local"]["version"],
+            link
+        );
+    }
+}
+
+#[test]
 fn converge_accepts_an_ignored_members_dependency_edit_with_unchanged_dev_engines() {
     let r = Repo::new();
     r.write(".gitignore", "apps/generated/\n");
