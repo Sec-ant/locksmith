@@ -205,7 +205,7 @@ pub(crate) fn check_configuration(
     if !manifest::same_overrides(doc, metadata) {
         return Err(mismatch("overrides"));
     }
-    if manifest::rule_map(doc, "patchedDependencies") != metadata.get("patchedDependencies") {
+    if !reconcile::metadata::same_patch_records(doc, metadata.get("patchedDependencies")) {
         return Err(mismatch("patchedDependencies"));
     }
     if !crate::checksum::extensions_match(

@@ -111,11 +111,13 @@ impl Lockfile {
     }
 
     /// Check the graph and compare its importers against the complete set of
-    /// workspace manifests. Callers supply effective manifests if hooks apply.
+    /// workspace manifests and configured patch files, keyed by declared path.
+    /// Callers supply effective manifests if hooks apply.
     pub fn validate_workspace(
         &self,
         manifests: &BTreeMap<String, Value>,
         config: &crate::WorkspaceConfig,
+        patches: &BTreeMap<String, String>,
     ) -> Result<(), LockfileError> {
         self.validate_with_config(Some(config))?;
         let document = self
@@ -134,6 +136,24 @@ impl Lockfile {
             ));
         }
         crate::repair::check_recorded_settings(document, config)?;
+        let patches_match = |encoding| {
+            let expected = crate::reconcile::metadata::patch_records(config, patches, encoding)?;
+            Ok::<_, LockfileError>(crate::reconcile::metadata::same_patch_records(
+                document,
+                expected.as_ref(),
+            ))
+        };
+        if !patches_match(config.patch_encoding)?
+            && !(config.pnpm_version.is_none()
+                && (patches_match(crate::PatchEncoding::Md5Base32WithPath)?
+                    || patches_match(crate::PatchEncoding::Sha256)?))
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "patchedDependencies differs",
+            ));
+        }
         if !crate::checksum::extensions_match(config, document.get("packageExtensionsChecksum")) {
             return Err(crate::manifest::mismatch(
                 ".",

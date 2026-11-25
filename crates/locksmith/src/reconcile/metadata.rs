@@ -242,25 +242,78 @@ pub(crate) fn resolve(
     if let Some(rules) = effective_overrides(config, context.manifests.get("."))? {
         output["overrides"] = rules;
     }
-    if let Some(patches) = &config.patches {
-        for (name, path) in patches {
-            let path = path.as_str();
-            let contents = context.patches.get(path).ok_or_else(|| {
+    if let Some(patches) = patch_records(config, context.patches, config.patch_encoding)? {
+        output["patchedDependencies"] = patches;
+    }
+    Ok(output)
+}
+
+pub(crate) fn patch_records(
+    config: &crate::WorkspaceConfig,
+    contents: &std::collections::BTreeMap<String, String>,
+    encoding: crate::PatchEncoding,
+) -> Result<Option<Value>, LockfileError> {
+    let Some(patches) = config
+        .patches
+        .as_ref()
+        .filter(|patches| !patches.is_empty())
+    else {
+        return Ok(None);
+    };
+    let records = patches
+        .iter()
+        .map(|(name, path)| {
+            let contents = contents.get(path).ok_or_else(|| {
                 missing(
                     &["patchedDependencies", name],
                     format!("missing patch contents: {path}"),
                 )
             })?;
-            let hash = peer::patch_hash(contents, config.patch_encoding);
-            output["patchedDependencies"][name] = match config.patch_encoding {
+            let hash = peer::patch_hash(contents, encoding);
+            let record = match encoding {
                 crate::PatchEncoding::Sha256 => Value::String(hash),
                 crate::PatchEncoding::Sha256WithPath | crate::PatchEncoding::Md5Base32WithPath => {
                     json!({"hash": hash, "path": path})
                 }
             };
-        }
+            Ok((name.clone(), record))
+        })
+        .collect::<Result<_, LockfileError>>()?;
+    Ok(Some(Value::Object(records)))
+}
+
+pub(crate) fn same_patch_records(document: &Value, expected: Option<&Value>) -> bool {
+    let recorded = manifest::rule_map(document, "patchedDependencies");
+    if recorded == expected {
+        return true;
     }
-    Ok(output)
+    let (Some(recorded), Some(expected)) = (
+        recorded.and_then(Value::as_object),
+        expected.and_then(Value::as_object),
+    ) else {
+        return false;
+    };
+    recorded.len() == expected.len()
+        && expected.iter().all(|(name, patch)| {
+            let Some(old) = recorded.get(name) else {
+                return false;
+            };
+            if old == patch {
+                return true;
+            }
+            let paths = old["path"].as_str().zip(patch["path"].as_str());
+            old.as_object().is_some_and(|entry| entry.len() == 2)
+                && old["hash"] == patch["hash"]
+                && paths.is_some_and(|(old, new)| {
+                    use std::path::{Component, Path};
+                    Path::new(old)
+                        .components()
+                        .filter(|c| *c != Component::CurDir)
+                        .eq(Path::new(new)
+                            .components()
+                            .filter(|c| *c != Component::CurDir))
+                })
+        })
 }
 
 /// pnpm records publication times for direct dependency locators only.

@@ -26,7 +26,16 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
             Err(e) => Err(format!("{}: {e}", path.display()).into()),
         }
     };
-    let project = Project::from_files(lock.recorded_pnpm_version(), read)?;
+    let manifest = workspace::read_manifest(".", read)?;
+    let has_root_manifest = manifest.is_some();
+    let project = Project::from_manifest(
+        manifest.unwrap_or_else(|| serde_json::json!({})),
+        lock.recorded_pnpm_version(),
+        read,
+    )?;
+    if !has_root_manifest && !project.workspace {
+        return Err("missing root package manifest".into());
+    }
     if project.config.get("pnpmfileChecksum").is_some()
         || lock
             .project()
@@ -36,12 +45,15 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
     let config = crate::policy::Policy::from_project(&project).configuration(&project.config)?;
+    let patches = workspace::patches(&config, "", read)?;
     let mut manifests = BTreeMap::new();
     for id in Members::new(&project)?.directories_on_disk(root)? {
         if let Some(manifest) = workspace::read_manifest(&id, read)? {
             manifests.insert(id, manifest);
         }
     }
-    manifests.insert(".".into(), project.root);
-    Ok(lock.validate_workspace(&manifests, &config)?)
+    if has_root_manifest {
+        manifests.insert(".".into(), project.root);
+    }
+    Ok(lock.validate_workspace(&manifests, &config, &patches)?)
 }

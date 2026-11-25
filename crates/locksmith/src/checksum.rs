@@ -32,7 +32,9 @@ pub(crate) fn extensions_match(config: &crate::WorkspaceConfig, recorded: Option
         .resolution
         .package_extensions
         .as_ref()
-        .filter(|value| value.as_object().is_none_or(|rules| !rules.is_empty()));
+        .filter(|value| {
+            !value.is_null() && value.as_object().is_none_or(|rules| !rules.is_empty())
+        });
     match (configured, recorded) {
         (None, None) => true,
         (Some(rules), Some(Value::String(hash))) => {

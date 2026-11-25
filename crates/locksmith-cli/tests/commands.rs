@@ -1346,6 +1346,35 @@ snapshots:
 }
 
 #[test]
+fn validate_checks_workspace_members_without_a_root_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, manifest) in [
+        (
+            "app",
+            r#"{"name":"app","dependencies":{"lib":"workspace:*"}}"#,
+        ),
+        ("lib", r#"{"name":"lib","version":"1.0.0"}"#),
+    ] {
+        fs::create_dir(root.join(name)).unwrap();
+        fs::write(root.join(name).join("package.json"), manifest).unwrap();
+    }
+    fs::write(root.join("pnpm-workspace.yaml"), "packages: [app, lib]\n").unwrap();
+    let mut lock = json!({"lockfileVersion":"9.0","importers":{
+        "app":{"dependencies":{"lib":{"specifier":"workspace:*","version":"link:../lib"}}},"lib":{}
+    }});
+    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+    let result = validate_workspace_in(root);
+    assert!(result.status.success(), "{}", report(&result));
+
+    lock["importers"]["."] = json!({});
+    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+    let result = validate_workspace_in(root);
+    assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("absent project"));
+}
+
+#[test]
 fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -1475,6 +1504,8 @@ fn validate_detects_added_changed_and_removed_package_extensions() {
         (Some(checksum), changed.as_str(), 1),
         (Some(checksum), "", 1),
         (None, "packageExtensions: {}\n", 0),
+        (None, "packageExtensions: null\n", 0),
+        (Some(checksum), "packageExtensions: null\n", 1),
     ] {
         let mut lock = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
         if let Some(recorded) = recorded {
@@ -1491,6 +1522,48 @@ fn validate_detects_added_changed_and_removed_package_extensions() {
         if status == 1 {
             assert!(String::from_utf8_lossy(&result.stderr).contains("packageExtensionsChecksum"));
         }
+    }
+}
+
+#[test]
+fn validate_compares_patch_declarations_and_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let contents = "diff --git a/index.js b/index.js\n--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-old\n+new\n";
+    // Recorded by pnpm 10.33.2 and 12.15.0 for the patch above.
+    let hash = "39d1d17e986e1d5203cab3cb5cf582396a95b3b12c3d7ae535677c53afca149c";
+    for (manifest, record) in [
+        (
+            json!({"packageManager":"pnpm@10.33.2"}),
+            json!({"hash":hash,"path":"probe.patch"}),
+        ),
+        (json!({}), json!(hash)),
+    ] {
+        let lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"patchedDependencies":{"unused@1.0.0":record}});
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        fs::write(root.join("probe.patch"), contents).unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages: []\npatchedDependencies: {'unused@1.0.0': ./probe.patch}\n",
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert!(result.status.success(), "{}", report(&result));
+
+        fs::write(
+            root.join("probe.patch"),
+            contents.replace("+new", "+edited"),
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("patchedDependencies"));
+
+        fs::write(root.join("pnpm-workspace.yaml"), "packages: []\n").unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("patchedDependencies"));
     }
 }
 

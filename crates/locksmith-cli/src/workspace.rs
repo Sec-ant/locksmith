@@ -97,6 +97,14 @@ impl Project {
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
+        Self::from_manifest(root, recorded_version, read)
+    }
+
+    pub fn from_manifest(
+        root: Value,
+        recorded_version: Option<node_semver::Version>,
+        mut read: impl FnMut(&str) -> Result<Option<String>>,
+    ) -> Result<Self> {
         let version = pnpm_version(&root).or(recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
