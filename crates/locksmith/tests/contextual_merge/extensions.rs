@@ -385,24 +385,26 @@ fn added_extensions_prefer_existing_configured_graphs_before_rebuilding_sources(
 fn removed_overrides_recover_extension_declarations_from_unmodified_sources() {
     for removed_in_source in [false, true] {
         let before = cfg(
-            &json!({"packageExtensions":{"parent@1":{"dependencies":{"child":"1.0.0"}}},"overrides":{"parent>child":"2.0.0"}}),
+            &json!({"ignoredOptionalDependencies":["chi*"],"packageExtensions":{"parent@1":{"dependencies":{"child":"1.0.0"}}},"overrides":{"parent>child":"2.0.0"}}),
         );
-        let after =
-            cfg(&json!({"packageExtensions":{"parent@1":{"dependencies":{"child":"1.0.0"}}}}));
+        let after = cfg(
+            &json!({"ignoredOptionalDependencies":["chi*"],"packageExtensions":{"parent@1":{"dependencies":{"child":"1.0.0"}}}}),
+        );
         let witness_config = cfg(&if removed_in_source {
-            json!({"overrides":{"parent>child":"-"}})
+            json!({"ignoredOptionalDependencies":["chi*"],"overrides":{"parent>child":"-"}})
         } else {
-            json!({})
+            json!({"ignoredOptionalDependencies":["chi*"]})
         });
         let source=Lockfile::parse(&json!({
             "lockfileVersion":"9.0","settings":{"autoInstallPeers":true,"excludeLinksFromLockfile":false},
-            "overrides":{"parent>child":"2.0.0"},"packageExtensionsChecksum":"sha256-extended",
+            "overrides":{"parent>child":"2.0.0"},"packageExtensionsChecksum":"sha256-extended","ignoredOptionalDependencies":["chi*"],
             "importers":{".":{"dependencies":{"parent":{"specifier":"1.0.0","version":"1.0.0"}}}},
             "packages":{"parent@1.0.0":{"resolution":{"integrity":"sha512-parent"}},"child@2.0.0":{"resolution":{"integrity":"sha512-child2"}}},
             "snapshots":{"parent@1.0.0":{"dependencies":{"child":"2.0.0"}},"child@2.0.0":{}}
         }).to_string()).unwrap();
         let mut other = json!({
             "lockfileVersion":"9.0","settings":{"autoInstallPeers":true,"excludeLinksFromLockfile":false},
+            "ignoredOptionalDependencies":["chi*"],
             "importers":{".":{"dependencies":{"parent":{"specifier":"1.0.0","version":"1.0.0"},"child":{"specifier":"1.0.0","version":"1.0.0"}}}},
             "packages":{"parent@1.0.0":{"resolution":{"integrity":"sha512-parent"}},"child@1.0.0":{"resolution":{"integrity":"sha512-child1"}}},
             "snapshots":{"parent@1.0.0":{},"child@1.0.0":{}}

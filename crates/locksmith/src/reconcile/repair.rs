@@ -458,7 +458,7 @@ pub(super) fn repair_snapshot(
                                 && body
                                     .get("optionalDependencies")
                                     .is_some_and(|deps| deps.get(name).is_some()))
-                            || ignores_optional(name)
+                            || (group == "optionalDependencies" && ignores_optional(name))
                         {
                             return None;
                         }
