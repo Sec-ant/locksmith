@@ -205,7 +205,7 @@ impl Lockfile {
         }
         if !config
             .resolution
-            .ignored_optional_dependencies_match(document, false)?
+            .ignored_optional_dependencies_match(document)?
         {
             return Err(crate::manifest::mismatch(
                 ".",
@@ -223,7 +223,7 @@ impl Lockfile {
                 "overrides differ",
             ));
         }
-        let overrides = crate::manifest::Overrides::new(document, config);
+        let overrides = crate::manifest::Overrides::for_frozen_workspace(document, config);
         for id in graph::section(document, "importers")
             .into_iter()
             .flat_map(|m| m.keys())

@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Preserve generated workspace members and their dependency edits in `converge` when Git ignores their manifests.
+Preserve edits and removals of Git-ignored workspace members in `converge`, including members with dependency metadata, publish directories, or `devEngines`.

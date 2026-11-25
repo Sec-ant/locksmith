@@ -266,7 +266,7 @@ fn select(
 fn check_baseline_manifest(
     overrides: &manifest::Overrides<'_>,
     change: &ManifestChange<'_>,
-    configuration: Option<&crate::WorkspaceConfig>,
+    baseline_configuration: Option<&crate::WorkspaceConfig>,
 ) -> Result<(), LockfileError> {
     if change.before.is_none() && change.after.is_none() {
         return Err(LockfileError::InvalidManifest(change.importer.into()));
@@ -278,8 +278,10 @@ fn check_baseline_manifest(
     }
     for field in ["pnpm", "packageManager", "devEngines"] {
         if field == "pnpm"
-            && configuration
-                .and_then(|c| c.pnpm_version.as_ref())
+            && overrides
+                .configuration()
+                .pnpm_version
+                .as_ref()
                 .is_some_and(|v| v.major() >= 11)
         {
             continue;
@@ -290,7 +292,7 @@ fn check_baseline_manifest(
         if get(change.before, field) != get(change.after, field) {
             if field == "pnpm"
                 && change.importer == "."
-                && configuration.is_some()
+                && baseline_configuration.is_some()
                 && [change.before, change.after]
                     .iter()
                     .all(|m| get(*m, field).is_none_or(Value::is_object))

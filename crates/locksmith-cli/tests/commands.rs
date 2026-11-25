@@ -2043,15 +2043,19 @@ fn write_input(root: &Path, name: &str, contents: impl std::fmt::Display) {
 #[test]
 fn converge_tracks_an_installed_git_ignored_member_from_addition_to_removal() {
     let r = Repo::new();
+    r.write(
+        "package.json",
+        r#"{"private":true,"packageManager":"pnpm@12.21.0"}"#,
+    );
     r.write(".gitignore", "apps/generated/\n");
     r.commit("ignore generated files");
-    r.write(
-        "apps/generated/package.json",
-        r#"{"dependencies":{"local":"link:../local"}}"#,
-    );
+    let mut manifest = json!({"dependencies":{"local":"link:../local"},
+        "dependenciesMeta":{"local":{"injected":false}},
+        "publishConfig":{"directory":"dist","linkDirectory":false}});
+    r.write("apps/generated/package.json", &manifest.to_string());
     let mut candidate = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
-    candidate["importers"]["apps/generated"] =
-        json!({"dependencies":{"local":{"specifier":"link:../local","version":"link:../local"}}});
+    candidate["importers"]["apps/generated"] = json!({"dependencies":{"local":{"specifier":"link:../local","version":"link:../local"}},
+            "dependenciesMeta":manifest["dependenciesMeta"],"publishDirectory":"dist","linkDirectory":false});
     r.write("pnpm-lock.yaml", &candidate.to_string());
     check_workspace(r.0.path(), 0, "installed candidate");
     let result = r.cmd(CLI, &["converge", "HEAD"]);
@@ -2066,10 +2070,14 @@ fn converge_tracks_an_installed_git_ignored_member_from_addition_to_removal() {
     assert!(repeat.status.success(), "{}", report(&repeat));
     assert_eq!(repeat.stdout, result.stdout);
     let new_link = "link:../other";
-    r.write(
-        "apps/generated/package.json",
-        &json!({"dependencies":{"local":new_link}}).to_string(),
-    );
+    manifest["dependencies"]["local"] = json!(new_link);
+    manifest["publishConfig"] = json!({"directory":"build"});
+    r.write("apps/generated/package.json", &manifest.to_string());
+    candidate["importers"]["apps/generated"]["publishDirectory"] = json!("build");
+    candidate["importers"]["apps/generated"]
+        .as_object_mut()
+        .unwrap()
+        .remove("linkDirectory");
     candidate["importers"]["apps/generated"]["dependencies"]["local"] =
         json!({"specifier":new_link,"version":new_link});
     r.write("pnpm-lock.yaml", &candidate.to_string());
@@ -2091,6 +2099,30 @@ fn converge_tracks_an_installed_git_ignored_member_from_addition_to_removal() {
         std::str::from_utf8(&removed.stdout).unwrap(),
     );
     check_workspace(r.0.path(), 0, "removed generated member");
+}
+
+#[test]
+fn converge_accepts_an_ignored_members_dependency_edit_with_unchanged_dev_engines() {
+    let r = Repo::new();
+    r.write(".gitignore", "apps/generated/\n");
+    let mut lock = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+    let mut member = json!({"devEngines":{"packageManager":{"name":"pnpm","version":"10.34.9"}}});
+    for spec in ["link:../original", "link:../edited"] {
+        member["dependencies"]["local"] = json!(spec);
+        lock["importers"]["apps/generated"]["dependencies"]["local"] =
+            json!({"specifier":spec,"version":spec});
+        r.write("apps/generated/package.json", &member.to_string());
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        if spec == "link:../original" {
+            r.commit("record generated importer");
+        }
+    }
+    let output = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(output.status.success(), "{}", report(&output));
+    assert_eq!(
+        graph(&output.stdout)["importers"]["apps/generated"],
+        lock["importers"]["apps/generated"]
+    );
 }
 
 #[test]
@@ -2167,6 +2199,73 @@ fn workspace_commands_preserve_an_ignored_optional_dependency_even_when_another_
         let check = r.cmd(CLI, &["validate", "--workspace"]);
         if !check.status.success() {
             failures.push(format!("{args:?}: {}", report(&check)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn writing_mixed_optional_exclusions_preserves_the_installers_choices() {
+    let r = Repo::new();
+    let settings = json!({"packages":[],"ignoredOptionalDependencies":["*","!keep"]});
+    let mut failures = Vec::new();
+    for (version, recorded, filters_on_install, frozen) in [
+        ("10.34.9", json!(["!keep", "*"]), true, 0),
+        ("11.21.0", json!(["!keep", "*"]), true, 1),
+        ("12.4.0", json!(["*", "!keep"]), false, 1),
+        ("12.4.1", json!(["*", "!keep"]), true, 0),
+    ] {
+        let manifest = json!({"packageManager":format!("pnpm@{version}"),
+            "optionalDependencies":{"keep":"1.0.0","dev":"2.0.0"},"devDependencies":{"dev":"1.0.0"}});
+        let pin = json!({"specifier":"1.0.0","version":"1.0.0"});
+        let (importer, dev_key, dev_snapshot) = if filters_on_install {
+            (
+                json!({"optionalDependencies":{"keep":pin},"devDependencies":{"dev":pin}}),
+                "dev@1.0.0",
+                json!({}),
+            )
+        } else {
+            (
+                json!({"optionalDependencies":{"keep":pin,"dev":{"specifier":"2.0.0","version":"2.0.0"}}}),
+                "dev@2.0.0",
+                json!({"optional":true}),
+            )
+        };
+        let lock = json!({"lockfileVersion":"9.0","ignoredOptionalDependencies":recorded,
+            "importers":{".": importer},"packages":{"keep@1.0.0":{"resolution":{}},dev_key:{"resolution":{}}},
+            "snapshots":{"keep@1.0.0":{"optional":true},dev_key:dev_snapshot}});
+        r.write("package.json", &manifest.to_string());
+        r.write("pnpm-workspace.yaml", &settings.to_string());
+        r.write("pnpm-lock.yaml", &lock.to_string());
+        r.write(
+            "context.json",
+            &json!({"target":"ours","manifests":{".":manifest},"configuration":settings,
+            "configurations":[settings,settings,settings],"patches":{}})
+            .to_string(),
+        );
+        r.commit("record the installed graph");
+        check_workspace(r.0.path(), frozen, version);
+        for args in [
+            &["converge", "HEAD"][..],
+            &["repair", "HEAD"],
+            &[
+                "merge",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "--context",
+                "context.json",
+            ],
+        ] {
+            let out = r.cmd(CLI, args);
+            if !out.status.success() {
+                failures.push(format!("{version} {args:?}: {}", report(&out)));
+            } else if graph(&out.stdout)["importers"]["."] != importer {
+                failures.push(format!(
+                    "{version} {args:?}: {}",
+                    graph(&out.stdout)["importers"]["."]
+                ));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

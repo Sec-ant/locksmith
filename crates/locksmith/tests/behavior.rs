@@ -119,6 +119,24 @@ fn plain_merge_combines_ordered_rule_insertions_and_reports_incompatible_reorder
         .collect();
     assert_eq!(keys, ["lib@1", "first", "lib@2", "second", "lib@3"]);
 
+    let reordered = rules(&["lib@2", "lib@1", "lib@3"]);
+    let inserted = rules(&["prefix", "lib@1", "lib@2", "lib@3", "suffix"]);
+    for (left, right) in [(&reordered, &inserted), (&inserted, &reordered)] {
+        let merged = merge(&base, left, right, None).unwrap();
+        let output = Lockfile::parse(&merged.to_yaml().unwrap()).unwrap();
+        let keys: Vec<_> = output.project().unwrap()["overrides"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, ["prefix", "lib@2", "lib@1", "lib@3", "suffix"]);
+    }
+
+    // This insertion needs lib@1 before lib@2. The reorder reverses its anchors.
+    let between = rules(&["lib@1", "between", "lib@2", "lib@3"]);
+    let issues = conflicts(merge(&base, &reordered, &between, None).unwrap_err());
+    assert_eq!(issues[0].path, ["overrides"]);
+
     let ours = rules(&["lib@2", "lib@1", "lib@3"]);
     let theirs = rules(&["lib@1", "lib@3", "lib@2"]);
     let issues = conflicts(merge(&base, &ours, &theirs, None).unwrap_err());

@@ -177,21 +177,14 @@ fn extend_dependencies(
     let (parent_name, parent_version) = package_key.rsplit_once('@').expect("package identity");
     let parent = json!({"name":parent_name,"version":parent_version});
     let package = &sources.inputs[side].document["packages"][package_key];
+    let ignores_optional = sources.final_rules.optional_exclusion()?;
     for addition in additions {
         let crate::config::ExtensionAddition {
             group,
             name,
             specifier,
         } = *addition;
-        if group == "optionalDependencies"
-            && sources
-                .configuration
-                .resolution
-                .ignored_optional_dependencies
-                .as_ref()
-                .and_then(Value::as_array)
-                .is_some_and(|names| names.iter().any(|n| n == name))
-        {
+        if group == "optionalDependencies" && ignores_optional(name) {
             continue;
         }
         let Some(desired) = sources.final_rules.apply(&parent, ".", name, specifier)? else {
@@ -372,6 +365,7 @@ pub(super) fn repair_snapshot(
     let mut changed = extended.clone();
     let mut removed = BTreeSet::new();
     let overrides = &sources.unqualified_rules;
+    let ignores_optional = sources.final_rules.optional_exclusion()?;
     for group in ["dependencies", "optionalDependencies"] {
         for (name, value) in graph::section(body, group).into_iter().flatten() {
             if extended.contains(name) {
@@ -464,13 +458,7 @@ pub(super) fn repair_snapshot(
                                 && body
                                     .get("optionalDependencies")
                                     .is_some_and(|deps| deps.get(name).is_some()))
-                            || sources
-                                .configuration
-                                .resolution
-                                .ignored_optional_dependencies
-                                .as_ref()
-                                .and_then(Value::as_array)
-                                .is_some_and(|names| names.iter().any(|value| value == name))
+                            || ignores_optional(name)
                         {
                             return None;
                         }

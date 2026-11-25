@@ -7,6 +7,151 @@ use std::process::Command;
 
 #[test]
 #[ignore = "requires PNPM_BIN and registry access"]
+fn mixed_optional_rules_follow_native_resolution_and_frozen_validation() {
+    use locksmith::{MergeContext, MergeTarget, RepairContext, merge, repair};
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    let raw = json!({"packages":[],"ignoredOptionalDependencies":["*","!is-number"]});
+    let config = cfg(&raw);
+    let manifest = json!({"name":"test-root","private":true,"pnpm":raw,
+        "dependencies":{"yocto-queue":"0.1.0"},"devDependencies":{"is-buffer":"2.0.5"},
+        "optionalDependencies":{"is-number":"7.0.0","is-buffer":"1.1.6"}});
+    let prepare = |name: &str| {
+        let dir = root.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+        fs::write(dir.join("pnpm-workspace.yaml"), raw.to_string()).unwrap();
+        dir
+    };
+    let fresh = prepare("fresh");
+    let frozen = prepare("frozen");
+    install(&fresh, &store, false);
+    let text = fs::read_to_string(fresh.join("pnpm-lock.yaml")).unwrap();
+    fs::write(frozen.join("pnpm-lock.yaml"), &text).unwrap();
+    let native = super::run_install(&frozen, &store, true);
+    if !native.status.success() {
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&native.stdout),
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert!(diagnostic.contains("OUTDATED_LOCKFILE"), "{diagnostic}");
+    }
+    let lock = Lockfile::parse(&text).unwrap();
+    let manifests = BTreeMap::from([(".".into(), manifest)]);
+    let patches = BTreeMap::new();
+    let validation =
+        lock.validate_workspace(&manifests, &Default::default(), &config, &patches, |_| {
+            Ok(None)
+        });
+    assert_eq!(
+        validation.is_ok(),
+        native.status.success(),
+        "{validation:?}"
+    );
+    let context = MergeContext {
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configuration: &config,
+        configurations: [&config; 3],
+        patches: &patches,
+        registry: None,
+    };
+    let merged = merge(&lock, &lock, &lock, Some(&context)).unwrap();
+    let repaired = repair(
+        &text,
+        &RepairContext {
+            manifests: &manifests,
+            configuration: &config,
+            patches: &patches,
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    for result in [merged, repaired] {
+        for section in ["ignoredOptionalDependencies", "importers", "snapshots"] {
+            assert_eq!(
+                result.project().unwrap()[section],
+                lock.project().unwrap()[section],
+                "{section}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn optional_extension_exclusions_match_a_clean_install_in_merge_and_repair() {
+    use locksmith::{MergeContext, MergeTarget, RepairContext, merge, repair};
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    let before = json!({"packages":[],"ignoredOptionalDependencies":["is-buf*"]});
+    let mut after = before.clone();
+    after["packageExtensions"] =
+        json!({"is-number@7":{"optionalDependencies":{"is-buffer":"2.0.5"}}});
+    let old = cfg(&before);
+    let final_config = cfg(&after);
+    let prepare = |name: &str, parent: bool, settings: &Value| {
+        let dir = root.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        let mut manifest =
+            json!({"private":true,"pnpm":settings,"dependencies":{"is-buffer":"2.0.5"}});
+        if parent {
+            manifest["dependencies"]["is-number"] = json!("7.0.0");
+        }
+        fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+        fs::write(dir.join("pnpm-workspace.yaml"), settings.to_string()).unwrap();
+        install(&dir, &store, false);
+        let text = fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+        (manifest, Lockfile::parse(&text).unwrap())
+    };
+    let (_, base) = prepare("base", false, &before);
+    let (_, ours) = prepare("ours", true, &before);
+    let (_, theirs) = prepare("theirs", false, &after);
+    let (manifest, native) = prepare("native", true, &after);
+    let manifests = BTreeMap::from([(".".into(), manifest)]);
+    let patches = BTreeMap::new();
+    let ctx = MergeContext {
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configuration: &final_config,
+        configurations: [&old, &old, &final_config],
+        patches: &patches,
+        registry: None,
+    };
+    let merged = merge(&base, &ours, &theirs, Some(&ctx)).unwrap();
+    let expected = native.project().unwrap();
+    let mut damaged = expected.clone();
+    damaged["snapshots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("is-number@7.0.0");
+    let repaired = repair(
+        &damaged.to_string(),
+        &RepairContext {
+            manifests: &manifests,
+            configuration: &final_config,
+            parents: &[(&ours, &old)],
+            patches: &patches,
+            registry: None,
+        },
+    )
+    .unwrap();
+    for result in [&merged, &repaired] {
+        assert_eq!(
+            result.project().unwrap()["snapshots"],
+            expected["snapshots"]
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
 fn changed_peer_overrides_match_fresh_resolution() {
     use locksmith::{MergeContext, MergeTarget, merge};
     use std::collections::BTreeMap;

@@ -63,8 +63,7 @@ fn assert_success(output: Output) {
     );
 }
 
-fn install(directory: &Path, store: &Path, frozen: bool) {
-    let before = frozen.then(|| fs::read(directory.join("pnpm-lock.yaml")).unwrap());
+fn run_install(directory: &Path, store: &Path, frozen: bool) -> Output {
     let mut command =
         Command::new(env::var_os("PNPM_BIN").expect("set PNPM_BIN to the executable to test"));
     command
@@ -84,7 +83,12 @@ fn install(directory: &Path, store: &Path, frozen: bool) {
     } else {
         command.arg("--no-frozen-lockfile");
     }
-    assert_success(command.output().unwrap());
+    command.output().unwrap()
+}
+
+fn install(directory: &Path, store: &Path, frozen: bool) {
+    let before = frozen.then(|| fs::read(directory.join("pnpm-lock.yaml")).unwrap());
+    assert_success(run_install(directory, store, frozen));
     if let Some(before) = before {
         assert!(
             fs::read(directory.join("pnpm-lock.yaml")).unwrap() == before,

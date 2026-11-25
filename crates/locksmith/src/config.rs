@@ -229,6 +229,28 @@ impl WorkspaceConfig {
         settings
     }
 
+    pub(crate) fn matches_optional_header_for_repair(
+        &self,
+        document: &Value,
+    ) -> Result<bool, LockfileError> {
+        let recorded = optional_patterns(document.get("ignoredOptionalDependencies"), true)?;
+        let rules = self.resolution.ignored_optional_dependencies.as_ref();
+        let mut configured = optional_patterns(rules, true)?;
+        if recorded == configured {
+            return Ok(true);
+        }
+        // pnpm 9–11 also write sorted headers for mixed positive and negative rules.
+        if self
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| (9..=11).contains(&v.major()))
+        {
+            configured.sort_unstable();
+            return Ok(recorded == configured);
+        }
+        Ok(false)
+    }
+
     pub(crate) fn matches_catalog_ranges(&self) -> bool {
         self.since((11, 28, 12), (12, 20, 0))
     }
@@ -354,15 +376,11 @@ impl ResolutionSettings {
     pub(crate) fn ignored_optional_dependencies_match(
         &self,
         document: &Value,
-        preserve_mixed_order: bool,
     ) -> Result<bool, LockfileError> {
-        Ok(optional_patterns(
-            document.get("ignoredOptionalDependencies"),
-            preserve_mixed_order,
-        )? == optional_patterns(
-            self.ignored_optional_dependencies.as_ref(),
-            preserve_mixed_order,
-        )?)
+        Ok(
+            optional_patterns(document.get("ignoredOptionalDependencies"), false)?
+                == optional_patterns(self.ignored_optional_dependencies.as_ref(), false)?,
+        )
     }
 }
 

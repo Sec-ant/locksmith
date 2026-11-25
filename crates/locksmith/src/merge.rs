@@ -294,41 +294,96 @@ impl Context<'_> {
     }
 }
 
-// Combine independent insertions around shared keys, preserving the order each
-// branch authored. A single reordered branch also owns the order when the other
-// branch only edited values. Incompatible order edits require a decision.
+// Merge precedence among surviving base rules separately from insertions.
+// A deletion still participates in the value merge so delete/modify conflicts surface.
 fn override_keys(
     base: Option<&Map<String, Value>>,
     ours: &Map<String, Value>,
     theirs: &Map<String, Value>,
 ) -> Option<Vec<String>> {
-    if let Some(base) = base {
-        for (unchanged, edited) in [(ours, theirs), (theirs, ours)] {
-            if unchanged.keys().eq(base.keys()) {
-                return Some(
-                    edited
-                        .keys()
-                        .chain(unchanged.keys().filter(|k| !edited.contains_key(*k)))
-                        .cloned()
-                        .collect(),
-                );
+    if ours.keys().eq(theirs.keys()) {
+        return Some(ours.keys().cloned().collect());
+    }
+    let mut names = Vec::new();
+    let mut indices = std::collections::HashMap::new();
+    let parents = [ours, theirs].map(|map| {
+        map.keys()
+            .map(|key| {
+                *indices.entry(key.as_str()).or_insert_with(|| {
+                    names.push(key);
+                    names.len() - 1
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let surviving = |key: &&String| ours.contains_key(*key) && theirs.contains_key(*key);
+    let original: Vec<_> = base
+        .into_iter()
+        .flat_map(Map::keys)
+        .filter(surviving)
+        .map(|key| indices[key.as_str()])
+        .collect();
+    let anchors: BTreeSet<_> = original.iter().copied().collect();
+    let [left, right] = parents.each_ref().map(|keys| {
+        keys.iter()
+            .copied()
+            .filter(|k| anchors.contains(k))
+            .collect::<Vec<_>>()
+    });
+    let order = if left == right || right == original {
+        &left
+    } else if left == original {
+        &right
+    } else {
+        return None;
+    };
+
+    // Each inserted run keeps its neighbors. Leading and trailing runs stay
+    // at their respective ends when the other parent reorders existing rules.
+    let mut successors = vec![BTreeSet::new(); names.len()];
+    let mut incoming = vec![0; names.len()];
+    let mut precedes = |a: usize, b: usize| {
+        if successors[a].insert(b) {
+            incoming[b] += 1;
+        }
+    };
+    for pair in order.windows(2) {
+        precedes(pair[0], pair[1]);
+    }
+    for mut keys in parents {
+        keys.retain(|k| anchors.contains(k) || base.is_none_or(|m| !m.contains_key(names[*k])));
+        for pair in keys.windows(2) {
+            if !anchors.contains(&pair[0]) || !anchors.contains(&pair[1]) {
+                precedes(pair[0], pair[1]);
+            }
+        }
+        if let Some((&first, &last)) = order.first().zip(order.last()) {
+            if let Some(&prefix) = keys.iter().take_while(|k| !anchors.contains(k)).last() {
+                precedes(prefix, first);
+            }
+            if let Some(&suffix) = keys
+                .iter()
+                .rev()
+                .take_while(|k| !anchors.contains(k))
+                .last()
+            {
+                precedes(last, suffix);
             }
         }
     }
-    let mut left = ours.keys().peekable();
-    let mut right = theirs.keys().peekable();
-    let mut keys = Vec::new();
-    while left.peek().is_some() || right.peek().is_some() {
-        if left.peek().is_some_and(|k| !theirs.contains_key(*k)) {
-            keys.push(left.next()?.clone());
-        } else if right.peek().is_some_and(|k| !ours.contains_key(*k)) {
-            keys.push(right.next()?.clone());
-        } else if left.peek() == right.peek() {
-            keys.push(left.next()?.clone());
-            right.next();
-        } else {
-            return None;
+
+    // Indices break unconstrained ties in parent order. A cycle means the
+    // insertions and the chosen precedence cannot both be honored.
+    let mut ready: BTreeSet<_> = (0..names.len()).filter(|&i| incoming[i] == 0).collect();
+    let mut result = Vec::with_capacity(names.len());
+    while let Some(i) = ready.pop_first() {
+        result.push(names[i].clone());
+        for &next in &successors[i] {
+            incoming[next] -= 1;
+            if incoming[next] == 0 {
+                ready.insert(next);
+            }
         }
     }
-    Some(keys)
+    (result.len() == names.len()).then_some(result)
 }

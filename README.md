@@ -85,7 +85,7 @@ pnpm locksmith converge origin/main > converged.yaml
 git diff --no-index pnpm-lock.yaml converged.yaml
 ```
 
-The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its recorded dependency specifiers. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
 
@@ -109,6 +109,8 @@ Use `locksmith validate --workspace [FILE]` to also check that workspace members
 When the workspace omits `packages` and the pnpm version is unknown, Locksmith selects only the root package. Projects using the recursive default of pnpm before 10.5 can declare their pnpm version in `packageManager`.
 
 In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also checks package availability and integrity.
+
+Mixed `ignoredOptionalDependencies` rules can expose a difference between fresh and frozen installs. For example, pnpm 11.21 and later on the 11.x line keeps `is-number` on a fresh install with `["*", "!is-number"]`, then rejects that lock on a frozen install. Locksmith's writing commands preserve the fresh resolution. `validate --workspace` follows the frozen check for the workspace's pnpm version.
 
 ## Inspect peer bindings and package instances
 

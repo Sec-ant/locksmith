@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Preserve the declared precedence of pnpm overrides in three-way merges and report incompatible reorderings.
+Preserve override precedence when one branch reorders rules and the other inserts rules. Report incompatible orderings during three-way merges.

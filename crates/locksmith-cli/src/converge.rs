@@ -217,7 +217,7 @@ fn include_generated_members(
                 Some(current) if installed.and_then(|map| map.get(id)) == Some(record) => {
                     current.clone()
                 }
-                _ => locked_manifest(id, record)?,
+                current => locked_manifest(id, record, current)?,
             };
             before.insert(id.clone(), old);
         }
@@ -225,8 +225,24 @@ fn include_generated_members(
     Ok(())
 }
 
-fn locked_manifest(id: &str, record: &Value) -> Result<Value> {
+fn locked_manifest(id: &str, record: &Value, current: Option<&Value>) -> Result<Value> {
     let mut manifest = serde_json::json!({});
+    // Git has no earlier copy of these settings. Compare the declarations the
+    // lock records without treating missing history as a settings edit.
+    for field in ["devEngines", "pnpm"] {
+        if let Some(value) = current.and_then(|m| m.get(field)) {
+            manifest[field] = value.clone();
+        }
+    }
+    if let Some(meta) = record.get("dependenciesMeta") {
+        manifest["dependenciesMeta"] = meta.clone();
+    }
+    if let Some(directory) = record.get("publishDirectory") {
+        manifest["publishConfig"]["directory"] = directory.clone();
+        if let Some(link) = record.get("linkDirectory") {
+            manifest["publishConfig"]["linkDirectory"] = link.clone();
+        }
+    }
     for group in ["dependencies", "devDependencies", "optionalDependencies"] {
         if let Some(entries) = record.get(group) {
             for (name, edge) in entries

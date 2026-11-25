@@ -58,7 +58,7 @@ pub(crate) fn declarations<'a>(
     overrides: &Overrides<'a>,
     importer: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
-    let ignored_optional = overrides.ignored_optional_patterns()?;
+    let ignores_optional = overrides.optional_exclusion()?;
     // pnpm 12 checks optional exclusions after peers have entered the production group.
     let exclude_peer = overrides
         .config
@@ -73,7 +73,11 @@ pub(crate) fn declarations<'a>(
         ("peerDependencies", "dependencies"),
         ("optionalDependencies", "optionalDependencies"),
     ] {
-        let filter_optional = !ignored_optional.is_empty()
+        let filter_optional = overrides
+            .config
+            .resolution
+            .ignored_optional_dependencies
+            .is_some()
             && (matches!(field, "dependencies" | "optionalDependencies")
                 || (exclude_peer && field == "peerDependencies"));
         let engines = match field {
@@ -120,10 +124,7 @@ pub(crate) fn declarations<'a>(
                 .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
             if filter_optional
                 && manifest["optionalDependencies"].get(name).is_some()
-                && crate::config::matches_patterns(
-                    ignored_optional.iter().map(String::as_str),
-                    name,
-                )
+                && ignores_optional(name)
             {
                 continue;
             }
@@ -429,36 +430,66 @@ struct OverrideRule<'a> {
     value: &'a Value,
 }
 
+#[derive(Clone, Copy)]
+enum OptionalRules {
+    Configured,
+    Sorted,
+    Disabled,
+}
+
 /// Index once per manifest so unrelated selectors are not reparsed for each
 /// dependency. Rules for one name retain their declaration order.
 pub(crate) struct Overrides<'a> {
     document: &'a Value,
     by_name: BTreeMap<&'a str, Vec<OverrideRule<'a>>>,
     ignored_optional: std::cell::OnceCell<Vec<String>>,
+    optional_rules: OptionalRules,
     config: &'a WorkspaceConfig,
 }
 
 impl<'a> Overrides<'a> {
-    fn ignored_optional_patterns(&self) -> Result<&[String], LockfileError> {
-        if let Some(rules) = self.ignored_optional.get() {
-            return Ok(rules);
-        }
-        // pnpm 11.21+ sorts mixed exclusions before checking importer declarations.
-        let sorted = self
-            .config
+    pub(crate) fn configuration(&self) -> &WorkspaceConfig {
+        self.config
+    }
+
+    pub(crate) fn optional_exclusion(&self) -> Result<impl Fn(&str) -> bool + '_, LockfileError> {
+        let patterns = match self.ignored_optional.get() {
+            Some(patterns) => patterns,
+            None => {
+                let raw = self
+                    .config
+                    .resolution
+                    .ignored_optional_dependencies
+                    .as_ref();
+                let rules = match self.optional_rules {
+                    OptionalRules::Disabled => Vec::new(),
+                    OptionalRules::Configured => crate::config::optional_patterns(raw, true)?,
+                    OptionalRules::Sorted => crate::config::optional_patterns(raw, false)?,
+                };
+                self.ignored_optional
+                    .get_or_init(|| rules.into_iter().map(str::to_owned).collect())
+            }
+        };
+        Ok(move |name: &str| {
+            crate::config::matches_patterns(patterns.iter().map(String::as_str), name)
+        })
+    }
+
+    pub(crate) fn for_frozen_workspace(document: &'a Value, config: &'a WorkspaceConfig) -> Self {
+        // pnpm 11.21+ on the 11.x line sorts mixed rules during the frozen check.
+        // Fresh resolution uses the configured order, including for snapshot edges.
+        let sorted = config
             .pnpm_version
             .as_ref()
             .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
-        let rules = crate::config::optional_patterns(
-            self.config
-                .resolution
-                .ignored_optional_dependencies
-                .as_ref(),
-            !sorted,
-        )?;
-        Ok(self
-            .ignored_optional
-            .get_or_init(|| rules.into_iter().map(str::to_owned).collect()))
+        Self {
+            optional_rules: if sorted {
+                OptionalRules::Sorted
+            } else {
+                OptionalRules::Configured
+            },
+            ..Self::new(document, config)
+        }
     }
 
     pub(crate) fn relevant(
@@ -494,6 +525,18 @@ impl<'a> Overrides<'a> {
             document,
             by_name,
             ignored_optional: Default::default(),
+            // pnpm's native resolver began applying optional exclusions to fresh
+            // importer and package manifests in 12.4.1. Earlier 12.x frozen
+            // checks already used the configured patterns.
+            optional_rules: if config
+                .pnpm_version
+                .as_ref()
+                .is_some_and(|v| v.major() == 12 && v < &node_semver::Version::from((12, 4, 1)))
+            {
+                OptionalRules::Disabled
+            } else {
+                OptionalRules::Configured
+            },
             config,
         }
     }
