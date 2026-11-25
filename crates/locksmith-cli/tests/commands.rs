@@ -1429,6 +1429,48 @@ fn validate_checks_the_member_selected_by_a_workspace_link() {
 }
 
 #[test]
+fn validate_allows_omitted_implicit_workspace_links_supported_by_pnpm() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("lib")).unwrap();
+    fs::write(
+        root.join("lib/package.json"),
+        r#"{"name":"lib","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    for (pnpm, linking, name, spec, status) in [
+        ("10.33.2", true, "lib", "^1", 1),
+        ("11.28.10", true, "lib", "^1", 1),
+        ("11.28.11", true, "lib", "^1", 0),
+        ("11.28.11", true, "lib", "catalog:", 0),
+        ("12.5.1", true, "lib", "^1", 1),
+        ("12.6.0", true, "alias", "npm:lib@^1", 0),
+        ("12.6.0", true, "lib", "catalog:", 1),
+        ("12.18.0", true, "lib", "catalog:", 0),
+        ("12.18.0", true, "lib", "^2", 1),
+        ("12.18.0", true, "external", "^1", 1),
+        ("12.18.0", true, "lib", "workspace:^1", 1),
+        ("12.18.0", false, "lib", "^1", 1),
+    ] {
+        fs::write(
+            root.join("package.json"),
+            json!({"packageManager":format!("pnpm@{pnpm}"),"dependencies":{name:spec}}).to_string(),
+        )
+        .unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"),format!("packages: [lib]\nexcludeLinksFromLockfile: true\nlinkWorkspacePackages: {linking}\ncatalog: {{lib: '^1'}}\n")).unwrap();
+        let lock = json!({"lockfileVersion":"9.0","settings":{"excludeLinksFromLockfile":true},"importers":{".":{},"lib":{}}});
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(status),
+            "pnpm {pnpm}, {name}@{spec}: {}",
+            report(&result)
+        );
+    }
+}
+
+#[test]
 fn validate_requires_a_local_resolution_for_workspace_dependencies() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

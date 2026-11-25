@@ -180,6 +180,15 @@ impl WorkspaceConfig {
         })
     }
 
+    /// Releases whose frozen check can recover an omitted local pin from the workspace.
+    pub(crate) fn supports_omitted_workspace_link(&self, catalog: bool) -> bool {
+        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
+            11 => v >= &node_semver::Version::from((11, 28, 11)),
+            12 => v >= &node_semver::Version::from((12, if catalog { 18 } else { 6 }, 0)),
+            major => major > 12,
+        })
+    }
+
     pub(crate) fn records_link_directory(&self) -> bool {
         self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
             11 => v >= &node_semver::Version::from((11, 26, 0)),

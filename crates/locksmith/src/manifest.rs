@@ -179,7 +179,7 @@ pub(crate) fn check_with_links(
     let record = record
         .filter(|value| value.is_object())
         .ok_or_else(|| mismatch(importer, side, "missing importer"))?;
-    let expected = declarations(manifest, overrides, importer)?;
+    let mut expected = declarations(manifest, overrides, importer)?;
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {
@@ -250,6 +250,13 @@ pub(crate) fn check_with_links(
                 }
             }
         }
+    }
+    // A matching workspace member can explain an omitted pin. An existing
+    // registry pin for the same range still has to match its declaration.
+    if overrides.config.resolution.lock.exclude_links_from_lockfile
+        && let Some(links) = links
+    {
+        expected.retain(|name, (_, spec)| actual.contains_key(name) || !links.can_omit(name, spec));
     }
     if actual != expected {
         let name = expected

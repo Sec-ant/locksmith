@@ -24,8 +24,8 @@ pub(crate) fn workspace_request<'a>(name: &'a str, request: &'a str) -> (&'a str
         .unwrap_or((name, request))
 }
 
-fn workspace_version_matches(selector: &str, version: Option<&str>) -> bool {
-    if matches!(selector, "" | "*" | "^" | "~") {
+fn local_version_matches(selector: &str, version: Option<&str>) -> bool {
+    if matches!(selector, "" | "*") {
         return true;
     }
     match selector.parse::<node_semver::Range>() {
@@ -135,10 +135,41 @@ impl<'a> WorkspaceLinks<'a> {
                 && self.by_name.get(package).into_iter().flatten().any(|&id| {
                     let member = &self.manifests[id];
                     link_directory(id, member) == target
-                        && workspace_version_matches(range, member["version"].as_str())
+                        && (matches!(range, "^" | "~")
+                            || local_version_matches(range, member["version"].as_str()))
                 })
         };
         if fits { Ok(()) } else { Err(mismatch()) }
+    }
+
+    fn links_workspace_packages(&self) -> bool {
+        self.config
+            .resolution
+            .parameters
+            .get("linkWorkspacePackages")
+            .is_some_and(|v| v == true || v == "deep")
+    }
+
+    pub(crate) fn can_omit(&self, name: &str, specifier: &str) -> bool {
+        if !self.links_workspace_packages()
+            || !self
+                .config
+                .supports_omitted_workspace_link(specifier.starts_with("catalog:"))
+        {
+            return false;
+        }
+        let Ok(specifier) = self.catalog_specifier(name, specifier) else {
+            return false;
+        };
+        if specifier.starts_with("workspace:") {
+            return false;
+        }
+        let (package, selector) = manifest::alias(specifier).unwrap_or((name, specifier));
+        self.by_name
+            .get(package)
+            .into_iter()
+            .flatten()
+            .any(|&id| local_version_matches(selector, self.manifests[id]["version"].as_str()))
     }
 
     pub(crate) fn resolve(
@@ -151,15 +182,7 @@ impl<'a> WorkspaceLinks<'a> {
         let specifier = self.catalog_specifier(name, specifier)?;
         let workspace = specifier.strip_prefix("workspace:").map(str::trim);
         let explicit_link = specifier.strip_prefix("link:");
-        let link_local = self
-            .config
-            .resolution
-            .parameters
-            .get("linkWorkspacePackages");
-        if workspace.is_none()
-            && explicit_link.is_none()
-            && !link_local.is_some_and(|v| v == true || v == "deep")
-        {
+        if workspace.is_none() && explicit_link.is_none() && !self.links_workspace_packages() {
             return Ok(None);
         }
         if injected(name, manifest, self.config) && explicit_link.is_none() {
