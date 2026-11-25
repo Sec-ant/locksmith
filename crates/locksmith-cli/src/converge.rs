@@ -35,7 +35,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let prefix = prefix.trim_end_matches('\n');
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix)?;
-    let working = Project::from_files(working_file)?;
+    let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_manifest(&working.root);
     let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;
     let config = policy.configuration(&working.config)?;

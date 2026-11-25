@@ -124,6 +124,7 @@ impl Lockfile {
         let recorded = crate::LockSettings::from_document(document);
         let configured = &config.resolution.lock;
         if recorded.auto_install_peers != configured.auto_install_peers
+            || recorded.dedupe_peers != configured.dedupe_peers
             || recorded.exclude_links_from_lockfile != configured.exclude_links_from_lockfile
         {
             return Err(crate::manifest::mismatch(
@@ -134,7 +135,18 @@ impl Lockfile {
         }
         let effective =
             crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
-        if effective.as_ref() != crate::manifest::rule_map(document, "overrides") {
+        let recorded_overrides = crate::manifest::rule_map(document, "overrides");
+        if effective.as_ref() != recorded_overrides
+            || effective
+                .as_ref()
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .ne(recorded_overrides
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten())
+        {
             return Err(crate::manifest::mismatch(
                 ".",
                 "workspace",

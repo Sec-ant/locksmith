@@ -78,15 +78,19 @@ pub struct Project {
     pub root: Value,
     pub config: Value,
     pub workspace: bool,
+    pub pnpm_version: Option<node_semver::Version>,
 }
 impl Project {
     pub fn read(blobs: &mut Blobs, tree: &str, prefix: &str) -> Result<Self> {
-        Self::from_files(|path| blobs.read(tree, &format!("{prefix}{path}")))
+        Self::from_files(None, |path| blobs.read(tree, &format!("{prefix}{path}")))
     }
 
-    pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
+    pub fn from_files(
+        recorded_version: Option<node_semver::Version>,
+        mut read: impl FnMut(&str) -> Result<Option<String>>,
+    ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-        let version = pnpm_version(&root);
+        let version = pnpm_version(&root).or(recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
@@ -111,6 +115,7 @@ impl Project {
             root,
             config,
             workspace,
+            pnpm_version: version,
         })
     }
 }

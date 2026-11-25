@@ -1321,6 +1321,107 @@ snapshots:
 }
 
 #[test]
+fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    fs::write(
+        root.join(".npmrc"),
+        "auto-install-peers=false\nignore-pnpmfile=true\n",
+    )
+    .unwrap();
+    let version = "11.28.12";
+    let environment = json!({
+        "lockfileVersion": "9.0",
+        "importers": {".": {"packageManagerDependencies": {"pnpm": {"specifier": version, "version": version}}}},
+        "packages": {format!("pnpm@{version}"): {"resolution": {}}},
+        "snapshots": {format!("pnpm@{version}"): {}}
+    });
+    let project = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
+    fs::write(
+        root.join("pnpm-lock.yaml"),
+        format!("---\n{environment}\n---\n{project}\n"),
+    )
+    .unwrap();
+    let result = validate_workspace_in(root);
+    assert!(result.status.success(), "{}", report(&result));
+
+    fs::write(root.join(".pnpmfile.mjs"), "export const hooks = {}\n").unwrap();
+    let result = validate_workspace_in(root);
+    assert_eq!(result.status.code(), Some(2), "{}", report(&result));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("effective manifests"));
+}
+
+#[test]
+fn validate_rejects_a_dedupe_peers_setting_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages: []\ndedupePeers: true\n",
+    )
+    .unwrap();
+    for (settings, status) in [
+        ("", 1),
+        ("settings: {dedupePeers: false}\n", 1),
+        ("settings: {dedupePeers: true}\n", 0),
+    ] {
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            format!("lockfileVersion: '9.0'\n{settings}importers: {{.: {{}}}}\n"),
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(status),
+            "{settings}: {}",
+            report(&result)
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_reordered_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    let rules = [
+        "  'foo@^1.0.0': '2.0.0'\n",
+        "  'foo@>=1.0.0 <2.0.0': '3.0.0'\n",
+    ];
+    fs::write(
+        root.join("pnpm-lock.yaml"),
+        format!(
+            "lockfileVersion: '9.0'\nimporters: {{.: {{}}}}\noverrides:\n{}{}",
+            rules[0], rules[1]
+        ),
+    )
+    .unwrap();
+    for (first, second, status) in [(rules[0], rules[1], 0), (rules[1], rules[0], 1)] {
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            format!("packages: []\noverrides:\n{first}{second}"),
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(result.status.code(), Some(status), "{}", report(&result));
+        if status == 1 {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("overrides differ"));
+        }
+    }
+}
+
+fn validate_workspace_in(root: &Path) -> Output {
+    Command::new(CLI)
+        .current_dir(root)
+        .args(["validate", "--workspace"])
+        .output()
+        .unwrap()
+}
+
+#[test]
 fn inspect_reads_the_lockfiles_own_workspace_without_git_or_writes() {
     let sandbox = tempfile::tempdir().unwrap();
     let dir = sandbox.path().join("nested");

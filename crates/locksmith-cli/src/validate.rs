@@ -26,7 +26,7 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
             Err(e) => Err(format!("{}: {e}", path.display()).into()),
         }
     };
-    let project = Project::from_files(read)?;
+    let project = Project::from_files(lock.recorded_pnpm_version(), read)?;
     if project.config.get("pnpmfileChecksum").is_some()
         || lock
             .project()
@@ -35,9 +35,8 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let version = workspace::pnpm_version(&project.root).or_else(|| lock.recorded_pnpm_version());
-    let config = match version {
-        Some(version) => locksmith::WorkspaceConfig::from_pnpm_version(&project.config, &version)?,
+    let config = match &project.pnpm_version {
+        Some(version) => locksmith::WorkspaceConfig::from_pnpm_version(&project.config, version)?,
         None => locksmith::WorkspaceConfig::from_pnpm(&project.config)?,
     };
     let mut manifests = BTreeMap::new();
