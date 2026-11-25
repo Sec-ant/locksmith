@@ -111,51 +111,66 @@ pub fn resolve(
     root: &Value,
     mut solve: impl FnMut(
         Option<&RegistryMetadata>,
-    ) -> std::result::Result<locksmith::Lockfile, locksmith::LockfileError>,
+    )
+        -> std::result::Result<locksmith::Lockfile, Vec<locksmith::LockfileError>>,
 ) -> Result<locksmith::Lockfile> {
     let Some(project) = network else {
-        return Ok(solve(None)?);
+        return Ok(
+            solve(None).map_err(|errors| errors.into_iter().next().expect("resolution error"))?
+        );
     };
     let mut data = RegistryMetadata::default();
     let mut registry = None;
     let mut supplied = BTreeSet::new();
     loop {
-        match solve(Some(&data)) {
-            Err(locksmith::LockfileError::ResolutionRequired {
+        let errors = match solve(Some(&data)) {
+            Ok(lock) => return Ok(lock),
+            Err(errors) => errors,
+        };
+        let mut batch = BTreeSet::new();
+        for error in errors {
+            let locksmith::LockfileError::ResolutionRequired {
                 request: Some(ref request),
                 ref path,
                 ..
-            }) if supplied.insert(request.clone()) => {
-                let fetched = (|| {
-                    let client = match &mut registry {
-                        Some(client) => client,
-                        None => registry.insert(Registry::new(config, root, project)?),
-                    };
-                    client.satisfy(
-                        request,
-                        &mut data,
-                        path.first().is_some_and(|s| s == "importers"),
-                    )
-                })();
-                if let Err(error) = fetched {
-                    if purpose == Lookup::Converge
-                        && let RegistryRequest::Manifest { name, version } = request.as_ref()
-                    {
-                        data.skip_manifest(name, version);
-                        eprintln!(
-                            "locksmith: keeping installed dependency pins for {name}@{version}: {error}"
-                        );
-                    } else {
-                        return Err(locksmith::LockfileError::ResolutionRequired {
-                            path: path.clone(),
-                            message: error.to_string(),
-                            request: Some(request.clone()),
-                        }
-                        .into());
+            } = error
+            else {
+                return Err(error.into());
+            };
+            if !batch.insert(request.clone()) {
+                continue;
+            }
+            if !supplied.insert(request.clone()) {
+                return Err(error.into());
+            }
+            let fetched = (|| {
+                let client = match &mut registry {
+                    Some(client) => client,
+                    None => registry.insert(Registry::new(config, root, project)?),
+                };
+                client.satisfy(
+                    request,
+                    &mut data,
+                    path.first().is_some_and(|s| s == "importers"),
+                )
+            })();
+            if let Err(error) = fetched {
+                if purpose == Lookup::Converge
+                    && let RegistryRequest::Manifest { name, version } = request.as_ref()
+                {
+                    data.skip_manifest(name, version);
+                    eprintln!(
+                        "locksmith: keeping installed dependency pins for {name}@{version}: {error}"
+                    );
+                } else {
+                    return Err(locksmith::LockfileError::ResolutionRequired {
+                        path: path.clone(),
+                        message: error.to_string(),
+                        request: Some(request.clone()),
                     }
+                    .into());
                 }
             }
-            other => return Ok(other?),
         }
     }
 }

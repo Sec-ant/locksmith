@@ -75,9 +75,11 @@ pub fn with_context<P: AsRef<Path>>(
                 ..*context
             };
             match &parsed {
-                Ok([b, o, t]) => locksmith::merge(b, o, t, Some(&context)),
+                Ok(locks) if registry.is_some() => context.merge_with_requests(locks.each_ref()),
+                Ok([b, o, t]) => locksmith::merge(b, o, t, Some(&context)).map_err(|e| vec![e]),
                 Err([b, o, t]) => {
                     locksmith::merge(b.as_str(), o.as_str(), t.as_str(), Some(&context))
+                        .map_err(|e| vec![e])
                 }
             }
         },

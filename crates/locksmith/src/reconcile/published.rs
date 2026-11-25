@@ -329,6 +329,7 @@ pub(crate) fn records(
     metadata: &Value,
     docs: [&Value; 3],
     order: [usize; 3],
+    additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Value, LockfileError> {
     let Some(registry) = context.registry.filter(|r| !r.selections.is_empty()) else {
         return Ok(Value::Null);
@@ -391,6 +392,7 @@ pub(crate) fn records(
     if let Some(patches) = metadata.get("patchedDependencies") {
         output["patchedDependencies"] = patches.clone();
     }
+    let mut missing_requests = super::MissingRequests::new(additional);
     for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
@@ -458,15 +460,16 @@ pub(crate) fn records(
             {
                 continue;
             }
-            let value = value.ok_or_else(|| {
-                need_version(
+            let Some(value) = value else {
+                missing_requests.record(need_version(
                     &["snapshots", key, name],
                     name,
                     spec,
                     config,
                     format!("no locked resolution satisfies {spec}"),
-                )
-            })?;
+                ))?;
+                continue;
+            };
             body[field][name] = value.into();
         }
         let hash = desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
@@ -475,6 +478,7 @@ pub(crate) fn records(
         output["packages"][key] = package;
         output["snapshots"][instance] = body;
     }
+    missing_requests.finish()?;
     Ok(output)
 }
 

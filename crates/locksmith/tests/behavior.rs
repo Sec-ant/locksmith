@@ -823,3 +823,20 @@ fn contextual_output_renders_unsorted_importers_and_expanded_resolutions_in_pnpm
     assert!(out.contains("    resolution: {integrity: sha512-z}\n"));
     assert!(out.find("      a:\n").unwrap() < out.find("      z:\n").unwrap());
 }
+
+#[test]
+fn each_snapshot_must_use_the_patch_for_its_own_release() {
+    let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{}},
+        "patchedDependencies":{"pkg@^1":"one","pkg@2.0.0":"two"},
+        "packages":{"pkg@1.0.0":{"resolution":{}},"pkg@2.0.0":{"resolution":{}}},
+        "snapshots":{"pkg@1.0.0(patch_hash=one)":{},"pkg@2.0.0(patch_hash=two)":{}}});
+    lock(doc.clone()).validate().unwrap();
+    for wrong in [
+        "pkg@1.0.0(patch_hash=two)",
+        "pkg@2.0.0(patch_hash=one)",
+        "pkg@2.0.0",
+    ] {
+        doc["snapshots"] = json!({wrong:{}});
+        assert!(lock(doc.clone()).validate().is_err(), "{wrong}");
+    }
+}

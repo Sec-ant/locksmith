@@ -79,21 +79,32 @@ impl Default for LockSettings {
     }
 }
 impl LockSettings {
-    pub(crate) fn from_document(document: &Value) -> Self {
-        Self {
-            auto_install_peers: document["settings"]["autoInstallPeers"]
-                .as_bool()
-                .unwrap_or(true),
-            dedupe_peers: document["settings"]["dedupePeers"]
-                .as_bool()
-                .unwrap_or(false),
-            project_scoped_optional_peers: document["settings"]["projectScopedOptionalPeers"]
-                .as_bool()
-                .unwrap_or(false),
-            exclude_links_from_lockfile: document["settings"]["excludeLinksFromLockfile"]
-                .as_bool()
-                .unwrap_or(false),
-        }
+    pub(crate) fn from_document(
+        document: &Value,
+        version: Option<&node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let Some(settings) = document.get("settings") else {
+            return Ok(Self::default());
+        };
+        let settings = settings
+            .as_object()
+            .ok_or_else(|| LockfileError::InvalidDocument("settings must be a mapping".into()))?;
+        let quoted = version.is_none_or(|v| v.major() >= 12);
+        let boolean = |name: &str, default| match settings.get(name) {
+            None => Ok(default),
+            Some(Value::Bool(value)) => Ok(*value),
+            Some(Value::String(value)) if quoted && value == "true" => Ok(true),
+            Some(Value::String(value)) if quoted && value == "false" => Ok(false),
+            Some(_) => Err(LockfileError::InvalidDocument(format!(
+                "settings/{name} must be a boolean"
+            ))),
+        };
+        Ok(Self {
+            auto_install_peers: boolean("autoInstallPeers", true)?,
+            dedupe_peers: boolean("dedupePeers", false)?,
+            project_scoped_optional_peers: boolean("projectScopedOptionalPeers", false)?,
+            exclude_links_from_lockfile: boolean("excludeLinksFromLockfile", false)?,
+        })
     }
 }
 
@@ -145,6 +156,8 @@ pub struct WorkspaceConfig {
     pub auto_dedupe: bool,
     /// Settings used to interpret importers, snapshots and source compatibility.
     pub resolution: ResolutionSettings,
+    /// Configuration dependencies installed from pnpm's bootstrap lock document.
+    pub config_dependencies: BTreeMap<String, Value>,
     /// Catalog name to package declarations, with `default` for the unnamed catalog.
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
     /// Selector/replacement pairs in declaration order (ties can depend on it).
@@ -199,6 +212,46 @@ impl WorkspaceConfig {
         Ok(config)
     }
 
+    pub(crate) fn matches_config_dependencies(&self, environment: Option<&Value>) -> bool {
+        // pnpm 9/10 keep configuration packages outside the project lock.
+        if environment.is_none() && self.pnpm_version.as_ref().is_some_and(|v| v.major() < 11) {
+            return true;
+        }
+        let recorded = environment.and_then(|env| env["importers"]["."].get("configDependencies"));
+        let entries = recorded.and_then(Value::as_object);
+        if recorded.is_some() && entries.is_none()
+            || entries.map_or(0, |deps| deps.len()) != self.config_dependencies.len()
+        {
+            return false;
+        }
+        self.config_dependencies.iter().all(|(name, declaration)| {
+            let Some(pin) = entries.and_then(|deps| deps.get(name)) else {
+                return false;
+            };
+            let Some(spec) = declaration
+                .as_str()
+                .or_else(|| declaration.get("integrity")?.as_str())
+            else {
+                return false;
+            };
+            if let Some((version, integrity)) = spec
+                .split_once('+')
+                .filter(|(_, hash)| hash.starts_with("sha"))
+            {
+                let resolution = &environment.expect("recorded bootstrap dependency")["packages"]
+                    [format!("{name}@{version}")]["resolution"];
+                pin["specifier"] == version
+                    && pin["version"] == version
+                    && resolution["integrity"] == integrity
+                    && declaration.get("tarball").is_none_or(|url| {
+                        resolution.get("tarball").is_none_or(|locked| locked == url)
+                    })
+            } else {
+                pin["specifier"] == spec
+            }
+        })
+    }
+
     /// Some frozen-lockfile checks shipped separately on the pnpm 11 and 12 lines.
     pub(crate) fn since(&self, pnpm11: (u64, u64, u64), pnpm12: (u64, u64, u64)) -> bool {
         self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
@@ -219,8 +272,14 @@ impl WorkspaceConfig {
         settings
     }
 
-    pub(crate) fn read_lock_settings(&self, document: &Value) -> LockSettings {
-        self.supported_lock_settings(LockSettings::from_document(document))
+    pub(crate) fn read_lock_settings(
+        &self,
+        document: &Value,
+    ) -> Result<LockSettings, LockfileError> {
+        Ok(self.supported_lock_settings(LockSettings::from_document(
+            document,
+            self.pnpm_version.as_ref(),
+        )?))
     }
 
     pub(crate) fn recorded_settings(&self) -> LockSettings {
@@ -269,6 +328,14 @@ impl WorkspaceConfig {
             .as_ref()
             .zip(other.pnpm_version.as_ref())
             .is_some_and(|(a, b)| a.major() != b.major())
+    }
+
+    /// Whether convergence must reconcile lockfiles generated by different known pnpm releases.
+    pub fn changes_pnpm_version(&self, other: &Self) -> bool {
+        self.pnpm_version
+            .as_ref()
+            .zip(other.pnpm_version.as_ref())
+            .is_some_and(|(a, b)| a != b)
     }
 
     pub(crate) fn matches_pnpm(&self, target: &Self) -> bool {
@@ -332,6 +399,7 @@ impl WorkspaceConfig {
                 .collect(),
             },
             catalogs,
+            config_dependencies: decode(value, "configDependencies")?.unwrap_or_default(),
             overrides: string_rules(value, "overrides")?,
             override_tie_break: OverrideTieBreak::default(),
             pnpm_version: None,

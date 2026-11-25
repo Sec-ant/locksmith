@@ -39,7 +39,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let policy = Policy::from_project(&working);
     let base_config = Policy::from_project(&project).configuration(&project.config)?;
     let config = policy.configuration(&working.config)?;
-    let upgrade = base_config.changes_pnpm_major(&config);
+    let upgrade = base_config.changes_pnpm_version(&config);
+    let reconcile_bootstrap =
+        upgrade || base_config.config_dependencies != config.config_dependencies;
     for key in project
         .config
         .as_object()
@@ -50,7 +52,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         let a = project.config.get(key);
         let b = working.config.get(key);
         let supported = match key.as_str() {
-            "catalog" | "catalogs" | "overrides" | "packageExtensions" => true,
+            "catalog" | "catalogs" | "overrides" | "packageExtensions" | "configDependencies" => {
+                true
+            }
             "patchedDependencies"
             | "onlyBuiltDependencies"
             | "allowBuilds"
@@ -81,7 +85,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             );
         }
     }
-    let patches = if upgrade {
+    let patches = if reconcile_bootstrap {
         workspace::patches(&config, "", working_file)?
     } else {
         BTreeMap::new()
@@ -143,6 +147,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 &patches,
                 &recorded,
             )
+            .map_err(|e| vec![e])
         },
     )?;
     policy.check_peers(&working.config, &result, &after)?;

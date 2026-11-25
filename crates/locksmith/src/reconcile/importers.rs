@@ -27,6 +27,7 @@ pub(super) fn select(
     sources: &GraphSources<'_>,
     peers: &mut peer::Merger<'_>,
     preferences: &super::preference::Preferences,
+    additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<SelectedImporters, LockfileError> {
     let docs = sources.documents();
     let mut importers = Map::new();
@@ -39,6 +40,7 @@ pub(super) fn select(
     let mut configured_roots = BTreeMap::new();
     let mut configured_sources = BTreeMap::new();
     let overrides = manifest::Overrides::new(output, context.configuration);
+    let mut missing_requests = super::MissingRequests::new(additional);
     for (id, package) in context.manifests {
         let mut record = sources
             .order
@@ -74,15 +76,23 @@ pub(super) fn select(
         let declarations = manifest::declarations(package, &overrides, id)?;
         let mut roots = BTreeMap::new();
         for (name, (group, specifier)) in &declarations {
-            let pin = selector.select(
+            let selected = selector.select(
                 name,
                 group,
                 specifier,
                 id,
                 package,
                 preferences.contains(id, name),
-            )?;
-            roots.insert((*name).to_owned(), pin);
+            );
+            match selected {
+                Ok(pin) => {
+                    roots.insert((*name).to_owned(), pin);
+                }
+                Err(error) => missing_requests.record(error)?,
+            }
+        }
+        if missing_requests.first.is_some() {
+            continue;
         }
         let previous_scopes: [BTreeMap<String, String>; 4] = std::array::from_fn(|side| {
             let global = context
@@ -381,6 +391,7 @@ pub(super) fn select(
         }
         importers.insert(id.clone(), record);
     }
+    missing_requests.finish()?;
     Ok(SelectedImporters {
         records: importers,
         configured_sources,

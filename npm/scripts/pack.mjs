@@ -47,7 +47,13 @@ if (version !== `locksmith ${pkg.version}`) throw new Error(`npm version ${pkg.v
 for (const name of ['index.cjs', 'index.mjs', 'index.d.ts', 'platform.cjs', 'cli.cjs']) {
   copyFileSync(join('npm', name), join(root, name));
 }
-copyFileSync('README.md', join(root, 'README.md'));
+const sourceUrl = pkg.repository.url.replace(/^git\+/, '').replace(/\.git$/, '') + '/blob/' + gitHead + '/';
+const readme = readFileSync('README.md', 'utf8').replace(/\]\(([^)#]+)(#[^)]*)?\)/g, (link, path, anchor = '') => {
+  if (path.includes('://')) return link;
+  const target = path === 'npm/index.d.ts' ? './index.d.ts' : new URL(path, sourceUrl).href;
+  return '](' + target + anchor + ')';
+});
+writeFileSync(join(root, 'README.md'), readme);
 const optionalDependencies = Object.fromEntries(Object.values(targets).map(target => [platformName(target), pkg.version]));
 function manifest(dir, data) {
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...data, gitHead }, null, 2) + '\n');

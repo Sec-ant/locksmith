@@ -96,6 +96,15 @@ impl RepairInput {
             .manifests
             .get(".")
             .ok_or_else(|| missing(&["manifests", "."], "the root manifest is required"))?;
+        if !context
+            .configuration
+            .matches_config_dependencies(lock.environment())
+        {
+            return Err(missing(
+                &["importers", ".", "configDependencies"],
+                "bootstrap graph does not match the configuration dependencies",
+            ));
+        }
         if let Some(env) = lock.environment() {
             let issues = graph::validate(env, DocumentKind::Environment);
             if !issues.is_empty() {
@@ -134,19 +143,19 @@ impl RepairInput {
         check_configuration(doc, &metadata, context.configuration)?;
         let mut result = importers::repair(doc, &metadata, &mut evidence)?;
         let roots = context.manifests.keys().cloned().collect();
-        let mut checked_extensions = false;
         loop {
-            if graph::closure(&result, DocumentKind::Project, &roots).is_err() {
-                fill_missing(&mut result, &mut evidence)?;
-                graph::closure(&result, DocumentKind::Project, &roots)?;
-            }
-            if !checked_extensions {
-                checked_extensions = true;
-                let plan = crate::extensions::plan(&result, context.configuration, None)?;
-                if !plan.is_empty() {
-                    plan.apply(result.to_mut());
-                    continue;
+            let closure = match graph::closure(&result, DocumentKind::Project, &roots) {
+                Ok(closure) => closure,
+                Err(_) => {
+                    fill_missing(&mut result, &mut evidence)?;
+                    graph::closure(&result, DocumentKind::Project, &roots)?
                 }
+            };
+            let plan =
+                crate::extensions::plan(&result, context.configuration, None, Some(&closure))?;
+            if !plan.is_empty() {
+                plan.apply(result.to_mut());
+                continue;
             }
             if matches!(result, Cow::Borrowed(_)) {
                 break;
@@ -219,7 +228,7 @@ pub(crate) fn check_configuration(
             "workspace configuration differs from the lock; its effects extend beyond a broken record",
         )
     };
-    if cfg.read_lock_settings(doc) != cfg.read_lock_settings(metadata) {
+    if cfg.read_lock_settings(doc)? != cfg.read_lock_settings(metadata)? {
         return Err(mismatch("settings"));
     }
     check_recorded_settings(doc, cfg)?;

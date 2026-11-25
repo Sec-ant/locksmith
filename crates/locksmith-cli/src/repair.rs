@@ -88,11 +88,13 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 &project.config,
                 &project.root,
                 |registry| {
-                    input.apply(&RepairContext {
-                        parents: &parents,
-                        registry,
-                        ..context
-                    })
+                    input
+                        .apply(&RepairContext {
+                            parents: &parents,
+                            registry,
+                            ..context
+                        })
+                        .map_err(|e| vec![e])
                 },
             )?
         }

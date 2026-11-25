@@ -71,7 +71,7 @@ impl Lockfile {
             .ok()
     }
 
-    /// Workspace manifests needed to determine the versions of linked peer providers.
+    /// Manifest paths needed to determine linked peer provider versions, including non-member directories.
     pub fn linked_peer_projects(&self) -> BTreeSet<String> {
         let mut ids = BTreeSet::new();
         let Some(doc) = self.project() else {
@@ -88,9 +88,7 @@ impl Lockfile {
                     graph::dependency(snapshot, name).and_then(|(_, pin)| pin.strip_prefix("link:"))
                 {
                     let id = links.resolve(".", path);
-                    if doc["importers"].get(&id).is_some() {
-                        ids.insert(id);
-                    }
+                    ids.insert(id);
                 }
             }
         }
@@ -147,7 +145,14 @@ impl Lockfile {
         let document = self
             .project()
             .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
-        let recorded = config.read_lock_settings(document);
+        if !config.matches_config_dependencies(self.environment()) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "configDependencies differ from the bootstrap lockfile",
+            ));
+        }
+        let recorded = config.read_lock_settings(document)?;
         if recorded != config.recorded_settings() {
             return Err(crate::manifest::mismatch(
                 ".",

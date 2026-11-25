@@ -66,7 +66,10 @@ pub(crate) fn declarations<'a>(
         .as_ref()
         .is_some_and(|v| v.major() >= 12);
     let mut result = BTreeMap::new();
-    let settings = crate::LockSettings::from_document(overrides.document);
+    let settings = crate::LockSettings::from_document(
+        overrides.document,
+        overrides.configuration().pnpm_version.as_ref(),
+    )?;
     for (field, group) in [
         ("devDependencies", "devDependencies"),
         ("dependencies", "dependencies"),

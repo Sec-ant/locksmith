@@ -815,3 +815,41 @@ fn catalog_links_can_target_a_workspace_packages_external_publish_directory() {
     let unlinked = Lockfile::parse(&value.to_string()).unwrap();
     assert!(merge(&unlinked, &unlinked, &unlinked, None).is_err());
 }
+
+#[test]
+fn bootstrap_follows_the_final_config_dependency_declarations() {
+    let project = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+    let make = |version: &str| {
+        let env = json!({"lockfileVersion":"9.0","importers":{".":{"configDependencies":{"config":{"specifier":version,"version":version}}}},
+            "packages":{format!("config@{version}"):{"resolution":{"integrity":"sha512-example"}}},"snapshots":{format!("config@{version}"): {}}});
+        Lockfile::parse(&format!("---\n{env}\n---\n{project}\n")).unwrap()
+    };
+    let old = make("1.0.0");
+    let new = make("2.0.0");
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    let config =
+        |v: &str| WorkspaceConfig::from_pnpm(&json!({"configDependencies":{"config":v}})).unwrap();
+    let before = config("1.0.0");
+    let after = config("2.0.0");
+    let ctx = MergeContext {
+        registry: None,
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configurations: [&before, &before, &after],
+        configuration: &after,
+        patches: &BTreeMap::new(),
+    };
+    let merged = merge(&old, &old, &new, Some(&ctx)).unwrap();
+    assert_eq!(merged.environment(), new.environment());
+    assert!(
+        old.validate_workspace(
+            &manifests,
+            &Default::default(),
+            &after,
+            ctx.patches,
+            |_| Ok(None)
+        )
+        .is_err()
+    );
+    assert!(merge(&old, &old, &old, Some(&ctx)).is_err());
+}

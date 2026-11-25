@@ -227,14 +227,16 @@ pub fn manifests(
     let mut manifests = BTreeMap::from([(".".into(), project.root.clone())]);
     if project.workspace {
         let members = Members::new(project)?;
-        let tree_paths = git::workspace_paths(tree, prefix)?;
-        let paths = members.manifest_paths(&tree_paths, prefix);
-        git::prefetch_manifests(tree, prefix, &paths)?;
-        for (id, path) in paths {
+        let mut paths = BTreeMap::new();
+        let root = format!("{tree}:{}", prefix.trim_end_matches('/'));
+        members.committed_paths(&root, "", tree, prefix, &mut paths)?;
+        git::prefetch_manifests(paths.values().map(|(_, id)| id.as_str()))?;
+        for (id, (name, oid)) in paths {
             let text = blobs
-                .read(tree, &format!("{prefix}{path}"))?
-                .ok_or_else(|| format!("missing manifest in {tree}:{prefix}{path}"))?;
-            manifests.insert(id.to_owned(), parse_manifest(path, &text)?);
+                .read_object(&oid)?
+                .ok_or_else(|| format!("missing manifest at {tree}:{prefix}{id}/{name}"))?;
+            let manifest = parse_manifest(&format!("{prefix}{id}/{name}"), &text)?;
+            manifests.insert(id, manifest);
         }
     }
     Ok(manifests)
@@ -452,7 +454,7 @@ impl Members {
                 }
                 if !parts.is_empty() {
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
-                    if on_disk && !value.starts_with('!') {
+                    if !value.starts_with('!') {
                         let parents = parts.iter().take_while(|&&p| p == "..").count();
                         let descend = this.descend.entry(parts[..parents].join("/")).or_default();
                         for (index, part) in parts.iter().enumerate().skip(parents) {
@@ -460,7 +462,7 @@ impl Members {
                                 descend.push(Pattern::new(&parts[..=index].join("/"))?);
                             }
                         }
-                    } else if on_disk && let Some(prefix) = parts.strip_suffix(&["**"]) {
+                    } else if let Some(prefix) = parts.strip_suffix(&["**"]) {
                         let tree = if prefix.is_empty() {
                             "**".to_owned()
                         } else {
@@ -496,9 +498,9 @@ impl Members {
             ":(glob)**/package.json5",
             ":(glob)**/package.yaml",
         ]);
-        let paths = git::output(&args)?;
+        let paths = git::output_bytes(&args)?;
         Ok(self
-            .manifest_paths(&paths, "")
+            .manifest_paths(&paths)
             .into_keys()
             .map(str::to_owned)
             .collect())
@@ -580,11 +582,89 @@ impl Members {
         Ok(())
     }
 
-    fn manifest_paths<'a>(&self, paths: &'a str, prefix: &str) -> BTreeMap<&'a str, &'a str> {
+    fn committed_paths(
+        &self,
+        object: &str,
+        alias: &str,
+        tree: &str,
+        prefix: &str,
+        found: &mut BTreeMap<String, (String, String)>,
+    ) -> Result<()> {
+        let listing = git::output_bytes(&["ls-tree", "-rz", "--full-tree", object])?;
+        for entry in listing.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+            let tab = entry
+                .iter()
+                .position(|&b| b == b'\t')
+                .ok_or("invalid Git tree entry")?;
+            let (header, path) = entry.split_at(tab);
+            let Ok(path) = std::str::from_utf8(&path[1..]) else {
+                continue;
+            };
+            let mut fields = std::str::from_utf8(header)?.split_whitespace();
+            let mode = fields.next().ok_or("missing Git entry mode")?;
+            if fields.next() != Some("blob") {
+                continue;
+            }
+            let oid = fields.next().ok_or("missing Git blob ID")?;
+            if mode != "120000"
+                && !MANIFEST_NAMES.contains(&path.rsplit('/').next().expect("path component"))
+            {
+                continue;
+            }
+            let logical = if alias.is_empty() {
+                path.to_owned()
+            } else {
+                format!("{alias}/{path}")
+            };
+            let manifest = logical
+                .rsplit_once('/')
+                .filter(|(id, name)| MANIFEST_NAMES.contains(name) && self.contains(id));
+            if mode == "120000" {
+                let matches = |p: &Pattern| p.matches_with(&logical, GLOB_OPTIONS);
+                let directory = self.contains(&logical)
+                    || self
+                        .descend
+                        .get("")
+                        .is_some_and(|patterns| patterns.iter().any(matches));
+                if manifest.is_none() && (!directory || self.excluded_trees.iter().any(matches)) {
+                    continue;
+                }
+                let Some((kind, target)) = git::linked_object(tree, prefix, &logical)? else {
+                    continue;
+                };
+                if kind == "tree" && directory {
+                    self.committed_paths(&target, &logical, tree, prefix, found)?;
+                } else if kind == "blob"
+                    && let Some((id, name)) = manifest
+                {
+                    Self::record_manifest(found, id, name, &target);
+                }
+            } else if let Some((id, name)) = manifest {
+                Self::record_manifest(found, id, name, oid);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_manifest(
+        found: &mut BTreeMap<String, (String, String)>,
+        id: &str,
+        name: &str,
+        oid: &str,
+    ) {
+        let record = found
+            .entry(id.to_owned())
+            .or_insert_with(|| (name.to_owned(), oid.to_owned()));
+        if name < record.0.as_str() {
+            *record = (name.to_owned(), oid.to_owned());
+        }
+    }
+
+    fn manifest_paths<'a>(&self, paths: &'a [u8]) -> BTreeMap<&'a str, &'a str> {
         let mut manifests = BTreeMap::new();
         for path in paths
-            .split_terminator('\0')
-            .filter_map(|p| p.strip_prefix(prefix))
+            .split(|&b| b == 0)
+            .filter_map(|p| std::str::from_utf8(p).ok())
         {
             let Some((dir, name)) = path.rsplit_once('/') else {
                 continue;

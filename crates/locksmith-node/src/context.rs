@@ -260,20 +260,18 @@ pub(super) struct PeerOptions {
 }
 
 impl PeerOptions {
-    fn rules(&self, lock: &Lockfile, fallback: PeerVersionMatching) -> Result<PeerRules> {
+    fn rules(&self, lock: &Lockfile) -> Result<PeerRules> {
         let empty = json!({});
         let raw = self.configuration.as_ref().unwrap_or(&empty);
         let config = configuration(raw, self.manifests.as_ref().and_then(|ms| ms.get(".")))?;
         let version = config.pnpm_version.or_else(|| lock.recorded_pnpm_version());
-        let matching = version
-            .as_ref()
-            .map_or(fallback, |v| PeerVersionMatching::for_pnpm(Some(v)));
+        let matching = PeerVersionMatching::for_pnpm(version.as_ref());
         PeerRules::from_pnpm(raw, matching)
     }
 
     pub(super) fn peers(self, lock: &Lockfile) -> Result<Vec<Value>> {
         lock.validate()?;
-        let rules = self.rules(lock, PeerVersionMatching::Semver)?;
+        let rules = self.rules(lock)?;
         Ok(super::diagnostic::peers(locksmith::inspect_peers(
             lock,
             &rules,
@@ -282,7 +280,7 @@ impl PeerOptions {
     }
 
     pub(super) fn report(self, lock: &Lockfile) -> Result<BTreeMap<String, Value>> {
-        let rules = self.rules(lock, PeerVersionMatching::Unspecified)?;
+        let rules = self.rules(lock)?;
         let report = locksmith::inspect(lock, &rules, self.manifests.as_ref())?;
         let Value::Object(report) = json!(report) else {
             unreachable!("inspection serializes as an object")

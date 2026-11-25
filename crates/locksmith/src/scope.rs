@@ -75,7 +75,7 @@ pub fn converge(
 }
 
 /// Converge with the final workspace's patch contents, keyed by relative path.
-/// A cross-major migration uses all final manifests and verifies patch identities.
+/// A pnpm version migration uses all final manifests and verifies patch identities.
 ///
 /// # Errors
 /// Returns the errors of [`converge`] and rejects unavailable or inconsistent patch data.
@@ -138,10 +138,17 @@ pub fn converge_with_recorded_baselines(
         recorded: recorded_baselines,
     };
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
+        if !config.matches_config_dependencies(candidate.environment()) {
+            return Err(crate::reconcile::missing(
+                &["importers", ".", "configDependencies"],
+                "installed bootstrap graph differs from the configuration dependencies",
+            ));
+        }
         crate::repair::check_recorded_settings(project, config)?;
     }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
-        && before.changes_pnpm_major(after)
+        && (before.changes_pnpm_version(after)
+            || before.config_dependencies != after.config_dependencies)
     {
         let installed = candidate.project().ok_or_else(|| {
             crate::reconcile::missing(&["importers"], "missing candidate project")
@@ -189,7 +196,7 @@ pub fn converge_with_recorded_baselines(
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
         crate::repair::check_recorded_settings(project, config)?;
-        let mut plan = crate::extensions::plan(project, config, candidate.project())?;
+        let mut plan = crate::extensions::plan(project, config, candidate.project(), None)?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(
                 result
@@ -204,7 +211,7 @@ pub fn converge_with_recorded_baselines(
                 .and_then(|change| change.after);
             workspace::checked_overrides(project, config, root)?;
             while plan.apply(project) {
-                plan = crate::extensions::plan(project, config, candidate.project())?;
+                plan = crate::extensions::plan(project, config, candidate.project(), None)?;
             }
             graph::prune_scoped(
                 project,

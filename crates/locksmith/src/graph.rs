@@ -477,39 +477,6 @@ fn check_package(
         }
         _ => {}
     }
-    if let Some(tail) = snapshot
-        .strip_prefix(key)
-        .and_then(|suffix| suffix.strip_prefix("(patch_hash="))
-    {
-        let hash = tail
-            .split(')')
-            .next()
-            .expect("split always has a first element");
-        let name = key
-            .char_indices()
-            .skip(1)
-            .find(|(_, character)| *character == '@')
-            .map_or(key, |(at, _)| &key[..at]);
-        let declared = section(document, "patchedDependencies").is_some_and(|patches| {
-            patches.iter().any(|(selector, patch)| {
-                (selector == name
-                    || selector
-                        .strip_prefix(name)
-                        .is_some_and(|suffix| suffix.starts_with('@')))
-                    && patch
-                        .as_str()
-                        .or_else(|| patch.get("hash").and_then(Value::as_str))
-                        == Some(hash)
-            })
-        });
-        if !declared {
-            issues.push(issue(
-                kind,
-                &["snapshots", snapshot],
-                format!("patch hash {hash} is absent from patchedDependencies"),
-            ));
-        }
-    }
 }
 
 fn check_catalogs(
@@ -613,6 +580,12 @@ pub(crate) fn validate_with_config(
     config: Option<&crate::WorkspaceConfig>,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
+    if let Err(error) = crate::LockSettings::from_document(
+        document,
+        config.and_then(|cfg| cfg.pnpm_version.as_ref()),
+    ) {
+        issues.push(issue(kind, &["settings"], error.to_string()));
+    }
     let overrides = crate::manifest::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
@@ -624,6 +597,16 @@ pub(crate) fn validate_with_config(
     // not need a reachability walk or a per-edge diagnostic allocation on success.
     for (key, snapshot) in section(document, "snapshots").into_iter().flatten() {
         check_package(document, kind, key, &mut issues);
+        if (document.get("patchedDependencies").is_some() || crate::peer::patch(key).is_some())
+            && crate::reconcile::desired_patch(key, document, [document; 4])
+                != Some(crate::peer::patch(key))
+        {
+            issues.push(issue(
+                kind,
+                &["snapshots", key],
+                "snapshot patch hash differs from the applicable patchedDependencies selector",
+            ));
+        }
         check_references(document, snapshot, kind, "snapshots", key, &mut issues);
     }
     for name in ["importers", "snapshots", "packages"] {
@@ -818,6 +801,12 @@ fn retain(
         }
     }
     let mut issues = Vec::new();
+    if let Err(error) = crate::LockSettings::from_document(
+        document,
+        config.and_then(|cfg| cfg.pnpm_version.as_ref()),
+    ) {
+        issues.push(issue(kind, &["settings"], error.to_string()));
+    }
     let overrides = crate::manifest::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {

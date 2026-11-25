@@ -113,7 +113,75 @@ pub(crate) fn resolve(
     theirs: &Lockfile,
     context: &MergeContext<'_>,
 ) -> Result<Lockfile, LockfileError> {
-    resolve_sources([base, ours, theirs], context, false)
+    resolve_sources([base, ours, theirs], context, false, None)
+}
+
+struct MissingRequests<'a> {
+    first: Option<LockfileError>,
+    additional: Option<&'a mut Vec<LockfileError>>,
+}
+
+impl<'a> MissingRequests<'a> {
+    fn new(additional: Option<&'a mut Vec<LockfileError>>) -> Self {
+        Self {
+            first: None,
+            additional,
+        }
+    }
+
+    fn record(&mut self, error: LockfileError) -> Result<(), LockfileError> {
+        let Some(additional) = self.additional.as_deref_mut() else {
+            return Err(error);
+        };
+        if !matches!(
+            error,
+            LockfileError::ResolutionRequired {
+                request: Some(_),
+                ..
+            }
+        ) {
+            return Err(error);
+        }
+        if self.first.is_some() {
+            additional.push(error);
+        } else {
+            self.first = Some(error);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), LockfileError> {
+        self.first.map_or(Ok(()), Err)
+    }
+}
+
+impl MergeContext<'_> {
+    /// Merge parsed locks and report independent registry requests from the same resolution phase together.
+    /// The caller can supply the requested registry metadata in one pass.
+    ///
+    /// # Errors
+    /// Returns the errors of [`crate::merge`]. A failure unrelated to missing
+    /// registry metadata is reported on its own.
+    pub fn merge_with_requests(
+        &self,
+        locks: [&Lockfile; 3],
+    ) -> Result<Lockfile, Vec<LockfileError>> {
+        let mut additional = Vec::new();
+        resolve_sources(locks, self, false, Some(&mut additional)).map_err(|first| {
+            let collect = matches!(
+                first,
+                LockfileError::ResolutionRequired {
+                    request: Some(_),
+                    ..
+                }
+            );
+            let mut errors = vec![first];
+            if collect {
+                errors.append(&mut additional);
+            }
+            errors
+        })
+    }
 }
 
 pub(crate) fn converge_upgrade(
@@ -125,7 +193,7 @@ pub(crate) fn converge_upgrade(
     let mut current = std::borrow::Cow::Borrowed(installed);
     let mut seen = BTreeSet::new();
     loop {
-        let next = resolve_sources([baseline, baseline, &current], context, true)?;
+        let next = resolve_sources([baseline, baseline, &current], context, true, None)?;
         if next.documents == current.documents {
             return Ok(next);
         }
@@ -147,6 +215,7 @@ fn resolve_sources(
     locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
     prefer_baseline: bool,
+    mut additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Lockfile, LockfileError> {
     if !context.manifests.contains_key(".") {
         return Err(missing(
@@ -185,7 +254,7 @@ fn resolve_sources(
     if prefer_baseline {
         crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
     }
-    let evidence = published::records(context, &metadata, docs, order)?;
+    let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;
     // Migration convergence keeps admissible baseline pins. Headers and the
     // bootstrap graph still come from the final package manager.
@@ -254,7 +323,8 @@ fn resolve_sources(
             .documents()
             .map(|doc| (!doc.is_null()).then_some(doc)),
     );
-    let attempt = |preferences: &preference::Preferences| {
+    let attempt = |preferences: &preference::Preferences,
+                   additional: Option<&mut Vec<LockfileError>>| {
         let mut output = metadata.clone();
         let mut peers = peer::Merger::with_index(peer_index.clone());
         peers.configure_context(
@@ -262,7 +332,14 @@ fn resolve_sources(
             context.configuration.resolution.lock.dedupe_peers,
             context.configuration.linked_peer_encoding,
         );
-        let selected = importers::select(context, &output, &sources, &mut peers, preferences)?;
+        let selected = importers::select(
+            context,
+            &output,
+            &sources,
+            &mut peers,
+            preferences,
+            additional,
+        )?;
         output["importers"] = Value::Object(selected.records);
         let extended = assembly::assemble(
             &mut output,
@@ -301,7 +378,12 @@ fn resolve_sources(
         for (id, value) in context.manifests {
             manifest::check(&overrides, id, Some(value), "merged")?;
         }
-        let environment = environment_source(locks, branch_order, &context.manifests["."])?;
+        let environment = environment_source(
+            locks,
+            branch_order,
+            &context.manifests["."],
+            context.configuration,
+        )?;
         let mut documents = BTreeMap::new();
         if let Some(env) = locks[environment].documents.get(&DocumentKind::Environment) {
             documents.insert(DocumentKind::Environment, Arc::clone(env));
@@ -318,7 +400,10 @@ fn resolve_sources(
     let mut preferences = preference::Preferences::default();
     let branches = docs;
     loop {
-        match attempt(&preferences) {
+        if let Some(errors) = additional.as_deref_mut() {
+            errors.clear();
+        }
+        match attempt(&preferences, additional.as_deref_mut()) {
             Err(error) if preferences.extend(&error, branches, context) => continue,
             result => return result,
         }
@@ -331,7 +416,18 @@ fn environment_source(
     locks: [&Lockfile; 3],
     order: [usize; 3],
     manifest: &Value,
+    config: &crate::WorkspaceConfig,
 ) -> Result<usize, LockfileError> {
+    let mut matching = order
+        .into_iter()
+        .filter(|&side| config.matches_config_dependencies(locks[side].environment()));
+    let first = matching.next().ok_or_else(|| {
+        missing(
+            &["importers", ".", "configDependencies"],
+            "no bootstrap graph matches the final configuration dependencies",
+        )
+    })?;
+    let order = std::iter::once(first).chain(matching);
     let managers = locks.map(|l| {
         l.environment()?
             .get("importers")?
@@ -343,13 +439,13 @@ fn environment_source(
         .and_then(Value::as_str)
         .and_then(|v| v.strip_prefix("pnpm@"))
     else {
-        return Ok(order[0]);
+        return Ok(first);
     };
     if managers.iter().all(|m| m.is_none()) {
-        return Ok(order[0]);
+        return Ok(first);
     }
     let version = version.split_once("+sha").map_or(version, |(v, _)| v);
-    for side in order {
+    for side in order.clone() {
         if managers[side].is_some_and(|deps| deps["pnpm"]["specifier"] == version) {
             return Ok(side);
         }
@@ -358,7 +454,7 @@ fn environment_source(
     if version
         .parse::<node_semver::Version>()
         .is_ok_and(|v| v.major() < 11)
-        && let Some(side) = order.into_iter().find(|i| managers[*i].is_none())
+        && let Some(side) = order.clone().find(|i| managers[*i].is_none())
     {
         return Ok(side);
     }
@@ -434,7 +530,11 @@ fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
     manifest::matches_version(range, Some(version))
 }
 // The outer None denotes competing selectors without a unique applicable patch.
-fn desired_patch<'a>(key: &str, metadata: &'a Value, docs: [&Value; 4]) -> Option<Option<&'a str>> {
+pub(crate) fn desired_patch<'a>(
+    key: &str,
+    metadata: &'a Value,
+    docs: [&Value; 4],
+) -> Option<Option<&'a str>> {
     let package = graph::package_key(key);
     let Some(patches) = metadata
         .get("patchedDependencies")

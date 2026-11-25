@@ -34,6 +34,7 @@ pub(crate) fn plan(
     doc: &Value,
     cfg: &WorkspaceConfig,
     installed: Option<&Value>,
+    reachable: Option<&graph::DependencyClosure>,
 ) -> Result<Plan, LockfileError> {
     let mut plan = Plan::default();
     let Some(extensions) = cfg
@@ -62,6 +63,9 @@ pub(crate) fn plan(
     let overrides = manifest::Overrides::new(doc, cfg);
     let mut constraints = HashMap::new();
     for (release, pkg) in graph::section(doc, "packages").into_iter().flatten() {
+        if reachable.is_some_and(|c| !c.packages.contains(release)) {
+            continue;
+        }
         let Some((parent, version)) = release.rsplit_once('@') else {
             continue;
         };
@@ -112,6 +116,9 @@ pub(crate) fn plan(
     let peers = peer::Merger::new([Some(doc), installed, None]);
     let mut needed = BTreeSet::new();
     for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
+        if reachable.is_some_and(|c| !c.snapshots.contains(key)) {
+            continue;
+        }
         let Some(targets) = constraints.get(graph::package_key(key)) else {
             continue;
         };

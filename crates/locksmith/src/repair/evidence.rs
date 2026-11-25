@@ -107,6 +107,7 @@ impl<'a> Evidence<'a> {
                     current,
                     [current; 3],
                     [0, 1, 2],
+                    None,
                 )?);
             }
             let published = self.published.as_ref().expect("published records");

@@ -41,7 +41,7 @@ bench:
     export LOCKSMITH_BENCH_DIR
     trap 'rm -r "$LOCKSMITH_BENCH_DIR"' EXIT
     sh benchmarks/prepare.sh "$LOCKSMITH_BENCH_DIR"
-    for command in merge converge repair inspect inspect-external-1000 inspect-external-4000; do
+    for command in merge merge-context validate-workspace registry-64 registry-512 converge repair inspect inspect-external-1000 inspect-external-4000; do
         hyperfine --shell=none --warmup 2 --runs 11 "benchmarks/cli $command"
     done
 

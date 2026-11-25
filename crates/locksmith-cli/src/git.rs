@@ -1,6 +1,6 @@
 //! Read the committed merge inputs without consulting a partially updated index.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     env,
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
@@ -243,38 +243,78 @@ pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<String>)> 
     if !matches!(output.status.code(), Some(0 | 1)) {
         return Err(failure(&output).into());
     }
-    let mut records = std::str::from_utf8(&output.stdout)?.split_terminator('\0');
+    let mut records = output.stdout.split(|&b| b == 0);
     let tree = records
         .next()
+        .and_then(|field| std::str::from_utf8(field).ok())
         .filter(|s| oid(s))
         .ok_or("invalid git merge-tree result")?;
     Ok((
         tree.into(),
         records
+            .filter_map(|field| std::str::from_utf8(field).ok())
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect(),
     ))
 }
 
-pub fn workspace_paths(tree: &str, prefix: &str) -> Result<String> {
-    let scope = if prefix.is_empty() { "." } else { prefix };
-    output(&[
-        "ls-tree",
-        "--full-tree",
-        "-rz",
-        "--name-only",
-        tree,
-        "--",
-        scope,
-    ])
+/// Keep NUL-delimited Git path lists as bytes until the caller selects its inputs.
+pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git").args(args).output()?;
+    if !output.status.success() {
+        return Err(failure(&output).into());
+    }
+    Ok(output.stdout)
 }
 
-/// In a blobless clone, cat-file lazily fetches one missing object per request.
-/// Fetch just the selected manifests together, leaving Git's usual promisor
-/// selection in charge when multiple remotes are configured.
-pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>) -> Result<()> {
-    if paths.is_empty() || env::var_os("GIT_NO_LAZY_FETCH").is_some() {
+/// Follow links in the committed tree. Git resolves intermediate links and
+/// distinguishes a missing target from a target outside the repository.
+pub fn linked_object(tree: &str, prefix: &str, path: &str) -> Result<Option<(String, String)>> {
+    if path.contains(['\n', '\r']) {
+        return Err(format!("unsupported linked path {path:?}").into());
+    }
+    let mut queries = format!("{tree}:{}\n", prefix.trim_end_matches('/'));
+    for (at, _) in path.match_indices('/') {
+        queries.push_str(&format!("{tree}:{prefix}{}\n", &path[..at]));
+    }
+    queries.push_str(&format!("{tree}:{prefix}{path}\n"));
+    let result = with_input(
+        &[
+            "cat-file",
+            "--batch-check=%(objecttype) %(objectname)",
+            "--follow-symlinks",
+        ],
+        queries.as_bytes(),
+    )?;
+    let response = checked_output(result)?;
+    let mut records = response.lines();
+    let ancestors = records
+        .by_ref()
+        .take(path.matches('/').count() + 1)
+        .collect::<BTreeSet<_>>();
+    let target = records.next().ok_or("missing linked Git object response")?;
+    if target.starts_with("loop ")
+        || target.starts_with("dangling ")
+        || target.ends_with(" missing")
+        || target.starts_with("notdir ")
+        || ancestors.contains(target)
+    {
+        return Ok(None);
+    }
+    if target.starts_with("symlink ") {
+        return Err(format!("linked path {prefix}{path} leaves the committed Git tree").into());
+    }
+    let (kind, id) = target
+        .split_once(' ')
+        .filter(|(_, id)| oid(id))
+        .ok_or("invalid linked Git object")?;
+    Ok(Some((kind.into(), id.into())))
+}
+
+/// Fetch missing selected blobs together on a blobless clone, including link targets.
+pub fn prefetch_manifests<'a>(objects: impl ExactSizeIterator<Item = &'a str>) -> Result<()> {
+    if objects.len() == 0 || env::var_os("GIT_NO_LAZY_FETCH").is_some() {
         return Ok(());
     }
     let remotes = Command::new("git")
@@ -306,26 +346,21 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
         return Ok(());
     }
 
-    let mut query = format!("{tree}^{{tree}}\n--\n");
-    for path in paths.values() {
-        if path.contains(['\r', '\n']) || prefix.contains(['\r', '\n']) {
-            return Err(format!("unsupported configuration path {prefix}{path:?}").into());
-        }
-        query.push_str(&format!(":(top,literal){prefix}{path}\n"));
+    let mut query = String::new();
+    for id in objects.collect::<BTreeSet<_>>() {
+        query.push_str(id);
+        query.push('\n');
     }
-    let listing = with_input(
-        &[
-            "rev-list",
-            "--objects",
-            "--no-object-names",
-            "--missing=print",
-            "--stdin",
-        ],
-        query.as_bytes(),
-    )?;
-    let objects = checked_output(listing)?;
+    let mut check = Command::new("git");
+    check
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["cat-file", "--batch-check"]);
+    let objects = checked_output(command_with_input(check, query.as_bytes())?)?;
     let mut missing = String::new();
-    for id in objects.lines().filter_map(|line| line.strip_prefix('?')) {
+    for id in objects
+        .lines()
+        .filter_map(|line| line.strip_suffix(" missing"))
+    {
         if !oid(id) {
             return Err("invalid missing Git object ID".into());
         }
@@ -358,22 +393,27 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
 }
 
 fn with_input(args: &[&str], input: &[u8]) -> Result<Output> {
-    let mut child = Command::new("git")
-        .args(args)
+    let mut command = Command::new("git");
+    command.args(args);
+    command_with_input(command, input)
+}
+
+fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let written = child
-        .stdin
-        .take()
-        .expect("piped Git stdin")
-        .write_all(input);
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        written?;
-    }
-    Ok(output)
+    let mut stdin = child.stdin.take().expect("piped Git stdin");
+    std::thread::scope(|scope| {
+        let written = scope.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output()?;
+        let written = written.join().expect("Git input writer panicked");
+        if output.status.success() {
+            written?;
+        }
+        Ok(output)
+    })
 }
 
 /// The single cat-file process reads just the configuration blobs requested.
@@ -402,17 +442,21 @@ impl Blobs {
         if path.contains(['\n', '\r', '\0']) {
             return Err(format!("unsupported configuration path {path:?}").into());
         }
+        self.read_object(&format!("{tree}:{path}"))
+    }
+
+    pub fn read_object(&mut self, object: &str) -> Result<Option<String>> {
         let input = &mut self.input;
-        writeln!(input, "{tree}:{path}")?;
+        writeln!(input, "{object}")?;
         input.flush()?;
         let mut header = String::new();
         self.output.read_line(&mut header)?;
-        if header.trim_end() == format!("{tree}:{path} missing") {
+        if header.trim_end() == format!("{object} missing") {
             return Ok(None);
         }
         let mut fields = header.split_whitespace();
         if !fields.next().is_some_and(oid) || fields.next() != Some("blob") {
-            return Err(format!("expected a Git blob at {tree}:{path}").into());
+            return Err(format!("expected a Git blob at {object}").into());
         }
         let length = fields
             .next()
@@ -426,7 +470,7 @@ impl Blobs {
             return Err("invalid git cat-file response".into());
         }
         Ok(Some(
-            String::from_utf8(bytes).map_err(|e| format!("{path}: {e}"))?,
+            String::from_utf8(bytes).map_err(|e| format!("{object}: {e}"))?,
         ))
     }
 }

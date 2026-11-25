@@ -2623,3 +2623,124 @@ fn inspection_reads_versions_only_from_manifests_inside_the_selected_workspace()
         check("member");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn repair_reads_the_committed_target_of_a_workspace_directory_link() {
+    let r = Repo::new();
+    r.write(
+        "sources/tool/package.json",
+        r#"{"name":"tool","dependencies":{"leaf":"link:../../leaf"}}"#,
+    );
+    std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
+    let mut doc = graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
+    doc["importers"]["apps/tool"] = json!({"dependencies":{"leaf":{"specifier":"link:../../leaf","version":"link:../../leaf"}}});
+    let source = doc.to_string();
+    r.write("pnpm-lock.yaml", &source);
+    r.commit("include linked workspace");
+    fs::remove_file(r.0.path().join("apps/tool")).unwrap();
+    r.write("sources/tool/package.json", "{}");
+    let out = r.cmd(CLI, &["repair", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, source.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn git_workspace_commands_ignore_unrelated_non_utf8_tree_entries() {
+    use std::os::unix::ffi::OsStrExt;
+    let r = Repo::new();
+    let blob = r.git(&["rev-parse", "HEAD:package.json"]);
+    let out = Command::new("git")
+        .current_dir(r.0.path())
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "100644",
+            blob.trim(),
+        ])
+        .arg(std::ffi::OsStr::from_bytes(b"archive-\xff.bin"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    r.git(&["commit", "-m", "track a binary asset"]);
+    for operation in ["repair", "converge"] {
+        let out = r.cmd(CLI, &[operation, "HEAD"]);
+        assert!(out.status.success(), "{}", report(&out));
+    }
+}
+
+#[test]
+fn converge_accepts_a_pnpm_patch_release_upgrade() {
+    let r = Repo::new();
+    r.write("package.json", r#"{"packageManager":"pnpm@10.34.8"}"#);
+    r.commit("pin package manager");
+    r.write("package.json", r#"{"packageManager":"pnpm@10.34.9"}"#);
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(
+        graph(&out.stdout),
+        graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes())
+    );
+}
+
+#[test]
+fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(
+        root,
+        "vendor/host/package.json",
+        r#"{"name":"host","version":"1.0.0"}"#,
+    );
+    let doc = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"plugin":{"specifier":"1","version":"1.0.0"}}}},
+        "packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1.0.0"}}},
+        "snapshots":{"plugin@1.0.0":{"dependencies":{"host":"link:vendor/host"}}}});
+    write_input(root, "pnpm-lock.yaml", doc.to_string());
+    let out = Command::new(CLI)
+        .current_dir(root)
+        .args(["inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["peers"],
+        json!([])
+    );
+}
+
+#[test]
+fn workspace_validation_distinguishes_invalid_and_quoted_lock_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "package.json", "{}");
+    for (settings, workspace, valid) in [
+        (json!("default"), json!({}), false),
+        (json!({"autoInstallPeers":"fales"}), json!({}), false),
+        (json!({"autoInstallPeers":"false"}), json!({}), false),
+        (
+            json!({"autoInstallPeers":"false"}),
+            json!({"autoInstallPeers":false}),
+            true,
+        ),
+    ] {
+        write_input(
+            root,
+            "pnpm-lock.yaml",
+            json!({"lockfileVersion":"9.0","settings":settings,"importers":{".":{}}}).to_string(),
+        );
+        write_input(root, "pnpm-workspace.yaml", workspace.to_string());
+        let out = Command::new(CLI)
+            .current_dir(root)
+            .args(["validate", "--workspace"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(if valid { 0 } else { 1 }),
+            "{settings}: {}",
+            report(&out)
+        );
+    }
+}

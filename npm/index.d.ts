@@ -107,6 +107,7 @@ export interface Inspection {
   externalLinks: Array<{ sourceKind: 'importer' | 'snapshot'; from: string; dependency: string; target: string }>
 }
 export function inspect(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<Inspection>
+/** Uses the same pnpm version matching policy as inspect, including when the version is unknown. */
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>
 /** Merge the branches against their ancestor. A conflict or unresolved selection rejects with a LockfileError. */
 export function merge(base: LockInput, ours: LockInput, theirs: LockInput, context?: MergeContext): Promise<string>

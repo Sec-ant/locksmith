@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import * as api from 'es-locksmith';
 
 const require = createRequire(import.meta.url);
+const installedReadme = readFileSync(new URL('./README.md', import.meta.resolve('es-locksmith')), 'utf8');
+for (const [, target] of installedReadme.matchAll(/\]\(([^)#]+)(?:#[^)]*)?\)/g)) {
+  if (!target.includes('://')) {
+    assert.ok(readFileSync(new URL(target, import.meta.resolve('es-locksmith'))).length, target);
+  }
+}
 const { parse, merge, converge, repair, validate, inspectPeers, dependencyClosure } = api;
 assert.equal(require('es-locksmith').merge, merge);
 const yaml = "# keep this comment\r\nlockfileVersion: '9.0'\r\nsettings: {autoInstallPeers: true, excludeLinksFromLockfile: false}\r\nimporters: {'.': {}}\r\n";
@@ -28,6 +34,13 @@ const external = await api.inspect(linked);
 assert.deepEqual(external.externalLinks, [{ sourceKind: 'snapshot', from: 'plugin@1.0.0', dependency: 'host', target: '../shared' }]);
 assert.equal(external.peers[0].reason, 'providerVersion');
 assert.deepEqual((await api.inspect(linked, { manifests: { '../shared': { name: 'host', version: '1.4.0' } } })).peers, []);
+const prerelease = await parse(JSON.stringify({
+  lockfileVersion: '9.0', importers: { '.': {} },
+  packages: { 'plugin@1.0.0': { resolution: {}, peerDependencies: { host: '^1' } }, 'host@1.1.0-beta.1': { resolution: {} } },
+  snapshots: { 'plugin@1.0.0': { dependencies: { host: '1.1.0-beta.1' } }, 'host@1.1.0-beta.1': {} },
+}));
+assert.deepEqual((await api.inspect(prerelease)).peers, []);
+assert.deepEqual(await inspectPeers(prerelease), []);
 assert.equal(require('es-locksmith').inspect, api.inspect);
 assert.equal(await merge(lock, yaml, lock), yaml);
 const context = { target: 'ours', manifests: { '.': {} }, configurations: [{}, {}, {}], configuration: {} };

@@ -117,19 +117,19 @@ pub(crate) struct Merger<'a> {
     provisional: Option<Vec<SavedRecord>>,
 }
 
-pub(crate) fn choose<'a, T: PartialEq + ?Sized>(
-    base: Option<&'a T>,
-    ours: Option<&'a T>,
-    theirs: Option<&'a T>,
-) -> Option<Option<&'a T>> {
-    if ours == theirs {
-        Some(ours)
+enum ThreeWay<T> {
+    Agreed(T),
+    Conflict,
+}
+
+// For optional fields an agreed None is a deletion, distinct from conflict.
+fn choose<T: PartialEq>(base: T, ours: T, theirs: T) -> ThreeWay<T> {
+    if ours == theirs || theirs == base {
+        ThreeWay::Agreed(ours)
     } else if ours == base {
-        Some(theirs)
-    } else if theirs == base {
-        Some(ours)
+        ThreeWay::Agreed(theirs)
     } else {
-        None
+        ThreeWay::Conflict
     }
 }
 
@@ -715,7 +715,11 @@ impl<'a> Merger<'a> {
         t: Option<&Value>,
     ) -> Option<Value> {
         let (b, o, t) = (b?, o?, t?);
-        let specifier = choose(b.get("specifier"), o.get("specifier"), t.get("specifier"))??;
+        let ThreeWay::Agreed(Some(specifier)) =
+            choose(b.get("specifier"), o.get("specifier"), t.get("specifier"))
+        else {
+            return None;
+        };
         if o.as_object()?.len() != 2 || t.as_object()?.len() != 2 {
             return None;
         }
@@ -792,8 +796,8 @@ impl<'a> Merger<'a> {
         ours: &str,
         theirs: &str,
     ) -> Option<String> {
-        if let Some(value) = choose(Some(base), Some(ours), Some(theirs)) {
-            return value.map(str::to_owned);
+        if let ThreeWay::Agreed(value) = choose(base, ours, theirs) {
+            return Some(value.to_owned());
         }
         let keys: Vec<_> = [base, ours, theirs]
             .into_iter()
@@ -822,7 +826,9 @@ impl<'a> Merger<'a> {
         // A new package release can have different dependency declarations.
         // Rebind that release's graph without copying old-release dependencies
         // or substituting a different consumer's regular resolutions.
-        let package = choose(Some(packages[0]), Some(packages[1]), Some(packages[2]))??;
+        let ThreeWay::Agreed(package) = choose(packages[0], packages[1], packages[2]) else {
+            return None;
+        };
         let contexts: Option<Vec<_>> = keys
             .iter()
             .enumerate()
@@ -850,7 +856,7 @@ impl<'a> Merger<'a> {
                     .iter()
                     .map(|c| c.peers.get(name).map(String::as_str))
                     .collect();
-                let value = if let Some(v) = choose(values[0], values[1], values[2]) {
+                let value = if let ThreeWay::Agreed(v) = choose(values[0], values[1], values[2]) {
                     v.map(str::to_owned)
                 } else if name != "patch_hash" {
                     Some(self.reference(name, values[0]?, values[1]?, values[2]?)?)
@@ -1247,7 +1253,7 @@ impl<'a> Merger<'a> {
         o: Option<&Value>,
         t: Option<&Value>,
     ) -> Option<Option<Value>> {
-        if let Some(v) = choose(b, o, t) {
+        if let ThreeWay::Agreed(v) = choose(b, o, t) {
             return Some(v.cloned());
         }
         if field == Some("transitivePeerDependencies") {
@@ -1290,7 +1296,7 @@ impl<'a> Merger<'a> {
             for name in names {
                 let values = [b.and_then(|m| m.get(name)), o.get(name), t.get(name)];
                 let v = if matches!(field, Some("dependencies" | "optionalDependencies")) {
-                    if let Some(v) = choose(values[0], values[1], values[2]) {
+                    if let ThreeWay::Agreed(v) = choose(values[0], values[1], values[2]) {
                         v.cloned()
                     } else {
                         Some(Value::String(self.reference(

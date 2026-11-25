@@ -550,3 +550,36 @@ fn frozen_settings_follow_the_package_manager_version_and_defaults() {
         }
     }
 }
+
+#[test]
+fn unreachable_extension_dependencies_are_preserved_with_or_without_a_donor() {
+    use md5::{Digest, Md5};
+    let extensions = json!({"host@1.0.0":{"dependencies":{"addon":"1.0.0"}}});
+    let overrides = json!({"host@1>addon":"2.0.0"});
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"overrides":overrides,"packageExtensions":extensions}))
+            .unwrap();
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    let mut doc = json!({"lockfileVersion":"9.0","overrides":overrides,"packageExtensionsChecksum":format!("{:x}",Md5::digest(extensions.to_string())),
+        "importers":{".":{}},"packages":{"host@1.0.0":{"resolution":{}},"addon@1.0.0":{"resolution":{}}},
+        "snapshots":{"host@1.0.0":{"dependencies":{"addon":"1.0.0"}},"addon@1.0.0":{}}});
+    for donor in [false, true] {
+        if donor {
+            doc["packages"]["addon@2.0.0"] = json!({"resolution":{}});
+            doc["snapshots"]["addon@2.0.0"] = json!({});
+        }
+        let source = doc.to_string();
+        let result = repair(
+            &source,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.to_yaml().unwrap(), source);
+    }
+}
