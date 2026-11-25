@@ -95,7 +95,15 @@ fn main() -> io::Result<ExitCode> {
     println!("| Command | Base | PR | Paired change | Threshold | Blocks above | Result |");
     println!("| --- | ---: | ---: | ---: | ---: | ---: | --- |");
     let mut regressed = false;
-    for command in ["merge", "merge-context", "validate-workspace", "registry-64", "registry-512", "converge", "repair"] {
+    for command in [
+        "merge",
+        "merge-context",
+        "validate-workspace",
+        "registry-64",
+        "registry-512",
+        "converge",
+        "repair",
+    ] {
         regressed |= compare(command, [base, head])?;
     }
     if Command::new(base)

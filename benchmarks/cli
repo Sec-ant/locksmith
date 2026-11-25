@@ -1,8 +1,7 @@
 #!/bin/sh
 set -eu
-bench=$(dirname "$0")
 case "$1" in
-  registry-64|registry-512) exec python3 "$bench/registry.py" "${LOCKSMITH_BIN:-locksmith}" "${1#registry-}" ;;
+  registry-64|registry-512) exec python3 "$(dirname "$0")/registry.py" "${LOCKSMITH_BIN:-locksmith}" "${1#registry-}" ;;
 esac
 cd "$LOCKSMITH_BENCH_DIR/worktree"
 case "$1" in

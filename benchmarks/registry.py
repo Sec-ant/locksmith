@@ -12,6 +12,8 @@ from pathlib import Path
 
 class Registry(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Flush headers and body together at the end of each loopback request.
+    wbufsize = -1
 
     def log_message(self, *args):
         pass
