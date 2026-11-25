@@ -853,3 +853,68 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
     );
     assert!(merge(&old, &old, &old, Some(&ctx)).is_err());
 }
+
+#[test]
+fn workspace_operations_check_the_recorded_package_manager_pin() {
+    let version = "12.21.0";
+    let config = WorkspaceConfig::from_pnpm_version(&json!({}), &version.parse().unwrap()).unwrap();
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"packageManager":format!("pnpm@{version}+sha512.abc")}),
+    )]);
+    let patches = BTreeMap::new();
+    let ctx = MergeContext {
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configuration: &config,
+        configurations: [&config; 3],
+        patches: &patches,
+        registry: None,
+    };
+    let repair = locksmith::RepairContext {
+        manifests: &manifests,
+        configuration: &config,
+        patches: &patches,
+        parents: &[],
+        registry: None,
+    };
+    let root = &manifests["."];
+    let changes = [locksmith::ManifestChange {
+        importer: ".",
+        before: Some(root),
+        after: Some(root),
+    }];
+    let options = locksmith::ConvergeOptions {
+        baseline_configuration: Some(&config),
+        configuration: Some(&config),
+        registry: None,
+    };
+    for (specifier, resolved, valid) in [
+        (version, version, true),
+        ("12.20.0", "12.20.0", false),
+        (version, "12.20.0", false),
+    ] {
+        let env = json!({"lockfileVersion":"9.0","importers":{".":{"configDependencies":{},"packageManagerDependencies":{"pnpm":{"specifier":specifier,"version":resolved}}}},
+            "packages":{format!("pnpm@{resolved}"):{"resolution":{}}},"snapshots":{format!("pnpm@{resolved}"): {}}});
+        let lock = Lockfile::parse(&format!(
+            "---\n{env}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            locksmith::repair(&lock.to_yaml().unwrap(), &repair).is_ok(),
+            valid
+        );
+        assert_eq!(
+            lock.validate_workspace(&manifests, &Default::default(), &config, &patches, |_| Ok(
+                None
+            ))
+            .is_ok(),
+            valid
+        );
+        assert_eq!(merge(&lock, &lock, &lock, Some(&ctx)).is_ok(), valid);
+        assert_eq!(
+            locksmith::converge(&lock, &lock, &changes, options).is_ok(),
+            valid
+        );
+    }
+}

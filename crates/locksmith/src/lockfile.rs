@@ -71,6 +71,37 @@ impl Lockfile {
             .ok()
     }
 
+    /// An absent group means the lock does not manage the package manager itself.
+    pub(crate) fn matches_pnpm_specifier(&self, wanted: &str) -> Option<bool> {
+        let pins = self.environment()?["importers"]["."].get("packageManagerDependencies")?;
+        Some(pins.as_object().is_some_and(|pins| {
+            let Some(version) = pins.get("pnpm").and_then(|pin| pin["version"].as_str()) else {
+                return false;
+            };
+            let Ok(resolved) = version.parse::<node_semver::Version>() else {
+                return false;
+            };
+            wanted
+                .parse::<node_semver::Range>()
+                .map_or(true, |range| resolved.satisfies(&range))
+                && pins
+                    .values()
+                    .all(|pin| pin["specifier"] == wanted && pin["version"] == version)
+        }))
+    }
+
+    pub(crate) fn check_package_manager(&self, root: &Value) -> Result<(), LockfileError> {
+        if let Some(wanted) = crate::manifest::pnpm_specifier(root)
+            && self.matches_pnpm_specifier(wanted) == Some(false)
+        {
+            return Err(crate::reconcile::missing(
+                &["importers", ".", "packageManagerDependencies", "pnpm"],
+                format!("bootstrap graph does not match the declared pnpm@{wanted}"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Manifest paths needed to determine linked peer provider versions, including non-member directories.
     pub fn linked_peer_projects(&self) -> BTreeSet<String> {
         let mut ids = BTreeSet::new();
@@ -151,6 +182,9 @@ impl Lockfile {
                 "workspace",
                 "configDependencies differ from the bootstrap lockfile",
             ));
+        }
+        if let Some(root) = manifests.get(".") {
+            self.check_package_manager(root)?;
         }
         let recorded = config.read_lock_settings(document)?;
         if recorded != config.recorded_settings() {

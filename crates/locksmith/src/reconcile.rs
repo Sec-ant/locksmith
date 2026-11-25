@@ -428,25 +428,15 @@ fn environment_source(
         )
     })?;
     let order = std::iter::once(first).chain(matching);
-    let managers = locks.map(|l| {
-        l.environment()?
-            .get("importers")?
-            .get(".")?
-            .get("packageManagerDependencies")
-    });
-    let Some(version) = manifest
-        .get("packageManager")
-        .and_then(Value::as_str)
-        .and_then(|v| v.strip_prefix("pnpm@"))
-    else {
+    let Some(version) = manifest::pnpm_specifier(manifest) else {
         return Ok(first);
     };
+    let managers = locks.map(|lock| lock.matches_pnpm_specifier(version));
     if managers.iter().all(|m| m.is_none()) {
         return Ok(first);
     }
-    let version = version.split_once("+sha").map_or(version, |(v, _)| v);
     for side in order.clone() {
-        if managers[side].is_some_and(|deps| deps["pnpm"]["specifier"] == version) {
+        if managers[side] == Some(true) {
             return Ok(side);
         }
     }

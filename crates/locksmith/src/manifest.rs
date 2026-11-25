@@ -5,6 +5,18 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
+pub(crate) fn pnpm_specifier(manifest: &Value) -> Option<&str> {
+    let declared = manifest
+        .get("packageManager")?
+        .as_str()?
+        .strip_prefix("pnpm@")?;
+    Some(
+        declared
+            .split_once("+sha")
+            .map_or(declared, |(spec, _)| spec),
+    )
+}
+
 pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     let alias = specifier.strip_prefix("npm:")?;
     Some(

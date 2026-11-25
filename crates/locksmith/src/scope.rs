@@ -137,6 +137,13 @@ pub fn converge_with_recorded_baselines(
         manifests: changes,
         recorded: recorded_baselines,
     };
+    if let Some(root) = changes
+        .iter()
+        .find(|c| c.importer == ".")
+        .and_then(|c| c.after)
+    {
+        candidate.check_package_manager(root)?;
+    }
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
         if !config.matches_config_dependencies(candidate.environment()) {
             return Err(crate::reconcile::missing(

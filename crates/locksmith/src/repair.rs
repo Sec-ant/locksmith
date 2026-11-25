@@ -110,18 +110,7 @@ impl RepairInput {
             if !issues.is_empty() {
                 return Err(LockfileError::InvalidGraph(issues));
             }
-            if let (Some(pin), Some(manager)) = (
-                env["importers"]["."]["packageManagerDependencies"]["pnpm"]["specifier"].as_str(),
-                root["packageManager"]
-                    .as_str()
-                    .and_then(|v| v.strip_prefix("pnpm@")),
-            ) && manager.split('+').next() != Some(pin)
-            {
-                return Err(missing(
-                    &["packageManagerDependencies", "pnpm"],
-                    "bootstrap graph does not match the declared package manager",
-                ));
-            }
+            lock.check_package_manager(root)?;
         }
         let mut evidence = Evidence::new(lock, context);
         let current = (lock, context.configuration);
