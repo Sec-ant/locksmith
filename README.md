@@ -11,7 +11,7 @@ Locksmith works directly on the lockfile graph and preserves versions and peer b
 | Two branches changed the lockfile                                                   | [`merge`](#merge-two-branches)                            |
 | You edited dependencies and `pnpm install` changed more than you expected           | [`converge`](#reduce-changes-after-an-install)            |
 | Git already merged the lockfile, but some records are duplicated, stale, or missing | [`repair`](#repair-an-already-merged-lockfile)            |
-| You want to check a lockfile for errors before merging                              | [`validate`](#validate-a-lockfile)                        |
+| You want to check a lockfile for errors or compare it with the workspace             | [`validate`](#validate-a-lockfile)                        |
 | You want to trace a peer warning or find packages with multiple locked instances    | [`inspect`](#inspect-peer-bindings-and-package-instances) |
 
 ## Install
@@ -102,9 +102,13 @@ A healthy lock comes back byte-for-byte. Repair preserves valid pins and can rec
 
 ## Validate a lockfile
 
-Run `locksmith validate [FILE]` to check YAML structure and internal references, including duplicate keys and missing snapshots. The path defaults to `pnpm-lock.yaml` in the current directory. The check only reads the lockfile and runs offline.
+Run `locksmith validate [FILE]` to check YAML structure and internal references, including duplicate keys and missing snapshots. The path defaults to `pnpm-lock.yaml` in the current directory. This mode only reads the lockfile and runs offline.
 
-In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also depends on the workspace manifests, settings, and package availability.
+Use `locksmith validate --workspace [FILE]` to also check that workspace members, dependency declarations, recorded settings, and configured patches match the lockfile. A `workspace:` dependency must have a local pin. A relative `workspace:` link must point to the declared path, which pnpm allows to be absent from the checkout. For a named dependency, the selected member must have the declared name and satisfy any explicit version range. Some pnpm releases reuse a frozen link after its target changes. The lockfile's directory is the workspace root. The check reads local inputs, works outside Git, and does not install packages. A workspace with `pnpm-workspace.yaml` can omit its root package manifest. The check returns `2` if a pnpmfile can change the effective declarations.
+
+When the workspace omits `packages` and the pnpm version is unknown, Locksmith selects only the root package. Projects using the recursive default of pnpm before 10.5 can declare their pnpm version in `packageManager`.
+
+In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also checks package availability and integrity.
 
 ## Inspect peer bindings and package instances
 
@@ -122,7 +126,7 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 - On success, `merge`, `converge`, and `repair` write YAML to stdout. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
 - Diagnostics go to stderr.
-- `validate` is silent on success (`0`). It returns `1` for an invalid lockfile and `2` when it cannot check the file, for example if the file is unreadable or uses an unsupported format version.
+- `validate` is silent on success (`0`). It returns `1` for an invalid lockfile or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check.
 - For other commands, exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
 - The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
 

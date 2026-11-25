@@ -94,7 +94,7 @@ pub(crate) fn plan(
                 continue;
             };
             if let Some(spec) = overrides.apply(&identity, ".", name, declaration)?
-                && reconcile::alias(&spec)
+                && manifest::alias(&spec)
                     .map_or(spec.as_ref(), |(_, v)| v)
                     .parse::<node_semver::Version>()
                     .is_ok()

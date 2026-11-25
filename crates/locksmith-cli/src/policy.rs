@@ -11,6 +11,10 @@ impl Policy {
         Self(crate::workspace::pnpm_version(manifest))
     }
 
+    pub fn from_project(project: &crate::workspace::Project) -> Self {
+        Self(project.pnpm_version.clone())
+    }
+
     pub fn configuration(&self, raw: &Value) -> Result<WorkspaceConfig, LockfileError> {
         match &self.0 {
             Some(v) => WorkspaceConfig::from_pnpm_version(raw, v),

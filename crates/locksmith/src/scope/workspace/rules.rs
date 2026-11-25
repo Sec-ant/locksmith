@@ -109,7 +109,7 @@ pub(super) fn catalogs(
                 }
                 // pnpm may omit the catalog record for an existing exact
                 // release. A new consumer can use that same locked release.
-                let (target, range) = reconcile::alias(spec).unwrap_or((name, spec));
+                let (target, range) = manifest::alias(spec).unwrap_or((name, spec));
                 if before == after
                     && base.is_none()
                     && range.parse::<node_semver::Version>().is_ok()
@@ -122,10 +122,10 @@ pub(super) fn catalogs(
                 }
                 if let (Some(before), Some(pin)) =
                     (before, base.and_then(|v| v["version"].as_str()))
-                    && reconcile::alias(before).map(|a| a.0) == reconcile::alias(spec).map(|a| a.0)
+                    && manifest::alias(before).map(|a| a.0) == manifest::alias(spec).map(|a| a.0)
                     && metadata::catalog_version_fits(spec, pin, Some(before))
                 {
-                    let target = reconcile::alias(spec).map_or(name.as_str(), |(n, _)| n);
+                    let target = manifest::alias(spec).map_or(name.as_str(), |(n, _)| n);
                     let key = format!("{target}@{pin}");
                     // A peer-free snapshot can serve a new importer directly. A
                     // contextual instance needs evidence from that consumer.
@@ -276,7 +276,7 @@ pub(super) fn importer_choices(
                         dep["version"].as_str().is_some_and(|pin| {
                             reconcile::accepts(name, effective, pin, doc)
                                 || (effective.parse::<node_semver::Range>().is_err()
-                                    && reconcile::alias(effective).is_none()
+                                    && manifest::alias(effective).is_none()
                                     && dep == right)
                         })
                     };
@@ -391,7 +391,7 @@ pub(in crate::scope) fn check_installed_rules(
                 (None, p) => p.is_none(),
                 (Some(_), None) => required.is_none() || expected[1][1].contains_key(name),
                 (Some(s), Some((_, p))) if overridden || previous_edge.is_none() => {
-                    s.parse::<node_semver::Range>().is_err() && reconcile::alias(s).is_none()
+                    s.parse::<node_semver::Range>().is_err() && manifest::alias(s).is_none()
                         || reconcile::accepts(name, s, p, donor)
                 }
                 _ => true,

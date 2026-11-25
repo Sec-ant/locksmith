@@ -39,9 +39,13 @@ pub enum Command {
         reference: String,
     },
 
-    /// Check a pnpm lockfile's structure and internal references.
+    /// Check a pnpm lockfile's structure, references and optionally its workspace.
     #[bpaf(command)]
     Validate {
+        /// Compare the lockfile with the workspace rooted beside it
+        #[bpaf(long)]
+        workspace: bool,
+
         /// Lockfile to validate (default: pnpm-lock.yaml)
         #[bpaf(
             positional("FILE"),

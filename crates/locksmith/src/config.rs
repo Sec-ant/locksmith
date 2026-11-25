@@ -163,29 +163,31 @@ impl WorkspaceConfig {
         } else {
             LinkedPeerEncoding::Filename
         };
-        if v.major() < 11
-            || (v.major() == 11 && v < &node_semver::Version::from((11, 28, 12)))
-            || (v.major() == 12 && v < &node_semver::Version::from((12, 19, 0)))
-        {
+        if !config.since((11, 28, 12), (12, 19, 0)) {
             config.resolution.optional_peer_scope = OptionalPeerScope::Workspace;
         }
         Ok(config)
     }
 
-    pub(crate) fn matches_catalog_ranges(&self) -> bool {
+    /// Some frozen-lockfile checks shipped separately on the pnpm 11 and 12 lines.
+    pub(crate) fn since(&self, pnpm11: (u64, u64, u64), pnpm12: (u64, u64, u64)) -> bool {
         self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
-            11 => v >= &node_semver::Version::from((11, 28, 12)),
-            12 => v >= &node_semver::Version::from((12, 20, 0)),
+            11 => v >= &pnpm11.into(),
+            12 => v >= &pnpm12.into(),
             major => major > 12,
         })
     }
 
+    pub(crate) fn matches_catalog_ranges(&self) -> bool {
+        self.since((11, 28, 12), (12, 20, 0))
+    }
+
+    pub(crate) fn supports_omitted_workspace_link(&self, catalog: bool) -> bool {
+        self.since((11, 28, 11), (12, if catalog { 18 } else { 6 }, 0))
+    }
+
     pub(crate) fn records_link_directory(&self) -> bool {
-        self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
-            11 => v >= &node_semver::Version::from((11, 26, 0)),
-            12 => v >= &node_semver::Version::from((12, 3, 2)),
-            major => major > 12,
-        })
+        self.since((11, 26, 0), (12, 3, 2))
     }
 
     /// Whether both configurations name pnpm releases in different major versions.
@@ -237,7 +239,11 @@ impl WorkspaceConfig {
                 inject_workspace_packages: decode(value, "injectWorkspacePackages")?
                     .unwrap_or(false),
                 package_extensions: value.get("packageExtensions").cloned(),
-                ignored_optional_dependencies: ignored_optional_dependencies(value)?,
+                ignored_optional_dependencies: {
+                    let patterns =
+                        optional_patterns(value.get("ignoredOptionalDependencies"), true)?;
+                    (!patterns.is_empty()).then(|| Value::from(patterns))
+                },
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
                 parameters: [
                     "peersSuffixMaxLength",
@@ -261,12 +267,89 @@ impl WorkspaceConfig {
     }
 }
 
-pub(crate) fn ignored_optional_dependencies(value: &Value) -> Result<Option<Value>, LockfileError> {
-    let names = decode::<Option<Vec<String>>>(value, "ignoredOptionalDependencies")?.flatten();
-    Ok(names.filter(|names| !names.is_empty()).map(|mut names| {
+/// Order matters only for mixed positive and negative patterns. Serialized
+/// pnpm headers can be sorted even when the configured matcher uses authored order.
+pub(crate) fn optional_patterns(
+    value: Option<&Value>,
+    preserve_mixed_order: bool,
+) -> Result<Vec<&str>, LockfileError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let invalid = || {
+        LockfileError::InvalidDocument(
+            "ignoredOptionalDependencies must be an array of strings".into(),
+        )
+    };
+    let mut names: Vec<_> = value
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|v| v.as_str().ok_or_else(invalid))
+        .collect::<Result<_, _>>()?;
+    if !preserve_mixed_order
+        || names.iter().all(|n| n.starts_with('!'))
+        || names.iter().all(|n| !n.starts_with('!'))
+    {
         names.sort_unstable();
-        Value::from(names)
-    }))
+    }
+    Ok(names)
+}
+
+impl ResolutionSettings {
+    pub(crate) fn ignored_optional_dependencies_match(
+        &self,
+        document: &Value,
+        preserve_mixed_order: bool,
+    ) -> Result<bool, LockfileError> {
+        Ok(optional_patterns(
+            document.get("ignoredOptionalDependencies"),
+            preserve_mixed_order,
+        )? == optional_patterns(
+            self.ignored_optional_dependencies.as_ref(),
+            preserve_mixed_order,
+        )?)
+    }
+}
+
+// pnpm treats only `*` as a wildcard. The last matching rule wins;
+// a list of only negative rules includes every name they do not match.
+pub(crate) fn matches_patterns<'a>(
+    patterns: impl DoubleEndedIterator<Item = &'a str>,
+    name: &str,
+) -> bool {
+    let mut patterns = patterns.rev().peekable();
+    let mut only_negative = patterns.peek().is_some();
+    for pattern in patterns {
+        let negative = pattern.strip_prefix('!');
+        if wildcard(negative.unwrap_or(pattern), name) {
+            return negative.is_none();
+        }
+        only_negative &= negative.is_some();
+    }
+    only_negative
+}
+
+fn wildcard(pattern: &str, value: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().expect("one split part");
+    let Some(mut rest) = value.strip_prefix(first) else {
+        return false;
+    };
+    let mut parts = parts.peekable();
+    if parts.peek().is_none() {
+        return rest.is_empty();
+    }
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return rest.ends_with(part);
+        }
+        let Some(offset) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[offset + part.len()..];
+    }
+    true
 }
 
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(

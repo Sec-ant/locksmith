@@ -60,6 +60,8 @@ pub enum LockfileError {
     },
     #[error("global configuration {field:?} changed in {importer:?} during convergence")]
     GlobalConfigurationChanged { importer: String, field: String },
+    #[error("could not read workspace input: {0}")]
+    WorkspaceInput(String),
     #[error("could not serialize lockfile: {0}")]
     Serialize(#[source] serde_saphyr::SerializeError),
     #[error("serialized lockfile does not reproduce its data")]

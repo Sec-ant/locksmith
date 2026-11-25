@@ -50,20 +50,7 @@ pub(super) fn edges(body: &Value) -> impl Iterator<Item = (&'static str, &String
 }
 
 pub(super) fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(), LockfileError> {
-    let extensions = cfg
-        .resolution
-        .package_extensions
-        .as_ref()
-        .filter(|v| v.as_object().is_none_or(|m| !m.is_empty()));
-    let hash = doc.get("packageExtensionsChecksum");
-    let valid = match (extensions, hash) {
-        (None, None) => true,
-        (Some(v), Some(h)) => h.as_str().is_some_and(|s| {
-            crate::checksum::extensions(v, v, s, cfg.extension_checksum).as_deref() == Some(s)
-        }),
-        _ => false,
-    };
-    if valid {
+    if crate::checksum::extensions_match(cfg, doc.get("packageExtensionsChecksum")) {
         Ok(())
     } else {
         Err(missing(
@@ -670,7 +657,7 @@ impl Projector<'_> {
                     && !peer_names.contains(name)
                     && installed_edge.is_some_and(|(_, pin)| {
                         (spec.parse::<node_semver::Range>().is_ok()
-                            || reconcile::alias(spec).is_some())
+                            || manifest::alias(spec).is_some())
                             && !reconcile::accepts(name, spec, pin, donor)
                     });
                 if required_missing || wrong_pin {
@@ -811,7 +798,7 @@ impl Projector<'_> {
         for (k, v) in self.records {
             output["snapshots"][k] = v;
         }
-        bindings::insert_rebound(output, self.peers.generated)?;
+        bindings::insert_rebound(output, self.peers.into_generated())?;
         Ok(self.affected)
     }
 }

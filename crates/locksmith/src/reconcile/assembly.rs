@@ -1,8 +1,7 @@
 //! Follow reachable dependency edges and install each repaired snapshot with its source metadata.
 use super::repair::repair_snapshot;
 use super::{
-    GraphSources, PeerChanges, RepairedSnapshot, authorized_patch, expand, key_in_inputs, missing,
-    peer_names,
+    GraphSources, PeerChanges, RepairedSnapshot, authorized_patch, expand, missing, peer_names,
 };
 use crate::{LockfileError, Value, graph, manifest, peer};
 use serde_json::json;
@@ -27,7 +26,7 @@ pub(super) fn assemble(
             for (name, dep) in graph::section(record, group).into_iter().flatten() {
                 let value = dep["version"].as_str().expect("selected version");
                 if !value.starts_with("link:") {
-                    pending.push(key_in_inputs(name, value, docs, &peers.generated));
+                    pending.push(peers.snapshot_key(name, value));
                 }
             }
         }
@@ -93,8 +92,7 @@ pub(super) fn assemble(
             {
                 peers.discard_generated(&key);
             }
-            let (side, body) = if let Some(body) = peers.generated.get(&key) {
-                let side = peers.origin_side(&key).expect("rebound instance origin");
+            let (side, body) = if let Some((side, body)) = peers.rebound_snapshot(&key) {
                 (side, Cow::Owned(body.clone()))
             } else {
                 selected.ok_or_else(|| {
@@ -157,7 +155,7 @@ pub(super) fn assemble(
                         missing(&["snapshots", &key, name], "expected dependency reference")
                     })?;
                     if !value.starts_with("link:") {
-                        pending.push(key_in_inputs(name, value, docs, &peers.generated));
+                        pending.push(peers.snapshot_key(name, value));
                     }
                 }
             }

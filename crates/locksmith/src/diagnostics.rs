@@ -252,9 +252,13 @@ fn allowed_peer(
     version: Option<&Version>,
 ) -> Option<String> {
     if binding.is_none() {
-        return matches_patterns(&rules.ignore_missing, name).then(|| "ignoreMissing".into());
+        return crate::config::matches_patterns(
+            rules.ignore_missing.iter().map(String::as_str),
+            name,
+        )
+        .then(|| "ignoreMissing".into());
     }
-    if matches_patterns(&rules.allow_any, name) {
+    if crate::config::matches_patterns(rules.allow_any.iter().map(String::as_str), name) {
         return Some("allowAny".into());
     }
     let version = version?;
@@ -287,43 +291,4 @@ fn allowed_peer(
         .flatten()
         .find(|(_, r)| range::satisfies_semver(version, r))
         .map(|(rule, _)| format!("allowedVersions/{rule}"))
-}
-
-// pnpm's matcher treats only `*` as a wildcard and applies negations in order.
-fn matches_patterns(patterns: &[String], name: &str) -> bool {
-    if patterns.is_empty() {
-        return false;
-    }
-    let mut matched = patterns.iter().all(|p| p.starts_with('!'));
-    for pattern in patterns.iter().map(String::as_str) {
-        let (negative, pattern) = pattern
-            .strip_prefix('!')
-            .map_or((false, pattern), |p| (true, p));
-        if wildcard(pattern, name) {
-            matched = !negative;
-        }
-    }
-    matched
-}
-
-fn wildcard(pattern: &str, value: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().expect("one split part");
-    let Some(mut rest) = value.strip_prefix(first) else {
-        return false;
-    };
-    let mut parts = parts.peekable();
-    if parts.peek().is_none() {
-        return rest.is_empty();
-    }
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            return rest.ends_with(part);
-        }
-        let Some(offset) = rest.find(part) else {
-            return false;
-        };
-        rest = &rest[offset + part.len()..];
-    }
-    true
 }

@@ -94,7 +94,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let mut blobs = git::Blobs::open()?;
     let [base, ours, theirs] = revisions
         .each_ref()
-        .map(|r| Project::read(&mut blobs, r, prefix));
+        .map(|r| Project::read(&mut blobs, r, prefix, None));
     let sources = [base?, ours?, theirs?];
     let root_conflict = workspace::CONFIG_FILES
         .iter()
@@ -102,7 +102,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     if root_conflict {
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
-    let project = Project::read(&mut blobs, &tree, prefix)?;
+    let project = Project::read(&mut blobs, &tree, prefix, None)?;
     project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
     let policy = policy::Policy::from_manifest(&project.root);

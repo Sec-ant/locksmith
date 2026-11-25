@@ -95,7 +95,7 @@ pub(crate) struct Merger<'a> {
     cache: HashMap<Triple, Option<String>>,
     active: HashSet<Triple>,
     rebinding: HashSet<String>,
-    pub generated: BTreeMap<String, Value>,
+    generated: BTreeMap<String, Value>,
     bindings: HashMap<(usize, String), Option<Bindings>>,
     misses: HashMap<(usize, String), HashSet<Vec<Option<String>>>>,
     constructed: HashMap<(usize, String), ConstructedBindings>,
@@ -235,6 +235,39 @@ impl<'a> Merger<'a> {
 
     pub(crate) fn origin_side(&self, key: &str) -> Option<usize> {
         self.origins.get(key).map(|(side, _, _)| *side)
+    }
+
+    pub(crate) fn has_generated(&self, key: &str) -> bool {
+        self.generated.contains_key(key)
+    }
+
+    pub(crate) fn rebound_snapshot(&self, key: &str) -> Option<(usize, &Value)> {
+        let body = self.generated.get(key)?;
+        Some((
+            self.origin_side(key).expect("rebound instance origin"),
+            body,
+        ))
+    }
+
+    pub(crate) fn into_generated(self) -> BTreeMap<String, Value> {
+        self.generated
+    }
+
+    pub(crate) fn snapshot_key(&self, name: &str, reference: &str) -> String {
+        let exists = |key| {
+            self.has_generated(key)
+                || self
+                    .documents
+                    .iter()
+                    .flatten()
+                    .any(|doc| doc["snapshots"].get(key).is_some())
+        };
+        let named = format!("{name}@{reference}");
+        if !exists(&named) && exists(reference) {
+            reference.into()
+        } else {
+            named
+        }
     }
 
     pub(crate) fn origin_key<'k>(&'k self, key: &'k str) -> &'k str {

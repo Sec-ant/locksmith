@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path},
+    fs,
+    path::{Component, Path, PathBuf},
 };
 
 use glob::{MatchOptions, Pattern};
@@ -58,7 +59,7 @@ pub fn read_manifest(
     Ok(None)
 }
 
-fn parse_manifest(path: &str, text: &str) -> Result<Value> {
+pub(crate) fn parse_manifest(path: &str, text: &str) -> Result<Value> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let value: Value = if path.ends_with(".json5") {
         json5::from_str(text).map_err(|e| format!("{path}: {e}"))?
@@ -77,15 +78,34 @@ pub struct Project {
     pub root: Value,
     pub config: Value,
     pub workspace: bool,
+    pub pnpm_version: Option<node_semver::Version>,
 }
 impl Project {
-    pub fn read(blobs: &mut Blobs, tree: &str, prefix: &str) -> Result<Self> {
-        Self::from_files(|path| blobs.read(tree, &format!("{prefix}{path}")))
+    pub fn read(
+        blobs: &mut Blobs,
+        tree: &str,
+        prefix: &str,
+        recorded_version: Option<node_semver::Version>,
+    ) -> Result<Self> {
+        Self::from_files(recorded_version, |path| {
+            blobs.read(tree, &format!("{prefix}{path}"))
+        })
     }
 
-    pub fn from_files(mut read: impl FnMut(&str) -> Result<Option<String>>) -> Result<Self> {
+    pub fn from_files(
+        recorded_version: Option<node_semver::Version>,
+        mut read: impl FnMut(&str) -> Result<Option<String>>,
+    ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-        let version = pnpm_version(&root);
+        Self::from_manifest(root, recorded_version, read)
+    }
+
+    pub fn from_manifest(
+        root: Value,
+        recorded_version: Option<node_semver::Version>,
+        mut read: impl FnMut(&str) -> Result<Option<String>>,
+    ) -> Result<Self> {
+        let version = pnpm_version(&root).or(recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
@@ -110,6 +130,7 @@ impl Project {
             root,
             config,
             workspace,
+            pnpm_version: version,
         })
     }
 }
@@ -134,6 +155,8 @@ pub fn settings(
         }
         None => json!({}),
     };
+    // Membership is declared in pnpm-workspace.yaml, including the omitted-key default.
+    config.as_object_mut().unwrap().remove("packages");
     // Read this hook setting only from the configuration files supported by pnpm.
     config.as_object_mut().unwrap().remove("ignorePnpmfile");
     let legacy = version.is_none_or(|v| v.major() < 11);
@@ -160,6 +183,12 @@ pub fn settings(
         let settings: Option<serde_json::Map<String, Value>> =
             serde_saphyr::from_str(text).map_err(|e| format!("pnpm-workspace.yaml: {e}"))?;
         if let Some(mut settings) = settings {
+            if version.is_some_and(|v| v < &node_semver::Version::from((10, 5, 0)))
+                && !settings.is_empty()
+                && !settings.contains_key("packages")
+            {
+                return Err("pnpm-workspace.yaml: this pnpm version requires packages in a nonempty workspace configuration".into());
+            }
             // pnpm 10.6 added .npmrc options to pnpm-workspace.yaml.
             if version.is_some_and(|v| v < &node_semver::Version::from((10, 6, 0))) {
                 settings.remove("ignorePnpmfile");
@@ -171,6 +200,7 @@ pub fn settings(
                     "injectWorkspacePackages",
                     "autoInstallPeers",
                     "addMissingPeerTypes",
+                    "ignoredOptionalDependencies",
                 ] {
                     settings.remove(key);
                 }
@@ -346,21 +376,42 @@ fn ini_bool(value: &str) -> std::result::Result<bool, std::str::ParseBoolError> 
         .parse()
 }
 
+const GLOB_OPTIONS: MatchOptions = MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: true,
+};
+
 pub struct Members {
     include: Vec<Pattern>,
     exclude: Vec<Pattern>,
+    descend: BTreeMap<String, Vec<Pattern>>,
+    excluded_trees: Vec<Pattern>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
+        Self::from_patterns(project, false)
+    }
+
+    fn from_patterns(project: &Project, on_disk: bool) -> Result<Self> {
         let mut this = Self {
             include: vec![],
             exclude: vec![],
+            descend: BTreeMap::new(),
+            excluded_trees: Vec::new(),
         };
         if !project.workspace {
             return Ok(this);
         }
         let patterns: Vec<String> = match project.config.get("packages") {
-            None => vec!["**".into()],
+            None if project
+                .pnpm_version
+                .as_ref()
+                .is_some_and(|v| v < &node_semver::Version::from((10, 5, 0))) =>
+            {
+                vec!["**".into()]
+            }
+            None => Vec::new(),
             Some(v) => serde_json::from_value(v.clone())?,
         };
         for value in patterns {
@@ -381,18 +432,35 @@ impl Members {
                 for part in alternative.split('/') {
                     match part {
                         "" | "." => (),
-                        ".." => {
-                            if parts.pop().is_none() {
-                                return Err(
-                                    format!("workspace glob escapes the root: {value:?}").into()
-                                );
-                            }
+                        ".." if parts.last().is_some_and(|&p| p != "..") => {
+                            parts.pop();
+                        }
+                        ".." if !on_disk => {
+                            return Err(
+                                format!("workspace glob escapes the root: {value:?}").into()
+                            );
                         }
                         _ => parts.push(part),
                     }
                 }
                 if !parts.is_empty() {
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
+                    if on_disk && !value.starts_with('!') {
+                        let parents = parts.iter().take_while(|&&p| p == "..").count();
+                        let descend = this.descend.entry(parts[..parents].join("/")).or_default();
+                        for (index, part) in parts.iter().enumerate().skip(parents) {
+                            if index + 1 < parts.len() || *part == "**" {
+                                descend.push(Pattern::new(&parts[..=index].join("/"))?);
+                            }
+                        }
+                    } else if on_disk && let Some(prefix) = parts.strip_suffix(&["**"]) {
+                        let tree = if prefix.is_empty() {
+                            "**".to_owned()
+                        } else {
+                            prefix.join("/")
+                        };
+                        this.excluded_trees.push(Pattern::new(&tree)?);
+                    }
                 }
             }
         }
@@ -429,6 +497,82 @@ impl Members {
             .collect())
     }
 
+    /// Discover manifests from disk, including projects absent from Git or the lockfile.
+    pub fn directories_on_disk(
+        project: &Project,
+        root: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>> {
+        let members = Self::from_patterns(project, true)?;
+        let mut found = BTreeMap::new();
+        for (id, descend) in &members.descend {
+            let path = root.join(id).canonicalize()?;
+            let mut ancestors = BTreeSet::from([path.clone()]);
+            members.visit(&path, id, descend, &mut ancestors, &mut |id, directory| {
+                let id = importer_id(root, id);
+                if !id.is_empty() {
+                    found.insert(id, directory.to_owned());
+                }
+            })?;
+        }
+        Ok(found)
+    }
+
+    fn visit(
+        &self,
+        directory: &Path,
+        id: &str,
+        descend: &[Pattern],
+        ancestors: &mut BTreeSet<PathBuf>,
+        found: &mut impl FnMut(&str, &Path),
+    ) -> Result<()> {
+        let entries =
+            fs::read_dir(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if MANIFEST_NAMES.contains(&name) && !id.is_empty() && self.contains(id) {
+                found(id, directory);
+            }
+            if matches!(name, ".git" | "node_modules" | "bower_components") {
+                continue;
+            }
+            let child = if id.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{id}/{name}")
+            };
+            let kind = entry.file_type()?;
+            if !kind.is_dir() && !kind.is_symlink() {
+                continue;
+            }
+            let matches = |p: &Pattern| p.matches_with(&child, GLOB_OPTIONS);
+            if self.excluded_trees.iter().any(matches)
+                || !(self.contains(&child) || descend.iter().any(matches))
+            {
+                continue;
+            }
+            let path = if kind.is_symlink() {
+                match entry.path().canonicalize() {
+                    Ok(target) if fs::metadata(&target)?.is_dir() => target,
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(format!("{}: {e}", entry.path().display()).into()),
+                }
+            } else if kind.is_dir() {
+                entry.path()
+            } else {
+                continue;
+            };
+            // Detect cycles on this branch; two aliases may both be genuine importer IDs.
+            if ancestors.insert(path.clone()) {
+                self.visit(&path, &child, descend, ancestors, found)?;
+                ancestors.remove(&path);
+            }
+        }
+        Ok(())
+    }
+
     fn manifest_paths<'a>(&self, paths: &'a str, prefix: &str) -> BTreeMap<&'a str, &'a str> {
         let mut manifests = BTreeMap::new();
         for path in paths
@@ -457,16 +601,32 @@ impl Members {
             return false;
         }
         let path = format!("{dir}/package.json");
-        let matches = |p: &Pattern| {
-            p.matches_with(
-                &path,
-                MatchOptions {
-                    case_sensitive: true,
-                    require_literal_separator: true,
-                    require_literal_leading_dot: true,
-                },
-            )
-        };
+        let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
     }
+}
+
+/// Normalize a parent-relative glob match without resolving symlinks in its importer ID.
+fn importer_id(root: &Path, path: &str) -> String {
+    let mut parts = path.split('/').peekable();
+    let mut base = root;
+    while parts.next_if_eq(&"..").is_some() {
+        base = base.parent().unwrap_or(base);
+    }
+    let mut from = root
+        .strip_prefix(base)
+        .expect("workspace ancestor")
+        .components()
+        .peekable();
+    while from
+        .peek()
+        .is_some_and(|part| parts.peek().is_some_and(|name| part.as_os_str() == *name))
+    {
+        from.next();
+        parts.next();
+    }
+    std::iter::repeat_n("..", from.count())
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join("/")
 }

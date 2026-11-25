@@ -153,7 +153,7 @@ pub(super) fn bind(
             }
         }
     }
-    Ok(peers.generated)
+    Ok(peers.into_generated())
 }
 
 fn select(

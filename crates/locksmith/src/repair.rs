@@ -38,6 +38,19 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
 }
 
 impl RepairInput {
+    /// Read the pnpm version from the bootstrap document even if the following
+    /// project document needs repair.
+    pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
+        let text = text.trim_start_matches('\u{feff}');
+        let ranges = crate::source::document_ranges(text);
+        let [bootstrap, _, ..] = ranges.as_slice() else {
+            return None;
+        };
+        Lockfile::parse(&text[bootstrap.clone()])
+            .ok()?
+            .recorded_pnpm_version()
+    }
+
     /// Accept the same YAML and identical duplicate records as [`repair`].
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
         edit::parse_for_repair(text, None).map(Self)
@@ -192,20 +205,15 @@ pub(crate) fn check_configuration(
     if !manifest::same_overrides(doc, metadata) {
         return Err(mismatch("overrides"));
     }
-    if manifest::rule_map(doc, "patchedDependencies") != metadata.get("patchedDependencies") {
+    if !reconcile::metadata::same_patch_records(doc, metadata.get("patchedDependencies")) {
         return Err(mismatch("patchedDependencies"));
     }
-    let ext = cfg
-        .resolution
-        .package_extensions
-        .as_ref()
-        .filter(|v| v.as_object().is_none_or(|m| !m.is_empty()));
-    match (ext, doc["packageExtensionsChecksum"].as_str()) {
-        (None, None) => (),
-        (Some(ext), Some(hash))
-            if crate::checksum::extensions(ext, ext, hash, cfg.extension_checksum).as_deref()
-                == Some(hash) => {}
-        _ => return Err(mismatch("packageExtensionsChecksum")),
+    if !crate::checksum::extensions_match(
+        cfg,
+        doc.get("packageExtensionsChecksum")
+            .filter(|hash| hash.is_string()),
+    ) {
+        return Err(mismatch("packageExtensionsChecksum"));
     }
     if !crate::checksum::hooks_match(
         cfg.resolution.pnpmfile_checksum.as_ref(),
@@ -213,8 +221,10 @@ pub(crate) fn check_configuration(
     ) {
         return Err(mismatch("pnpmfileChecksum"));
     }
-    if cfg.resolution.ignored_optional_dependencies
-        != crate::config::ignored_optional_dependencies(doc)?
+    // Repair cannot infer the source order of mixed patterns from a sorted header.
+    if !cfg
+        .resolution
+        .ignored_optional_dependencies_match(doc, true)?
     {
         return Err(mismatch("ignoredOptionalDependencies"));
     }

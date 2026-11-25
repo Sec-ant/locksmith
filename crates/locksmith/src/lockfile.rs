@@ -110,6 +110,141 @@ impl Lockfile {
         self.validate_with_config(None)
     }
 
+    /// Check the graph and compare its importers against the complete set of
+    /// workspace manifests and configured patch files, keyed by declared path.
+    /// External members are paths inside the workspace whose symlinks lead outside the root.
+    /// Callers supply effective manifests if hooks apply. For a range pinned to a
+    /// directory outside the member set, `read_linked` supplies its manifest,
+    /// `None` for an absent directory, or an error for unreadable inputs.
+    pub fn validate_workspace(
+        &self,
+        manifests: &BTreeMap<String, Value>,
+        external_members: &BTreeSet<String>,
+        config: &crate::WorkspaceConfig,
+        patches: &BTreeMap<String, String>,
+        read_linked: impl Fn(&str) -> Result<Option<Value>, LockfileError>,
+    ) -> Result<(), LockfileError> {
+        self.validate_with_config(Some(config))?;
+        let document = self
+            .project()
+            .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
+        let recorded = crate::LockSettings::from_document(document);
+        let configured = &config.resolution.lock;
+        if recorded.auto_install_peers != configured.auto_install_peers
+            || recorded.dedupe_peers != configured.dedupe_peers
+            || recorded.exclude_links_from_lockfile != configured.exclude_links_from_lockfile
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "dependency settings differ",
+            ));
+        }
+        crate::repair::check_recorded_settings(document, config)?;
+        if let Some(catalogs) = document.get("catalogs") {
+            for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
+                crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
+            })? {
+                for (name, record) in entries.as_object().ok_or_else(|| {
+                    crate::manifest::mismatch(
+                        ".",
+                        "workspace",
+                        format!("catalogs/{catalog} must be a mapping"),
+                    )
+                })? {
+                    let configured = config.catalogs.get(catalog).and_then(|c| c.get(name));
+                    if !configured.is_some_and(|spec| record["specifier"] == spec.as_str()) {
+                        return Err(crate::manifest::mismatch(
+                            ".",
+                            "workspace",
+                            format!("catalogs/{catalog}/{name} specifier differs"),
+                        ));
+                    }
+                }
+            }
+        }
+        let patches_match = |encoding| {
+            let expected = crate::reconcile::metadata::patch_records(config, patches, encoding)?;
+            Ok::<_, LockfileError>(crate::reconcile::metadata::same_patch_records(
+                document,
+                expected.as_ref(),
+            ))
+        };
+        if !patches_match(config.patch_encoding)?
+            && !(config.pnpm_version.is_none()
+                && (patches_match(crate::PatchEncoding::Md5Base32WithPath)?
+                    || patches_match(crate::PatchEncoding::Sha256)?))
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "patchedDependencies differs",
+            ));
+        }
+        if !crate::checksum::extensions_match(config, document.get("packageExtensionsChecksum")) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "packageExtensionsChecksum differs",
+            ));
+        }
+        if !config
+            .resolution
+            .ignored_optional_dependencies_match(document, false)?
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "ignoredOptionalDependencies differs",
+            ));
+        }
+        let effective =
+            crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
+        let recorded_overrides = crate::manifest::rule_map(document, "overrides");
+        if effective.as_ref() != recorded_overrides
+            || effective
+                .as_ref()
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .ne(recorded_overrides
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten())
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "overrides differ",
+            ));
+        }
+        let overrides = crate::manifest::Overrides::new(document, config);
+        for id in graph::section(document, "importers")
+            .into_iter()
+            .flat_map(|m| m.keys())
+        {
+            if !manifests.contains_key(id) {
+                crate::manifest::check(&overrides, id, None, "workspace")?;
+            }
+        }
+        let workspace = crate::workspace_links::FrozenWorkspace::new(
+            manifests,
+            config,
+            external_members,
+            &read_linked,
+        )?;
+        for (id, manifest) in manifests {
+            crate::manifest::check_with_links(
+                &overrides,
+                id,
+                Some(manifest),
+                "workspace",
+                Some(&workspace),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_with_config(
         &self,
         config: Option<&crate::WorkspaceConfig>,

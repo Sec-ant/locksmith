@@ -1,6 +1,6 @@
 ---
 name: locksmith
-description: Resolves pnpm-lock.yaml merge and rebase conflicts, repairs stale or missing committed lockfile entries, and removes unrelated version or peer changes after pnpm install. Inspects a single lockfile for unmet peers, workspace dependency paths, and packages with multiple versions or instances.
+description: Resolves, repairs, and validates pnpm lockfiles, including checking whether a lockfile matches its workspace without installing dependencies. Also reduces unrelated lockfile changes after pnpm install and inspects peer bindings and package instances.
 ---
 
 # Locksmith
@@ -8,6 +8,14 @@ description: Resolves pnpm-lock.yaml merge and rebase conflicts, repairs stale o
 Locksmith preserves pins and peer bindings allowed by the dependency declarations. It supports `lockfileVersion: '9.0'` (pnpm 9–12).
 
 For peer warnings or excess instances in an existing lockfile, run `locksmith inspect --json` from the workspace. Read the declaration and binding alongside `examplePath`. A null path means no workspace reaches that binding. Check `reason` on unknown findings. Matching locked versions are candidates for review.
+
+## Validate a lockfile
+
+Run `locksmith validate "$lockfile"` for a read-only check of YAML and internal dependency references. Use `locksmith validate --workspace "$lockfile"` to also check workspace members, dependency declarations, and recorded settings and patches. The file defaults to `pnpm-lock.yaml`. The workspace mode reads inputs beside that file, so place a scratch candidate beside the matching workspace inputs before using it.
+
+Both modes work offline. Exit `0` means the check passed, `1` means an invalid lockfile or workspace mismatch, and `2` means the check could not complete, for example when a pnpmfile may change the effective manifests. In a merge gate, check the lockfile from the final merge candidate. Package availability and artifact integrity are checked during installation.
+
+## Workspace operations
 
 Find the pnpm workspace that owns the lockfile. Check `git status --short` and the relevant manifest, configuration, and patch changes. Use the project's pnpm version. If `locksmith --version` fails because the CLI is missing, see the [installation instructions](https://github.com/Sec-ant/locksmith#install).
 
@@ -61,10 +69,10 @@ From the workspace root, run this for stale, duplicate, or missing records after
 locksmith repair --allow-network "$ref" > "$scratch/candidate.yaml"
 ```
 
-Repair reads the lockfile, manifests, and settings from the selected commit (`HEAD` by default), and can recover records from its parents. Verify against that same commit for a review-only repair. To check an uncommitted lock, verify the worktree inputs directly.
+Repair reads the lockfile, manifests, and settings from the selected commit (`HEAD` by default), and can recover records from its parents. Verify against that same commit for a review-only repair. Use `validate --workspace` to check an uncommitted lock against its worktree inputs.
 
 ## Review and verify
 
-- Exit code `1` indicates unresolved dependency evidence, a merge conflict, or a peer policy failure. For any failure, read stderr and address the named input before retrying.
+- For merge, repair, and converge, exit code `1` indicates unresolved dependency evidence, a merge conflict, or a peer policy failure. Read stderr for the failing input.
 - Review versions and peer bindings against the intended manifest changes. Compare with the baseline or relevant stage if the working lock still has conflict markers. For `git diff --no-index`, status `1` means the files differ.
-- In a scratch workspace with the matching manifests, settings, and patches, place the candidate at `pnpm-lock.yaml` and run `pnpm install --frozen-lockfile --lockfile-only --ignore-scripts`. Add `--offline` for offline work. This check needs no package tarballs. After it passes, deliver or apply the candidate as requested.
+- Run `locksmith validate` on the candidate to check internal references. To verify pnpm's manifest and settings checks, place the candidate at `pnpm-lock.yaml` in a scratch workspace with the matching manifests, settings, and patches, then run `pnpm install --frozen-lockfile --lockfile-only --ignore-scripts`. Add `--offline` for offline work. After verification, deliver or apply the candidate as requested.

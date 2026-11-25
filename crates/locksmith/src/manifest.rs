@@ -5,6 +5,27 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
+pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
+    let alias = specifier.strip_prefix("npm:")?;
+    Some(
+        alias
+            .rsplit_once('@')
+            .filter(|(name, _)| !name.is_empty())
+            .unwrap_or((alias, "*")),
+    )
+}
+
+/// A bare npm: range keeps the dependency key as its target package.
+pub(crate) fn registry_request<'a>(name: &'a str, specifier: &'a str) -> (&'a str, &'a str) {
+    if let Some(range) = specifier.strip_prefix("npm:")
+        && range.parse::<node_semver::Range>().is_ok()
+    {
+        (name, range)
+    } else {
+        alias(specifier).unwrap_or((name, specifier))
+    }
+}
+
 /// pnpm omits rule maps with no entries when writing the lockfile.
 pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
     document
@@ -32,6 +53,21 @@ pub(crate) fn declarations<'a>(
     overrides: &Overrides<'a>,
     importer: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
+    importer_declarations(manifest, overrides, importer, &[])
+}
+
+fn importer_declarations<'a>(
+    manifest: &'a Value,
+    overrides: &Overrides<'a>,
+    importer: &str,
+    ignored_optional: &[&str],
+) -> Result<Declarations<'a>, LockfileError> {
+    // pnpm 12 checks optional exclusions after peers have entered the production group.
+    let exclude_peer = overrides
+        .config
+        .pnpm_version
+        .as_ref()
+        .is_some_and(|v| v.major() >= 12);
     let mut result = BTreeMap::new();
     let settings = crate::LockSettings::from_document(overrides.document);
     for (field, group) in [
@@ -40,6 +76,9 @@ pub(crate) fn declarations<'a>(
         ("peerDependencies", "dependencies"),
         ("optionalDependencies", "optionalDependencies"),
     ] {
+        let filter_optional = !ignored_optional.is_empty()
+            && (matches!(field, "dependencies" | "optionalDependencies")
+                || (exclude_peer && field == "peerDependencies"));
         let engines = match field {
             "devDependencies" => manifest.get("devEngines"),
             "dependencies" => manifest.get("engines"),
@@ -82,6 +121,12 @@ pub(crate) fn declarations<'a>(
             let specifier = specifier
                 .as_str()
                 .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
+            if filter_optional
+                && manifest["optionalDependencies"].get(name).is_some()
+                && crate::config::matches_patterns(ignored_optional.iter().copied(), name)
+            {
+                continue;
+            }
             let replacement = overrides.select(manifest, name, specifier)?;
             let effective = match replacement {
                 Some(value) => overrides.resolve(importer, name, value)?,
@@ -140,6 +185,16 @@ pub(crate) fn check(
     manifest: Option<&Value>,
     side: &'static str,
 ) -> Result<(), LockfileError> {
+    check_with_links(overrides, importer, manifest, side, None)
+}
+
+pub(crate) fn check_with_links(
+    overrides: &Overrides<'_>,
+    importer: &str,
+    manifest: Option<&Value>,
+    side: &'static str,
+    workspace: Option<&crate::workspace_links::FrozenWorkspace<'_>>,
+) -> Result<(), LockfileError> {
     let document = overrides.document;
     let record = document.get("importers").and_then(|map| map.get(importer));
     let Some(manifest) = manifest else {
@@ -156,10 +211,21 @@ pub(crate) fn check(
     if !manifest.is_object() {
         return Err(LockfileError::InvalidManifest(importer.into()));
     }
-    let record = record
-        .filter(|value| value.is_object())
-        .ok_or_else(|| mismatch(importer, side, "missing importer"))?;
-    let expected = declarations(manifest, overrides, importer)?;
+    let empty;
+    let record = match record {
+        Some(value) if value.is_object() => value,
+        None if workspace.is_some_and(|ws| ws.can_omit_empty_importer(importer)) => {
+            empty = Value::Object(Default::default());
+            &empty
+        }
+        _ => return Err(mismatch(importer, side, "missing importer")),
+    };
+    let mut expected = importer_declarations(
+        manifest,
+        overrides,
+        importer,
+        workspace.map_or(&[], |ws| ws.ignored_optional.as_slice()),
+    )?;
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {
@@ -191,16 +257,19 @@ pub(crate) fn check(
                 }
                 // npm ranges differ from Cargo's semver ranges. Non-registry
                 // protocols (workspace, catalog, git, file) are graph-validated.
+                if let Some(ws) = workspace
+                    && expected
+                        .get(name.as_str())
+                        .is_some_and(|(g, s)| *g == group && s == specifier)
+                {
+                    ws.check_pin(document, importer, name, specifier, version)?;
+                }
                 if version.starts_with("link:") {
-                    // The selected workspace manifest supplies the version for a link.
                     continue;
                 }
                 let resolved_key;
-                let (range, version) = if let Some(alias) = specifier.strip_prefix("npm:") {
-                    let (target, range) = alias
-                        .rsplit_once('@')
-                        .filter(|(name, _)| !name.is_empty())
-                        .unwrap_or((alias, "*"));
+                let (range, version) = if specifier.starts_with("npm:") {
+                    let (target, range) = registry_request(name, specifier);
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));
@@ -232,6 +301,14 @@ pub(crate) fn check(
                 }
             }
         }
+    }
+    // A matching workspace member can explain an omitted pin. An existing
+    // registry pin for the same range still has to match its declaration.
+    if overrides.config.resolution.lock.exclude_links_from_lockfile
+        && let Some(ws) = workspace
+    {
+        expected
+            .retain(|name, (_, spec)| actual.contains_key(name) || !ws.links.can_omit(name, spec));
     }
     if actual != expected {
         let name = expected

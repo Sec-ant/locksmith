@@ -29,7 +29,7 @@ impl RegistryRequest {
     }
 
     pub(crate) fn version(name: &str, specifier: &str) -> Option<Self> {
-        let (name, selector) = crate::reconcile::alias(specifier).unwrap_or((name, specifier));
+        let (name, selector) = manifest::alias(specifier).unwrap_or((name, specifier));
         (valid_name(name) && (selector.parse::<node_semver::Range>().is_ok() || tag(selector)))
             .then(|| Self::Version {
                 name: name.into(),

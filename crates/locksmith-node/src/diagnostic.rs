@@ -83,6 +83,7 @@ pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> 
         }
         LockfileError::Parse(_) => ("INVALID_YAML", Value::Null),
         LockfileError::InvalidDocument(_) => ("INVALID_DOCUMENT", Value::Null),
+        LockfileError::WorkspaceInput(_) => ("WORKSPACE_INPUT", Value::Null),
         LockfileError::Serialize(_) => ("SERIALIZATION_FAILED", Value::Null),
         LockfileError::OutputMismatch => ("OUTPUT_MISMATCH", Value::Null),
     };

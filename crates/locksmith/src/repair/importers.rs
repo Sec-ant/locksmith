@@ -137,7 +137,7 @@ pub(super) fn repair<'a>(
                         entry.clone()
                     } else if let Some(pin) = retained {
                         let base = graph::package_key(pin);
-                        let version = reconcile::alias(range).map_or(base, |(pkg, _)| {
+                        let version = manifest::alias(range).map_or(base, |(pkg, _)| {
                             base.strip_prefix(pkg)
                                 .and_then(|v| v.strip_prefix('@'))
                                 .unwrap_or(base)
