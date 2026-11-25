@@ -21,8 +21,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let text = blobs
         .read(commit, &file)?
         .ok_or_else(|| format!("missing {reference}:{file}"))?;
-    let project = Project::read(&mut blobs, commit, prefix)?;
-    let policy = Policy::from_manifest(&project.root);
+    let version = RepairInput::recorded_pnpm_version(&text);
+    let project = Project::read(&mut blobs, commit, prefix, version)?;
+    let policy = Policy::from_project(&project);
     let config = policy.configuration(&project.config)?;
     let patches = workspace::patches(&config, prefix, |file| blobs.read(commit, file))?;
     let manifests = workspace::manifests(&project, &mut blobs, commit, prefix)?;
@@ -60,10 +61,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                             continue;
                         }
                     };
-                    let previous = Project::read(&mut blobs, parent, prefix)?;
+                    let previous =
+                        Project::read(&mut blobs, parent, prefix, lock.recorded_pnpm_version())?;
                     evidence.push((
                         lock,
-                        Policy::from_manifest(&previous.root).configuration(&previous.config)?,
+                        Policy::from_project(&previous).configuration(&previous.config)?,
                     ));
                 }
             }
@@ -119,8 +121,8 @@ fn recover_merge_snapshots(
             .read(revision, &file)?
             .ok_or_else(|| format!("missing {revision}:{file}"))?;
         let lock = Lockfile::try_from(text)?;
-        let project = Project::read(&mut blobs, revision, prefix)?;
-        let config = Policy::from_manifest(&project.root).configuration(&project.config)?;
+        let project = Project::read(&mut blobs, revision, prefix, lock.recorded_pnpm_version())?;
+        let config = Policy::from_project(&project).configuration(&project.config)?;
         Ok((lock, config))
     });
     let ((base, base_cfg), (ours, ours_cfg), (theirs, theirs_cfg)) = (base?, ours?, theirs?);

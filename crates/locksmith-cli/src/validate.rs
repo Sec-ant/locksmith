@@ -35,10 +35,7 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let config = match &project.pnpm_version {
-        Some(version) => locksmith::WorkspaceConfig::from_pnpm_version(&project.config, version)?,
-        None => locksmith::WorkspaceConfig::from_pnpm(&project.config)?,
-    };
+    let config = crate::policy::Policy::from_project(&project).configuration(&project.config)?;
     let mut manifests = BTreeMap::new();
     for id in Members::new(&project)?.directories_on_disk(root)? {
         if let Some(manifest) = workspace::read_manifest(&id, read)? {

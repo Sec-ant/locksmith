@@ -34,7 +34,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let prefix = git::output(&["rev-parse", "--show-prefix"])?;
     let prefix = prefix.trim_end_matches('\n');
     let mut blobs = Blobs::open()?;
-    let project = Project::read(&mut blobs, tree, prefix)?;
+    let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_manifest(&working.root);
     let base_config = Policy::from_manifest(&project.root).configuration(&project.config)?;

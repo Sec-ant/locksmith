@@ -81,8 +81,15 @@ pub struct Project {
     pub pnpm_version: Option<node_semver::Version>,
 }
 impl Project {
-    pub fn read(blobs: &mut Blobs, tree: &str, prefix: &str) -> Result<Self> {
-        Self::from_files(None, |path| blobs.read(tree, &format!("{prefix}{path}")))
+    pub fn read(
+        blobs: &mut Blobs,
+        tree: &str,
+        prefix: &str,
+        recorded_version: Option<node_semver::Version>,
+    ) -> Result<Self> {
+        Self::from_files(recorded_version, |path| {
+            blobs.read(tree, &format!("{prefix}{path}"))
+        })
     }
 
     pub fn from_files(

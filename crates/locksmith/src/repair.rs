@@ -38,6 +38,19 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
 }
 
 impl RepairInput {
+    /// Read the pnpm version from the bootstrap document even if the following
+    /// project document needs repair.
+    pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
+        let text = text.trim_start_matches('\u{feff}');
+        let ranges = crate::source::document_ranges(text);
+        let [bootstrap, _, ..] = ranges.as_slice() else {
+            return None;
+        };
+        Lockfile::parse(&text[bootstrap.clone()])
+            .ok()?
+            .recorded_pnpm_version()
+    }
+
     /// Accept the same YAML and identical duplicate records as [`repair`].
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
         edit::parse_for_repair(text, None).map(Self)

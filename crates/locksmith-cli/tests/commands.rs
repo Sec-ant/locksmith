@@ -885,13 +885,37 @@ fn repair_uses_the_selected_commit_and_recovers_a_missing_parent_record() {
 }
 
 #[test]
+fn repair_uses_the_recorded_pnpm_version_for_workspace_configuration() {
+    let repo = Repo::new();
+    let project = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let version = "12.15.0";
+    let lock = with_recorded_manager(version, &project);
+    repo.write(
+        "package.json",
+        &json!({"devEngines": {"packageManager": {"name": "pnpm", "version": version, "onFail": "download"}}}).to_string(),
+    );
+    repo.write(".npmrc", "auto-install-peers=false\n");
+    repo.write("pnpm-lock.yaml", &lock);
+    repo.commit("record pnpm in the lock alongside a legacy setting");
+
+    let out = repo.cmd(CLI, &["repair"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, lock.as_bytes());
+}
+
+#[test]
 fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
     const LOCK: &str = "pnpm-lock.yaml";
     let repo = Repo::new();
+    repo.write("package.json", "{}");
+    repo.write(".npmrc", "auto-install-peers=false\n");
     repo.write("apps/web/package.json", "{}");
     repo.write(
         LOCK,
-        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  apps/web: {}\n",
+        &with_recorded_manager(
+            "12.15.0",
+            "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  apps/web: {}\n",
+        ),
     );
     repo.commit("start without widget");
     repo.git(&["branch", "-f", "topic", "HEAD"]);
@@ -899,13 +923,14 @@ fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
     let snapshot =
         |version: &str| format!("  widget@1.0.0:\n    dependencies:\n      child: {version}\n");
     let lock = |snapshots: &str| {
-        format!(
+        let project = format!(
             "# preserve the merged lock's formatting\n\
 lockfileVersion: '9.0'\n\
 importers:\n  .: {{}}\n  apps/web:\n    dependencies:\n      widget: {{specifier: 1.0.0, version: 1.0.0}}\n\
 packages:\n  child@1.0.0: {{resolution: {{integrity: sha512-child-one}}}}\n  child@2.0.0: {{resolution: {{integrity: sha512-child-two}}}}\n  widget@1.0.0: {{resolution: {{integrity: sha512-widget}}}}\n\
 snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
-        )
+        );
+        with_recorded_manager("12.15.0", &project)
     };
     let ours = snapshot("1.0.0");
     let theirs = snapshot("2.0.0");
@@ -1330,17 +1355,10 @@ fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
         "auto-install-peers=false\nignore-pnpmfile=true\n",
     )
     .unwrap();
-    let version = "11.28.12";
-    let environment = json!({
-        "lockfileVersion": "9.0",
-        "importers": {".": {"packageManagerDependencies": {"pnpm": {"specifier": version, "version": version}}}},
-        "packages": {format!("pnpm@{version}"): {"resolution": {}}},
-        "snapshots": {format!("pnpm@{version}"): {}}
-    });
     let project = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
     fs::write(
         root.join("pnpm-lock.yaml"),
-        format!("---\n{environment}\n---\n{project}\n"),
+        with_recorded_manager("11.28.12", &format!("{project}\n")),
     )
     .unwrap();
     let result = validate_workspace_in(root);
@@ -1350,6 +1368,16 @@ fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
     let result = validate_workspace_in(root);
     assert_eq!(result.status.code(), Some(2), "{}", report(&result));
     assert!(String::from_utf8_lossy(&result.stderr).contains("effective manifests"));
+}
+
+fn with_recorded_manager(version: &str, project: &str) -> String {
+    let environment = json!({
+        "lockfileVersion": "9.0",
+        "importers": {".": {"packageManagerDependencies": {"pnpm": {"specifier": version, "version": version}}}},
+        "packages": {format!("pnpm@{version}"): {"resolution": {}}},
+        "snapshots": {format!("pnpm@{version}"): {}}
+    });
+    format!("---\n{environment}\n---\n{project}")
 }
 
 #[test]
