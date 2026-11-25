@@ -1429,6 +1429,70 @@ fn validate_checks_the_member_selected_by_a_workspace_link() {
 }
 
 #[test]
+fn validate_requires_a_local_resolution_for_workspace_dependencies() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages: [app, lib]\ncatalog: {alias: 'workspace:lib@^1'}\n",
+    )
+    .unwrap();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    fs::create_dir(root.join("app")).unwrap();
+    fs::create_dir(root.join("lib")).unwrap();
+    fs::write(
+        root.join("lib/package.json"),
+        r#"{"name":"lib","version":"1.2.0"}"#,
+    )
+    .unwrap();
+    let registry = ("1.2.0", "lib@1.2.0", None);
+    let local = ("file:lib", "lib@file:lib", Some("lib"));
+    let alias = ("lib@file:lib", "lib@file:lib", Some("lib"));
+    let wrong_name = ("other@file:lib", "other@file:lib", Some("lib"));
+    let wrong_target = ("file:app", "lib@file:app", Some("app"));
+    let wrong_record = ("file:lib", "lib@file:lib", Some("app"));
+    for (name, specifier, (pin, key, directory), expected) in [
+        ("lib", "^1", registry, 0),
+        ("lib", "workspace:^1", registry, 1),
+        ("lib", "workspace:^1", local, 0),
+        ("alias", "workspace:lib@^1", alias, 0),
+        ("alias", "catalog:", alias, 0),
+        ("alias", "workspace:../lib", alias, 0),
+        ("lib", "workspace:^2", local, 1),
+        ("alias", "workspace:lib@^1", wrong_name, 1),
+        ("alias", "workspace:../lib", wrong_name, 1),
+        ("lib", "workspace:^1", wrong_target, 1),
+        ("lib", "workspace:^1", wrong_record, 1),
+    ] {
+        let meta = json!({name:{"injected":true}});
+        fs::write(
+            root.join("app/package.json"),
+            json!({"dependencies":{name:specifier},"dependenciesMeta":meta}).to_string(),
+        )
+        .unwrap();
+        let resolution = directory.map_or_else(
+            || json!({"integrity":"sha512-abc"}),
+            |path| json!({"type":"directory","directory":path}),
+        );
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{},"lib":{},"app":{
+            "dependencies":{name:{"specifier":specifier,"version":pin}},"dependenciesMeta":meta
+        }},"packages":{key:{"resolution":resolution}},"snapshots":{key:{}}});
+        if specifier == "catalog:" {
+            lock["catalogs"] =
+                json!({"default":{"alias":{"specifier":"workspace:lib@^1","version":"file:lib"}}});
+        }
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{name}@{specifier} -> {pin}: {}",
+            report(&result)
+        );
+    }
+}
+
+#[test]
 fn validate_compares_unused_recorded_catalog_specifiers() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

@@ -68,6 +68,14 @@ pub(crate) fn package_key(snapshot: &str) -> &str {
     snapshot.split_once('(').map_or(snapshot, |(key, _)| key)
 }
 
+/// A file pin is relative to the lockfile root. Aliases record the package name too.
+pub(crate) fn file_pin<'a>(name: &'a str, reference: &'a str) -> Option<(&'a str, &'a str)> {
+    let pin = package_key(reference);
+    pin.strip_prefix("file:")
+        .map(|path| (name, path))
+        .or_else(|| pin.split_once("@file:"))
+}
+
 /// pnpm writes npm aliases and remote/file references as either a full key or
 /// a version relative to the dependency name. Peer and patch suffixes stay intact.
 pub(crate) fn snapshot_key(

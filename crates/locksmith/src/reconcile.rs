@@ -369,6 +369,15 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
 
 fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
     let pin = graph::package_key(reference);
+    if let Some(request) = spec.and_then(|s| s.strip_prefix("workspace:"))
+        && let Some(path) = version.strip_prefix("file:")
+    {
+        return graph::file_pin(name, reference).is_some_and(|(package, pinned_path)| {
+            pinned_path == path
+                && (request.starts_with('.')
+                    || package == crate::workspace_links::workspace_request(name, request).0)
+        });
+    }
     if let Some((target, _)) = spec.and_then(manifest::alias) {
         return (target == name && pin == version)
             || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);

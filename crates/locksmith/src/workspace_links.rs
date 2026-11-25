@@ -17,7 +17,7 @@ pub(crate) struct WorkspaceLinks<'a> {
     by_name: HashMap<&'a str, Vec<&'a str>>,
 }
 
-fn workspace_request<'a>(name: &'a str, request: &'a str) -> (&'a str, &'a str) {
+pub(crate) fn workspace_request<'a>(name: &'a str, request: &'a str) -> (&'a str, &'a str) {
     request
         .rsplit_once('@')
         .filter(|(n, _)| !n.is_empty())
@@ -94,35 +94,51 @@ impl<'a> WorkspaceLinks<'a> {
 
     pub(crate) fn check_pin(
         &self,
+        document: &Value,
         importer: &str,
         name: &str,
         specifier: &str,
-        path: &str,
+        version: &str,
     ) -> Result<(), LockfileError> {
         let effective = self.catalog_specifier(name, specifier)?;
         let Some(request) = effective.strip_prefix("workspace:").map(str::trim) else {
             return Ok(());
         };
-        let target = graph::linked_importer(importer, path);
-        let fits = if request.starts_with('.') {
-            target == graph::linked_importer(importer, request)
-        } else {
-            let (package, range) = workspace_request(name, request);
-            self.by_name.get(package).into_iter().flatten().any(|&id| {
-                let member = &self.manifests[id];
-                link_directory(id, member) == target
-                    && workspace_version_matches(range, member["version"].as_str())
-            })
-        };
-        if fits {
-            Ok(())
-        } else {
-            Err(manifest::mismatch(
+        let mismatch = || {
+            manifest::mismatch(
                 importer,
                 "workspace",
-                format!("{name}: link:{path} does not satisfy {effective}"),
-            ))
-        }
+                format!("{name}: {version} does not satisfy {effective}"),
+            )
+        };
+        let (target, pinned_name) = if let Some(path) = version.strip_prefix("link:") {
+            (graph::linked_importer(importer, path), None)
+        } else {
+            let (package, path) = graph::file_pin(name, version).ok_or_else(mismatch)?;
+            let resolution = &document["packages"][format!("{package}@file:{path}")]["resolution"];
+            let directory = resolution["directory"].as_str().ok_or_else(mismatch)?;
+            let target = graph::linked_importer(".", path);
+            if resolution["type"] != "directory" || graph::linked_importer(".", directory) != target
+            {
+                return Err(mismatch());
+            }
+            (target, Some(package))
+        };
+        let fits = if request.starts_with('.') {
+            target == graph::linked_importer(importer, request)
+                && pinned_name
+                    .zip(self.manifests.get(&target).and_then(|m| m["name"].as_str()))
+                    .is_none_or(|(actual, expected)| actual == expected)
+        } else {
+            let (package, range) = workspace_request(name, request);
+            pinned_name.is_none_or(|n| n == package)
+                && self.by_name.get(package).into_iter().flatten().any(|&id| {
+                    let member = &self.manifests[id];
+                    link_directory(id, member) == target
+                        && workspace_version_matches(range, member["version"].as_str())
+                })
+        };
+        if fits { Ok(()) } else { Err(mismatch()) }
     }
 
     pub(crate) fn resolve(

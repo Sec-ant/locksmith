@@ -211,10 +211,10 @@ pub(crate) fn check_with_links(
                 }
                 // npm ranges differ from Cargo's semver ranges. Non-registry
                 // protocols (workspace, catalog, git, file) are graph-validated.
-                if let Some(path) = version.strip_prefix("link:") {
-                    if let Some(links) = links {
-                        links.check_pin(importer, name, specifier, path)?;
-                    }
+                if let Some(links) = links {
+                    links.check_pin(document, importer, name, specifier, version)?;
+                }
+                if version.starts_with("link:") {
                     continue;
                 }
                 let resolved_key;
