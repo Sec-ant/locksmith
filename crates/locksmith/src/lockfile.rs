@@ -136,6 +136,28 @@ impl Lockfile {
             ));
         }
         crate::repair::check_recorded_settings(document, config)?;
+        if let Some(catalogs) = document.get("catalogs") {
+            for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
+                crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
+            })? {
+                for (name, record) in entries.as_object().ok_or_else(|| {
+                    crate::manifest::mismatch(
+                        ".",
+                        "workspace",
+                        format!("catalogs/{catalog} must be a mapping"),
+                    )
+                })? {
+                    let configured = config.catalogs.get(catalog).and_then(|c| c.get(name));
+                    if !configured.is_some_and(|spec| record["specifier"] == spec.as_str()) {
+                        return Err(crate::manifest::mismatch(
+                            ".",
+                            "workspace",
+                            format!("catalogs/{catalog}/{name} specifier differs"),
+                        ));
+                    }
+                }
+            }
+        }
         let patches_match = |encoding| {
             let expected = crate::reconcile::metadata::patch_records(config, patches, encoding)?;
             Ok::<_, LockfileError>(crate::reconcile::metadata::same_patch_records(
@@ -199,8 +221,15 @@ impl Lockfile {
                 crate::manifest::check(&overrides, id, None, "workspace")?;
             }
         }
+        let links = crate::workspace_links::WorkspaceLinks::new(manifests, config);
         for (id, manifest) in manifests {
-            crate::manifest::check(&overrides, id, Some(manifest), "workspace")?;
+            crate::manifest::check_with_links(
+                &overrides,
+                id,
+                Some(manifest),
+                "workspace",
+                Some(&links),
+            )?;
         }
         Ok(())
     }

@@ -1375,6 +1375,92 @@ fn validate_checks_workspace_members_without_a_root_manifest() {
 }
 
 #[test]
+fn validate_checks_the_member_selected_by_a_workspace_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages: [lib, other]\ncatalog: {alias: 'workspace:@local/lib@^1'}\n",
+    )
+    .unwrap();
+    let member =
+        json!({"name":"@local/lib","version":"1.2.0","publishConfig":{"directory":"dist"}});
+    fs::create_dir(root.join("lib")).unwrap();
+    fs::create_dir(root.join("other")).unwrap();
+    fs::write(root.join("lib/package.json"), member.to_string()).unwrap();
+    fs::write(
+        root.join("other/package.json"),
+        r#"{"name":"@local/lib","version":"2.0.0"}"#,
+    )
+    .unwrap();
+    for (name, specifier, target, expected) in [
+        ("@local/lib", "workspace:^1", "lib/dist", 0),
+        ("@local/lib", "workspace:^1", "other", 1),
+        ("alias", "workspace:@local/lib@^1", "lib/dist", 0),
+        ("alias", "catalog:", "lib/dist", 0),
+        ("alias", "catalog:", "other", 1),
+        ("renamed", "workspace:*", "lib/dist", 1),
+        ("alias", "workspace:@local/lib@latest", "lib/dist", 0),
+        ("alias", "workspace:./lib", "lib", 0),
+        ("alias", "workspace:./lib", "other", 1),
+        ("alias", "link:../external", "../external", 0),
+    ] {
+        fs::write(
+            root.join("package.json"),
+            json!({"dependencies":{name:specifier}}).to_string(),
+        )
+        .unwrap();
+        let lock = json!({"lockfileVersion":"9.0","importers":{
+            ".":{"dependencies":{name:{"specifier":specifier,"version":format!("link:{target}")}}},
+            "lib":{"publishDirectory":"dist"},"other":{}
+        }});
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{name}@{specifier} -> {target}: {}",
+            report(&result)
+        );
+        if expected == 1 {
+            assert!(String::from_utf8_lossy(&result.stderr).contains(name));
+        }
+    }
+}
+
+#[test]
+fn validate_compares_unused_recorded_catalog_specifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    let lock = json!({"lockfileVersion":"9.0","importers":{".":{}},"catalogs":{
+        "tools":{"foo":{"specifier":"^1","version":"1.2.0"}}
+    }});
+    fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+    for (config, expected) in [
+        ("catalogs: {tools: {foo: '^1', bar: '*'}}", 0),
+        ("catalogs: {tools: {foo: '^1.1'}}", 1),
+        ("catalog: {foo: '^1'}", 1),
+    ] {
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            format!("packages: []\n{config}\n"),
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{config}: {}",
+            report(&result)
+        );
+        if expected == 1 {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("tools/foo"));
+        }
+    }
+}
+
+#[test]
 fn validate_uses_the_recorded_manager_for_settings_and_hooks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

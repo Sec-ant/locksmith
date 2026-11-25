@@ -150,6 +150,16 @@ pub(crate) fn check(
     manifest: Option<&Value>,
     side: &'static str,
 ) -> Result<(), LockfileError> {
+    check_with_links(overrides, importer, manifest, side, None)
+}
+
+pub(crate) fn check_with_links(
+    overrides: &Overrides<'_>,
+    importer: &str,
+    manifest: Option<&Value>,
+    side: &'static str,
+    links: Option<&crate::workspace_links::WorkspaceLinks<'_>>,
+) -> Result<(), LockfileError> {
     let document = overrides.document;
     let record = document.get("importers").and_then(|map| map.get(importer));
     let Some(manifest) = manifest else {
@@ -201,8 +211,10 @@ pub(crate) fn check(
                 }
                 // npm ranges differ from Cargo's semver ranges. Non-registry
                 // protocols (workspace, catalog, git, file) are graph-validated.
-                if version.starts_with("link:") {
-                    // The selected workspace manifest supplies the version for a link.
+                if let Some(path) = version.strip_prefix("link:") {
+                    if let Some(links) = links {
+                        links.check_pin(importer, name, specifier, path)?;
+                    }
                     continue;
                 }
                 let resolved_key;
