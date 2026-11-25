@@ -316,10 +316,23 @@ impl ResolutionSettings {
     pub(crate) fn ignored_optional_dependencies_match(
         &self,
         document: &Value,
+        preserve_mixed_order: bool,
     ) -> Result<bool, LockfileError> {
         let mut recorded = ignored_optional_dependencies(document)?;
         if recorded == self.ignored_optional_dependencies {
             return Ok(true);
+        }
+        if preserve_mixed_order
+            && self
+                .ignored_optional_dependencies
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(|rules| {
+                    let negative = |rule: &Value| rule.as_str().is_some_and(|s| s.starts_with('!'));
+                    rules.iter().any(negative) && !rules.iter().all(negative)
+                })
+        {
+            return Ok(false);
         }
         // pnpm can sort the lockfile header even though its matcher uses configuration order.
         let mut configured = self.ignored_optional_dependencies.clone();

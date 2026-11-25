@@ -74,7 +74,7 @@ impl<'a> WorkspaceLinks<'a> {
         external: &'a BTreeSet<String>,
     ) -> Self {
         let mut links = Self::new(manifests, config);
-        // Since 12.15 a named workspace target must resolve inside the root.
+        // Since 12.15 an in-root alias cannot resolve a named pin outside the root.
         // An explicit workspace path can still point to an external directory.
         if !external.is_empty()
             && config
@@ -135,15 +135,33 @@ impl<'a> WorkspaceLinks<'a> {
         version: &str,
     ) -> Result<(), LockfileError> {
         let effective = self.catalog_specifier(name, specifier)?;
-        let Some(request) = effective.strip_prefix("workspace:").map(str::trim) else {
-            return Ok(());
-        };
+
         let mismatch = || {
             manifest::mismatch(
                 importer,
                 "workspace",
                 format!("{name}: {version} does not satisfy {effective}"),
             )
+        };
+        let Some(request) = effective.strip_prefix("workspace:").map(str::trim) else {
+            if let Some(path) = version.strip_prefix("link:")
+                && self.links_workspace_packages()
+                && let Some(v) = self.config.pnpm_version.as_ref()
+                && (v.major() == 11 && v >= &node_semver::Version::from((11, 28, 0))
+                    || v >= &node_semver::Version::from((12, 19, 0)))
+            {
+                let (package, range) = manifest::registry_request(name, effective);
+                if range.parse::<node_semver::Range>().is_ok() {
+                    let id = graph::linked_project(document.get("importers"), importer, path);
+                    if let Some(member) = self.manifests.get(&id)
+                        && (!local_version_matches(range, member["version"].as_str())
+                            || v.major() >= 12 && member["name"] != package)
+                    {
+                        return Err(mismatch());
+                    }
+                }
+            }
+            return Ok(());
         };
         let (target, pinned_name) = if let Some(path) = version.strip_prefix("link:") {
             (graph::linked_importer(importer, path), None)
@@ -198,7 +216,7 @@ impl<'a> WorkspaceLinks<'a> {
         if specifier.starts_with("workspace:") {
             return false;
         }
-        let (package, selector) = manifest::alias(specifier).unwrap_or((name, specifier));
+        let (package, selector) = manifest::registry_request(name, specifier);
         self.by_name
             .get(package)
             .into_iter()
@@ -231,7 +249,7 @@ impl<'a> WorkspaceLinks<'a> {
             let (package, range) = if let Some(request) = workspace {
                 workspace_request(name, request)
             } else {
-                let (name, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+                let (name, range) = manifest::registry_request(name, specifier);
                 if range.parse::<node_semver::Range>().is_err() {
                     return Ok(None);
                 }

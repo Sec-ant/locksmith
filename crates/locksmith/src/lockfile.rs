@@ -112,7 +112,7 @@ impl Lockfile {
 
     /// Check the graph and compare its importers against the complete set of
     /// workspace manifests and configured patch files, keyed by declared path.
-    /// External members are workspace paths whose real directories lie outside the root.
+    /// External members are paths inside the workspace whose symlinks lead outside the root.
     /// Callers supply effective manifests if hooks apply.
     pub fn validate_workspace(
         &self,
@@ -187,7 +187,7 @@ impl Lockfile {
         }
         if !config
             .resolution
-            .ignored_optional_dependencies_match(document)?
+            .ignored_optional_dependencies_match(document, false)?
         {
             return Err(crate::manifest::mismatch(
                 ".",

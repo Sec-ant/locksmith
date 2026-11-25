@@ -221,7 +221,11 @@ pub(crate) fn check_configuration(
     ) {
         return Err(mismatch("pnpmfileChecksum"));
     }
-    if !cfg.resolution.ignored_optional_dependencies_match(doc)? {
+    // Repair cannot infer the source order of mixed patterns from a sorted header.
+    if !cfg
+        .resolution
+        .ignored_optional_dependencies_match(doc, true)?
+    {
         return Err(mismatch("ignoredOptionalDependencies"));
     }
     Ok(())

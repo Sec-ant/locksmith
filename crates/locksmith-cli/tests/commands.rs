@@ -1403,6 +1403,7 @@ fn validate_checks_the_member_selected_by_a_workspace_link() {
         ("alias", "workspace:@local/lib@latest", "lib/dist", 0),
         ("alias", "workspace:./lib", "lib", 0),
         ("alias", "workspace:./lib", "other", 1),
+        ("alias", "workspace:./unbuilt", "unbuilt", 0),
         ("alias", "link:../external", "../external", 0),
     ] {
         fs::write(
@@ -1901,6 +1902,120 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
     .unwrap();
     let result = validate_workspace_in(&root);
     assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+}
+
+#[test]
+fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    for path in [root.join("internal"), dir.path().join("shared")] {
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("package.json"),
+            r#"{"name":"lib","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    }
+    for (version, yaml, members, code) in [
+        ("9.15.9", "{}", vec!["internal"], 0),
+        ("10.4.1", "{}", vec!["internal"], 0),
+        ("10.4.1", "linkWorkspacePackages: true", vec![], 2),
+        ("10.5.0", "{}", vec![], 0),
+        ("12.18.0", "linkWorkspacePackages: true", vec![], 0),
+        ("12.18.0", "packages: ['**']", vec!["internal"], 0),
+        ("12.18.0", "packages: ['../shared']", vec!["../shared"], 0),
+        ("12.18.0", "packages: ['../*']", vec!["../shared"], 0),
+        ("12.18.0", "packages: ['../sha*']", vec![], 1),
+    ] {
+        let mut manifest =
+            json!({"packageManager":format!("pnpm@{version}"),"pnpm":{"packages":["unused"]}});
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        for &id in &members {
+            lock["importers"][id] = json!({});
+        }
+        if members.contains(&"../shared") {
+            manifest["dependencies"] = json!({"lib":"workspace:*"});
+            lock["importers"]["."]["dependencies"] =
+                json!({"lib":{"specifier":"workspace:*","version":"link:../shared"}});
+        }
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), yaml).unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(&root);
+        assert_eq!(
+            result.status.code(),
+            Some(code),
+            "{version} {yaml}: {}",
+            report(&result)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_resolves_only_symlinks_selected_by_a_workspace_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("package.json"), "{}").unwrap();
+    fs::write(
+        root.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("scratch", root.join("scratch")).unwrap();
+    for (pattern, code) in [("app", 0), ("scratch", 2)] {
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            format!("packages: [{pattern}]"),
+        )
+        .unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(result.status.code(), Some(code), "{}", report(&result));
+    }
+}
+
+#[test]
+fn validate_checks_recorded_range_links_for_the_releases_that_verify_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("lib")).unwrap();
+    for (version, enabled, spec, target_version, code) in [
+        ("12.18.0", true, "^1", "2.0.0", 0),
+        ("12.19.0", true, "^1", "2.0.0", 1),
+        ("12.19.0", true, "^1", "1.1.0", 0),
+        ("12.19.0", true, "npm:lib@^1", "2.0.0", 1),
+        ("12.19.0", true, "npm:^1", "1.1.0", 0),
+        ("11.28.12", true, "npm:^1", "2.0.0", 1),
+        ("12.19.0", false, "^1", "2.0.0", 0),
+        ("12.19.0", true, "link:lib", "2.0.0", 0),
+        ("11.27.1", true, "^1", "2.0.0", 0),
+        ("11.28.0", true, "^1", "2.0.0", 1),
+    ] {
+        fs::write(
+            root.join("lib/package.json"),
+            json!({"name":"lib","version":target_version}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("package.json"),
+            json!({"packageManager":format!("pnpm@{version}"),"dependencies":{"lib":spec}})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            format!("packages: [lib]\nlinkWorkspacePackages: {enabled}\n"),
+        )
+        .unwrap();
+        fs::write(root.join("pnpm-lock.yaml"),json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":"link:lib"}}},"lib":{}}}).to_string()).unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(code),
+            "{version}, {spec}: {}",
+            report(&result)
+        );
+    }
 }
 
 #[test]

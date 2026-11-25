@@ -54,12 +54,14 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     let mut manifests = BTreeMap::new();
     let canonical_root = root.canonicalize()?;
     let mut external_members = BTreeSet::new();
-    for id in Members::new(&project)?.directories_on_disk(root)? {
+    for id in Members::directories_on_disk(&project, &canonical_root)? {
         if let Some(manifest) = workspace::read_manifest(&id, read)? {
-            if !canonical_root
-                .join(&id)
-                .canonicalize()?
-                .starts_with(&canonical_root)
+            if id != ".."
+                && !id.starts_with("../")
+                && !canonical_root
+                    .join(&id)
+                    .canonicalize()?
+                    .starts_with(&canonical_root)
             {
                 external_members.insert(id.clone());
             }

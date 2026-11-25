@@ -69,6 +69,7 @@ fn repair_accepts_equivalent_pnpm_settings_and_rejects_changed_rules() {
         "importers:",
         "ignoredOptionalDependencies:\n  - a\n  - z\n\nimporters:",
     );
+    let mixed = ignored.replace("- a\n  - z", "- '!foo'\n  - '*'");
     let manifests = BTreeMap::from([(".".into(), json!({}))]);
     let explicit = lock.replace(
         "importers:",
@@ -85,6 +86,16 @@ fn repair_accepts_equivalent_pnpm_settings_and_rejects_changed_rules() {
             true,
         ),
         (&ignored, json!({"ignoredOptionalDependencies": []}), false),
+        (
+            &mixed,
+            json!({"ignoredOptionalDependencies":["*","!foo"]}),
+            false,
+        ),
+        (
+            &mixed,
+            json!({"ignoredOptionalDependencies":["!foo","*"]}),
+            true,
+        ),
         (lock, json!({"overrides": {"a": "1.0.0"}}), false),
     ] {
         let configuration = WorkspaceConfig::from_pnpm(&raw).unwrap();

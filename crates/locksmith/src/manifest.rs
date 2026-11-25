@@ -15,6 +15,17 @@ pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     )
 }
 
+/// A bare npm: range keeps the dependency key as its target package.
+pub(crate) fn registry_request<'a>(name: &'a str, specifier: &'a str) -> (&'a str, &'a str) {
+    if let Some(range) = specifier.strip_prefix("npm:")
+        && range.parse::<node_semver::Range>().is_ok()
+    {
+        (name, range)
+    } else {
+        alias(specifier).unwrap_or((name, specifier))
+    }
+}
+
 /// pnpm omits rule maps with no entries when writing the lockfile.
 pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
     document
@@ -252,7 +263,8 @@ pub(crate) fn check_with_links(
                     continue;
                 }
                 let resolved_key;
-                let (range, version) = if let Some((target, range)) = alias(specifier) {
+                let (range, version) = if specifier.starts_with("npm:") {
+                    let (target, range) = registry_request(name, specifier);
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));
