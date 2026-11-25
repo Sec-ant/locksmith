@@ -11,7 +11,7 @@ fn project_conflicts(
     conflicts: &BTreeSet<String>,
     prefix: &str,
     projects: &[&Project],
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
     let mut inputs = BTreeSet::new();
     for name in workspace::CONFIG_FILES {
         inputs.insert(name.to_string());
@@ -34,7 +34,8 @@ fn project_conflicts(
                 workspace::MANIFEST_NAMES.contains(&name)
                     && workspaces.iter().any(|w| w.contains(dir))
             })
-    })
+    })?;
+    Ok(inputs)
 }
 
 pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()> {
@@ -103,8 +104,19 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
     let project = Project::read(&mut blobs, &tree, prefix, None)?;
-    project_conflicts(&conflicts, prefix, &[&project])?;
+    let mut dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
+    if conflicts.iter().any(|p| p != path) {
+        for id in manifests.keys().filter(|id| id.as_str() != ".") {
+            dependency_inputs.extend(workspace::MANIFEST_NAMES.map(|name| format!("{id}/{name}")));
+        }
+        git::check_linked_conflicts(
+            &tree,
+            &conflicts,
+            dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
+            &mut blobs,
+        )?;
+    }
     let policy = policy::Policy::from_project(&project);
     let config = policy.configuration(&project.config)?;
     let [base, ours, theirs] = sources

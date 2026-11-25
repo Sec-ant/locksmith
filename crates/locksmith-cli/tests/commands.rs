@@ -2647,6 +2647,66 @@ fn repair_reads_the_committed_target_of_a_workspace_directory_link() {
 
 #[cfg(unix)]
 #[test]
+fn a_conflicted_target_manifest_keeps_its_linked_workspaces_lock_unmerged() {
+    let r = Repo::new();
+    r.write("sources/tool/package.json", r#"{"name":"tool"}"#);
+    std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
+    r.commit("link the workspace");
+    r.git(&["branch", "-f", "topic", "HEAD"]);
+    r.branches(|r, side| {
+        if side == "ours" {
+            r.write("sources/tool/package.json", r#"{"name":"renamed-tool"}"#);
+        } else {
+            fs::remove_file(r.0.path().join("sources/tool/package.json")).unwrap();
+        }
+        let mut doc = graph(&fs::read(r.0.path().join("pnpm-lock.yaml")).unwrap());
+        if side == "ours" {
+            doc["importers"]["apps/tool"] = json!({});
+        }
+        r.write("pnpm-lock.yaml", &doc.to_string());
+    });
+    let merge = r.cmd("git", &["merge", "--no-edit", "topic"]);
+    assert!(!merge.status.success());
+    assert!(
+        r.git(&["diff", "--name-only", "--diff-filter=U"])
+            .lines()
+            .any(|p| p == "pnpm-lock.yaml"),
+        "{}",
+        report(&merge)
+    );
+    assert!(
+        report(&merge).contains("sources/tool/package.json"),
+        "{}",
+        report(&merge)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn converge_checks_the_installed_importer_for_a_new_working_directory_link() {
+    let r = Repo::new();
+    r.write(
+        "sources/tool/package.json",
+        r#"{"name":"tool","dependencies":{"local":"link:../../local"}}"#,
+    );
+    std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert_eq!(out.status.code(), Some(2), "{}", report(&out));
+    assert!(report(&out).contains("apps/tool"));
+    let mut doc = graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
+    doc["importers"]["apps/tool"] = json!({"dependencies":{"local":{"specifier":"link:../../local","version":"link:../../local"}}});
+    r.write("pnpm-lock.yaml", &doc.to_string());
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    let importer = &graph(&out.stdout)["importers"]["apps/tool"];
+    assert_eq!(
+        importer["dependencies"]["local"]["version"],
+        "link:../../local"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn git_workspace_commands_ignore_unrelated_non_utf8_tree_entries() {
     use std::os::unix::ffi::OsStrExt;
     let r = Repo::new();

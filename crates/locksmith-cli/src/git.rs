@@ -1,6 +1,6 @@
 //! Read the committed merge inputs without consulting a partially updated index.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
@@ -266,6 +266,84 @@ pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
         return Err(failure(&output).into());
     }
     Ok(output.stdout)
+}
+
+/// merge-tree reports physical paths, while a workspace can read the same
+/// configuration through a chain of directory or file symlinks.
+pub fn check_linked_conflicts(
+    tree: &str,
+    conflicts: &BTreeSet<String>,
+    inputs: impl Iterator<Item = String>,
+    blobs: &mut Blobs,
+) -> Result<()> {
+    let entries = output_bytes(&["ls-tree", "-rz", "--full-tree", tree])?;
+    let links: BTreeMap<_, _> = entries
+        .split(|&b| b == 0)
+        .filter_map(|entry| std::str::from_utf8(entry.strip_prefix(b"120000 blob ")?).ok())
+        .filter_map(|entry| entry.split_once('\t').map(|(id, path)| (path, id)))
+        .collect();
+    if !links.is_empty() {
+        let mut checker = LinkedConflicts {
+            links,
+            conflicts,
+            blobs,
+        };
+        for input in inputs {
+            checker.follow(&input, &mut Vec::new(), &mut BTreeSet::new())?;
+        }
+    }
+    Ok(())
+}
+
+struct LinkedConflicts<'a> {
+    links: BTreeMap<&'a str, &'a str>,
+    conflicts: &'a BTreeSet<String>,
+    blobs: &'a mut Blobs,
+}
+
+impl LinkedConflicts<'_> {
+    // False means that this path leaves the tree or loops before reaching an input.
+    fn follow(
+        &mut self,
+        path: &str,
+        parts: &mut Vec<String>,
+        active: &mut BTreeSet<String>,
+    ) -> Result<bool> {
+        if path.starts_with('/') {
+            return Ok(false);
+        }
+        for part in path.split('/') {
+            match part {
+                "" | "." => continue,
+                ".." => {
+                    if parts.pop().is_none() {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                _ => parts.push(part.to_owned()),
+            }
+            let current = parts.join("/");
+            if self.conflicts.contains(&current) {
+                return Err(format!("resolve dependency configuration first:\n  {current}").into());
+            }
+            if let Some(id) = self.links.get(current.as_str()) {
+                if !active.insert(current.clone()) {
+                    return Ok(false);
+                }
+                parts.pop();
+                let target = self
+                    .blobs
+                    .read_object(id)?
+                    .ok_or_else(|| format!("missing symlink at {current}"))?;
+                if !self.follow(&target, parts, active)? {
+                    return Ok(false);
+                }
+                active.remove(&current);
+            }
+        }
+        Ok(true)
+    }
 }
 
 /// Follow links in the committed tree. Git resolves intermediate links and

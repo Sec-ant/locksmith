@@ -477,6 +477,10 @@ impl Members {
     }
 
     pub fn working_directories(&self, prefix: &str) -> Result<BTreeSet<String>> {
+        let mut directories = BTreeSet::new();
+        if self.include.is_empty() {
+            return Ok(directories);
+        }
         let mut args = vec!["ls-files", "-zc", "--others", "--exclude-standard"];
         let exclude;
         if !self.include.iter().any(|p| p.as_str().contains("**"))
@@ -492,18 +496,41 @@ impl Members {
             exclude = format!("--exclude={}/", "/*".repeat(first_unused_depth));
             args.push(&exclude);
         }
-        args.extend([
-            "--",
-            ":(glob)**/package.json",
-            ":(glob)**/package.json5",
-            ":(glob)**/package.yaml",
-        ]);
         let paths = git::output_bytes(&args)?;
-        Ok(self
-            .manifest_paths(&paths)
-            .into_keys()
-            .map(str::to_owned)
-            .collect())
+        let root = std::env::current_dir()?.canonicalize()?;
+        let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
+        for path in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+            let Ok(path) = std::str::from_utf8(path) else {
+                continue;
+            };
+            if let Some((id, name)) = path.rsplit_once('/')
+                && MANIFEST_NAMES.contains(&name)
+                && self.contains(id)
+            {
+                directories.insert(id.to_owned());
+            }
+            // Git lists a directory symlink itself, never its member manifests.
+            if !self.may_visit(path, descend) {
+                continue;
+            }
+            let link = root.join(path);
+            match fs::symlink_metadata(&link) {
+                Ok(meta) if meta.file_type().is_symlink() => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+            let Some(target) = linked_directory(&link)? else {
+                continue;
+            };
+            let mut ancestors: BTreeSet<_> = link.ancestors().skip(1).map(Path::to_owned).collect();
+            if ancestors.insert(target.clone()) {
+                self.visit(&target, path, descend, &mut ancestors, &mut |id, _| {
+                    directories.insert(id.to_owned());
+                })?;
+            }
+        }
+        Ok(directories)
     }
 
     /// Discover manifests from disk, including projects absent from Git or the lockfile.
@@ -555,19 +582,14 @@ impl Members {
             if !kind.is_dir() && !kind.is_symlink() {
                 continue;
             }
-            let matches = |p: &Pattern| p.matches_with(&child, GLOB_OPTIONS);
-            if self.excluded_trees.iter().any(matches)
-                || !(self.contains(&child) || descend.iter().any(matches))
-            {
+            if !self.may_visit(&child, descend) {
                 continue;
             }
             let path = if kind.is_symlink() {
-                match entry.path().canonicalize() {
-                    Ok(target) if fs::metadata(&target)?.is_dir() => target,
-                    Ok(_) => continue,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(format!("{}: {e}", entry.path().display()).into()),
-                }
+                let Some(target) = linked_directory(&entry.path())? else {
+                    continue;
+                };
+                target
             } else if kind.is_dir() {
                 entry.path()
             } else {
@@ -620,13 +642,9 @@ impl Members {
                 .rsplit_once('/')
                 .filter(|(id, name)| MANIFEST_NAMES.contains(name) && self.contains(id));
             if mode == "120000" {
-                let matches = |p: &Pattern| p.matches_with(&logical, GLOB_OPTIONS);
-                let directory = self.contains(&logical)
-                    || self
-                        .descend
-                        .get("")
-                        .is_some_and(|patterns| patterns.iter().any(matches));
-                if manifest.is_none() && (!directory || self.excluded_trees.iter().any(matches)) {
+                let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
+                let directory = self.may_visit(&logical, descend);
+                if manifest.is_none() && !directory {
                     continue;
                 }
                 let Some((kind, target)) = git::linked_object(tree, prefix, &logical)? else {
@@ -660,36 +678,33 @@ impl Members {
         }
     }
 
-    fn manifest_paths<'a>(&self, paths: &'a [u8]) -> BTreeMap<&'a str, &'a str> {
-        let mut manifests = BTreeMap::new();
-        for path in paths
-            .split(|&b| b == 0)
-            .filter_map(|p| std::str::from_utf8(p).ok())
-        {
-            let Some((dir, name)) = path.rsplit_once('/') else {
-                continue;
-            };
-            if MANIFEST_NAMES.contains(&name) && self.contains(dir) {
-                // package.json < package.json5 < package.yaml in pnpm's search order.
-                let selected = manifests.entry(dir).or_insert(path);
-                if path < *selected {
-                    *selected = path;
-                }
-            }
-        }
-        manifests
+    fn may_visit(&self, path: &str, descend: &[Pattern]) -> bool {
+        let matches = |p: &Pattern| p.matches_with(path, GLOB_OPTIONS);
+        !excluded_directory(path)
+            && !self.excluded_trees.iter().any(matches)
+            && (descend.iter().any(matches) || self.contains(path))
     }
 
     pub fn contains(&self, dir: &str) -> bool {
-        if dir
-            .split('/')
-            .any(|p| matches!(p, "node_modules" | "bower_components"))
-        {
+        if excluded_directory(dir) {
             return false;
         }
         let path = format!("{dir}/package.json");
         let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
+    }
+}
+
+fn excluded_directory(path: &str) -> bool {
+    path.split('/')
+        .any(|p| matches!(p, ".git" | "node_modules" | "bower_components"))
+}
+
+fn linked_directory(path: &Path) -> Result<Option<PathBuf>> {
+    match path.canonicalize() {
+        Ok(target) => Ok(fs::metadata(&target)?.is_dir().then_some(target)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display()).into()),
     }
 }
 
