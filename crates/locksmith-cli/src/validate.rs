@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
+    path::Path,
+};
 
 use locksmith::Lockfile;
 
@@ -47,13 +52,22 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     let config = crate::policy::Policy::from_project(&project).configuration(&project.config)?;
     let patches = workspace::patches(&config, "", read)?;
     let mut manifests = BTreeMap::new();
+    let canonical_root = root.canonicalize()?;
+    let mut external_members = BTreeSet::new();
     for id in Members::new(&project)?.directories_on_disk(root)? {
         if let Some(manifest) = workspace::read_manifest(&id, read)? {
+            if !canonical_root
+                .join(&id)
+                .canonicalize()?
+                .starts_with(&canonical_root)
+            {
+                external_members.insert(id.clone());
+            }
             manifests.insert(id, manifest);
         }
     }
     if has_root_manifest {
         manifests.insert(".".into(), project.root);
     }
-    Ok(lock.validate_workspace(&manifests, &config, &patches)?)
+    Ok(lock.validate_workspace(&manifests, &external_members, &config, &patches)?)
 }

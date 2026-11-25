@@ -172,6 +172,28 @@ impl WorkspaceConfig {
         Ok(config)
     }
 
+    /// pnpm 11.21+ sorts its ignore list in place before checking frozen importers.
+    pub(crate) fn frozen_importer_config(&self) -> std::borrow::Cow<'_, Self> {
+        let sorts_patterns = self
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() == 11 && v >= &node_semver::Version::from((11, 21, 0)));
+        if sorts_patterns
+            && self
+                .resolution
+                .ignored_optional_dependencies
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(|patterns| !patterns.is_sorted_by(|a, b| a.as_str() <= b.as_str()))
+        {
+            let mut sorted = self.clone();
+            sort_patterns(&mut sorted.resolution.ignored_optional_dependencies);
+            std::borrow::Cow::Owned(sorted)
+        } else {
+            std::borrow::Cow::Borrowed(self)
+        }
+    }
+
     pub(crate) fn matches_catalog_ranges(&self) -> bool {
         self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
             11 => v >= &node_semver::Version::from((11, 28, 12)),
@@ -270,12 +292,87 @@ impl WorkspaceConfig {
     }
 }
 
-pub(crate) fn ignored_optional_dependencies(value: &Value) -> Result<Option<Value>, LockfileError> {
+fn ignored_optional_dependencies(value: &Value) -> Result<Option<Value>, LockfileError> {
     let names = decode::<Option<Vec<String>>>(value, "ignoredOptionalDependencies")?.flatten();
     Ok(names.filter(|names| !names.is_empty()).map(|mut names| {
-        names.sort_unstable();
+        // Within a single polarity order has no effect on which packages match.
+        if names.iter().all(|p| p.starts_with('!')) || names.iter().all(|p| !p.starts_with('!')) {
+            names.sort_unstable();
+        }
         Value::from(names)
     }))
+}
+
+impl ResolutionSettings {
+    pub(crate) fn ignores_optional_dependency(&self, name: &str) -> bool {
+        self.ignored_optional_dependencies
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|patterns| {
+                matches_patterns(patterns.iter().filter_map(Value::as_str), name)
+            })
+    }
+
+    pub(crate) fn ignored_optional_dependencies_match(
+        &self,
+        document: &Value,
+    ) -> Result<bool, LockfileError> {
+        let mut recorded = ignored_optional_dependencies(document)?;
+        if recorded == self.ignored_optional_dependencies {
+            return Ok(true);
+        }
+        // pnpm can sort the lockfile header even though its matcher uses configuration order.
+        let mut configured = self.ignored_optional_dependencies.clone();
+        sort_patterns(&mut recorded);
+        sort_patterns(&mut configured);
+        Ok(recorded == configured)
+    }
+}
+
+fn sort_patterns(list: &mut Option<Value>) {
+    if let Some(patterns) = list.as_mut().and_then(Value::as_array_mut) {
+        patterns.sort_unstable_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+}
+
+// pnpm treats only `*` as a wildcard. The last matching rule wins;
+// a list of only negative rules includes every name they do not match.
+pub(crate) fn matches_patterns<'a>(
+    patterns: impl DoubleEndedIterator<Item = &'a str>,
+    name: &str,
+) -> bool {
+    let mut patterns = patterns.rev().peekable();
+    let mut only_negative = patterns.peek().is_some();
+    for pattern in patterns {
+        let negative = pattern.strip_prefix('!');
+        if wildcard(negative.unwrap_or(pattern), name) {
+            return negative.is_none();
+        }
+        only_negative &= negative.is_some();
+    }
+    only_negative
+}
+
+fn wildcard(pattern: &str, value: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().expect("one split part");
+    let Some(mut rest) = value.strip_prefix(first) else {
+        return false;
+    };
+    let mut parts = parts.peekable();
+    if parts.peek().is_none() {
+        return rest.is_empty();
+    }
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return rest.ends_with(part);
+        }
+        let Some(offset) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[offset + part.len()..];
+    }
+    true
 }
 
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(

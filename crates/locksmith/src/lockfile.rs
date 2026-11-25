@@ -112,10 +112,12 @@ impl Lockfile {
 
     /// Check the graph and compare its importers against the complete set of
     /// workspace manifests and configured patch files, keyed by declared path.
+    /// External members are workspace paths whose real directories lie outside the root.
     /// Callers supply effective manifests if hooks apply.
     pub fn validate_workspace(
         &self,
         manifests: &BTreeMap<String, Value>,
+        external_members: &BTreeSet<String>,
         config: &crate::WorkspaceConfig,
         patches: &BTreeMap<String, String>,
     ) -> Result<(), LockfileError> {
@@ -183,8 +185,9 @@ impl Lockfile {
                 "packageExtensionsChecksum differs",
             ));
         }
-        if config.resolution.ignored_optional_dependencies
-            != crate::config::ignored_optional_dependencies(document)?
+        if !config
+            .resolution
+            .ignored_optional_dependencies_match(document)?
         {
             return Err(crate::manifest::mismatch(
                 ".",
@@ -212,7 +215,8 @@ impl Lockfile {
                 "overrides differ",
             ));
         }
-        let overrides = crate::manifest::Overrides::new(document, config);
+        let frozen = config.frozen_importer_config();
+        let overrides = crate::manifest::Overrides::new(document, &frozen);
         for id in graph::section(document, "importers")
             .into_iter()
             .flat_map(|m| m.keys())
@@ -221,7 +225,11 @@ impl Lockfile {
                 crate::manifest::check(&overrides, id, None, "workspace")?;
             }
         }
-        let links = crate::workspace_links::WorkspaceLinks::new(manifests, config);
+        let links = crate::workspace_links::WorkspaceLinks::for_validation(
+            manifests,
+            &frozen,
+            external_members,
+        );
         for (id, manifest) in manifests {
             crate::manifest::check_with_links(
                 &overrides,

@@ -221,9 +221,7 @@ pub(crate) fn check_configuration(
     ) {
         return Err(mismatch("pnpmfileChecksum"));
     }
-    if cfg.resolution.ignored_optional_dependencies
-        != crate::config::ignored_optional_dependencies(doc)?
-    {
+    if !cfg.resolution.ignored_optional_dependencies_match(doc)? {
         return Err(mismatch("ignoredOptionalDependencies"));
     }
     Ok(())

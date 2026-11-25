@@ -1,6 +1,6 @@
 //! Resolve local dependencies against the final workspace manifests.
 use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, reconcile::missing};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
     manifest
@@ -14,6 +14,7 @@ pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceCo
 pub(crate) struct WorkspaceLinks<'a> {
     manifests: &'a BTreeMap<String, Value>,
     config: &'a WorkspaceConfig,
+    external_members: Option<&'a BTreeSet<String>>,
     by_name: HashMap<&'a str, Vec<&'a str>>,
 }
 
@@ -63,7 +64,40 @@ impl<'a> WorkspaceLinks<'a> {
             manifests,
             config,
             by_name,
+            external_members: None,
         }
+    }
+
+    pub(crate) fn for_validation(
+        manifests: &'a BTreeMap<String, Value>,
+        config: &'a WorkspaceConfig,
+        external: &'a BTreeSet<String>,
+    ) -> Self {
+        let mut links = Self::new(manifests, config);
+        // Since 12.15 a named workspace target must resolve inside the root.
+        // An explicit workspace path can still point to an external directory.
+        if !external.is_empty()
+            && config
+                .pnpm_version
+                .as_ref()
+                .is_some_and(|v| v >= &node_semver::Version::from((12, 15, 0)))
+        {
+            for candidates in links.by_name.values_mut() {
+                candidates.retain(|id| !external.contains(*id));
+            }
+        }
+        links.external_members = Some(external);
+        links
+    }
+
+    pub(crate) fn can_omit_empty_importer(&self, id: &str) -> bool {
+        self.external_members
+            .is_some_and(|external| external.contains(id))
+            && self
+                .config
+                .pnpm_version
+                .as_ref()
+                .is_none_or(|v| v.major() < 12 || v >= &node_semver::Version::from((12, 8, 0)))
     }
 
     fn catalog_specifier<'s>(

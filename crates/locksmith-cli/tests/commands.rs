@@ -1760,6 +1760,150 @@ fn validate_compares_patch_declarations_and_contents() {
 }
 
 #[test]
+fn validate_filters_ignored_optional_declarations_before_selecting_the_dependency_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let pin = json!({"specifier":"^1","version":"1.0.0"});
+    let optional = json!({"optionalDependencies":{"foo":"^1"}});
+    let peer = json!({"optionalDependencies":{"foo":"*"},"peerDependencies":{"foo":"^1"}});
+    let dev = json!({"optionalDependencies":{"foo":"*"},"devDependencies":{"foo":"^1"}});
+    let both = json!({"optionalDependencies":{"foo":"^1"},"dependencies":{"foo":"*"}});
+    let prod_group = Some("dependencies");
+    let opt_group = Some("optionalDependencies");
+    for (manager, manifest, rules, group, status) in [
+        ("10.28.1", &optional, vec!["foo"], None, 0),
+        ("10.28.1", &both, vec!["f*"], None, 0),
+        ("10.28.1", &dev, vec!["foo"], Some("devDependencies"), 0),
+        ("10.28.1", &peer, vec!["foo"], prod_group, 0),
+        ("12.15.0", &peer, vec!["foo"], prod_group, 1),
+        ("12.15.0", &peer, vec!["foo"], None, 0),
+        ("10.28.1", &optional, vec!["f*", "!foo"], opt_group, 0),
+        ("11.21.0", &optional, vec!["f*", "!foo"], opt_group, 1),
+        ("10.28.1", &optional, vec!["!foo", "f*"], None, 0),
+        (
+            "10.28.1",
+            &json!({"dependencies":{"foo":"^1"}}),
+            vec!["foo"],
+            None,
+            1,
+        ),
+        ("10.28.1", &optional, vec!["bar"], None, 1),
+        ("10.28.1", &optional, vec!["foo"], opt_group, 1),
+    ] {
+        let mut manifest = manifest.clone();
+        manifest["packageManager"] = json!(format!("pnpm@{manager}"));
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            json!({"packages":[], "ignoredOptionalDependencies":rules}).to_string(),
+        )
+        .unwrap();
+        let mut recorded = rules.clone();
+        recorded.sort_unstable();
+        let mut lock = json!({"lockfileVersion":"9.0","ignoredOptionalDependencies":recorded,"importers":{".":{}}});
+        if let Some(group) = group {
+            lock["importers"]["."][group] = json!({"foo":pin});
+            lock["packages"] = json!({"foo@1.0.0":{"resolution":{}}});
+            lock["snapshots"] = json!({"foo@1.0.0":{}});
+        }
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(root);
+        assert_eq!(
+            result.status.code(),
+            Some(status),
+            "{manifest}, {rules:?}: {}",
+            report(&result)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ws");
+    let external = dir.path().join("external");
+    fs::create_dir_all(external.join("nested")).unwrap();
+    fs::create_dir_all(root.join("packages/internal")).unwrap();
+    for path in [external.join("nested"), root.join("packages/internal")] {
+        fs::write(
+            path.join("package.json"),
+            r#"{"name":"lib","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    }
+    symlink(&external, root.join("linked")).unwrap();
+    symlink("packages/internal", root.join("alias")).unwrap();
+    symlink(&root, external.join("back")).unwrap();
+    let nested = "linked/nested";
+    let dirs = &["linked/**"][..];
+    let aliases = &["alias", "packages/*"][..];
+    for (manager, globs, member, spec, has_importer, status) in [
+        ("10.28.1", dirs, nested, "workspace:^1", false, 0),
+        ("10.28.1", dirs, nested, "workspace:^2", false, 1),
+        ("10.28.1", aliases, "alias", "workspace:^1", true, 0),
+        ("10.28.1", &["alias"], "alias", "workspace:^1", false, 1),
+        ("12.7.0", dirs, nested, "workspace:^1", false, 1),
+        ("12.8.0", dirs, nested, "workspace:^1", false, 0),
+        ("12.14.0", dirs, nested, "workspace:^1", true, 0),
+        ("12.15.0", dirs, nested, "workspace:^1", true, 1),
+        (
+            "12.15.0",
+            dirs,
+            nested,
+            "workspace:./linked/nested",
+            true,
+            0,
+        ),
+    ] {
+        fs::write(
+            root.join("package.json"),
+            json!({"packageManager":format!("pnpm@{manager}"),"dependencies":{"lib":spec}})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            json!({"packages":globs}).to_string(),
+        )
+        .unwrap();
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":format!("link:{member}")}}}}});
+        if has_importer {
+            lock["importers"][member] = json!({});
+        }
+        if globs.contains(&"packages/*") {
+            lock["importers"]["packages/internal"] = json!({});
+        }
+        fs::write(root.join("pnpm-lock.yaml"), lock.to_string()).unwrap();
+        let result = validate_workspace_in(&root);
+        assert_eq!(
+            result.status.code(),
+            Some(status),
+            "{manager} {member} {spec}: {}",
+            report(&result)
+        );
+    }
+    fs::write(
+        external.join("nested/package.json"),
+        r#"{"name":"lib","version":"1.0.0","dependencies":{"child":"link:./child"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("package.json"),
+        r#"{"packageManager":"pnpm@10.28.1"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("pnpm-lock.yaml"),
+        r#"{"lockfileVersion":"9.0","importers":{".":{}}}"#,
+    )
+    .unwrap();
+    let result = validate_workspace_in(&root);
+    assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+}
+
+#[test]
 fn validate_compares_ignored_optional_dependencies_as_an_unordered_list() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

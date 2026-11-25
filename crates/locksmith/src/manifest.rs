@@ -42,6 +42,22 @@ pub(crate) fn declarations<'a>(
     overrides: &Overrides<'a>,
     importer: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
+    importer_declarations(manifest, overrides, importer, false)
+}
+
+fn importer_declarations<'a>(
+    manifest: &'a Value,
+    overrides: &Overrides<'a>,
+    importer: &str,
+    frozen: bool,
+) -> Result<Declarations<'a>, LockfileError> {
+    // pnpm 12 checks optional exclusions after peers have entered the production group.
+    let exclude_peer = frozen
+        && overrides
+            .config
+            .pnpm_version
+            .as_ref()
+            .is_some_and(|v| v.major() >= 12);
     let mut result = BTreeMap::new();
     let settings = crate::LockSettings::from_document(overrides.document);
     for (field, group) in [
@@ -50,6 +66,9 @@ pub(crate) fn declarations<'a>(
         ("peerDependencies", "dependencies"),
         ("optionalDependencies", "optionalDependencies"),
     ] {
+        let filter_optional = frozen
+            && (matches!(field, "dependencies" | "optionalDependencies")
+                || (exclude_peer && field == "peerDependencies"));
         let engines = match field {
             "devDependencies" => manifest.get("devEngines"),
             "dependencies" => manifest.get("engines"),
@@ -92,6 +111,15 @@ pub(crate) fn declarations<'a>(
             let specifier = specifier
                 .as_str()
                 .ok_or_else(|| LockfileError::InvalidManifest(importer.into()))?;
+            if filter_optional
+                && manifest["optionalDependencies"].get(name).is_some()
+                && overrides
+                    .config
+                    .resolution
+                    .ignores_optional_dependency(name)
+            {
+                continue;
+            }
             let replacement = overrides.select(manifest, name, specifier)?;
             let effective = match replacement {
                 Some(value) => overrides.resolve(importer, name, value)?,
@@ -176,10 +204,16 @@ pub(crate) fn check_with_links(
     if !manifest.is_object() {
         return Err(LockfileError::InvalidManifest(importer.into()));
     }
-    let record = record
-        .filter(|value| value.is_object())
-        .ok_or_else(|| mismatch(importer, side, "missing importer"))?;
-    let mut expected = declarations(manifest, overrides, importer)?;
+    let empty;
+    let record = match record {
+        Some(value) if value.is_object() => value,
+        None if links.is_some_and(|links| links.can_omit_empty_importer(importer)) => {
+            empty = Value::Object(Default::default());
+            &empty
+        }
+        _ => return Err(mismatch(importer, side, "missing importer")),
+    };
+    let mut expected = importer_declarations(manifest, overrides, importer, links.is_some())?;
     let mut actual = BTreeMap::new();
     for group in GROUPS {
         if let Some(deps) = record.get(group) {

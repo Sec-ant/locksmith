@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Component, Path},
 };
 
@@ -192,6 +191,7 @@ pub fn settings(
                     "injectWorkspacePackages",
                     "autoInstallPeers",
                     "addMissingPeerTypes",
+                    "ignoredOptionalDependencies",
                 ] {
                     settings.remove(key);
                 }
@@ -367,15 +367,23 @@ fn ini_bool(value: &str) -> std::result::Result<bool, std::str::ParseBoolError> 
         .parse()
 }
 
+const GLOB_OPTIONS: MatchOptions = MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: true,
+};
+
 pub struct Members {
     include: Vec<Pattern>,
     exclude: Vec<Pattern>,
+    descend: Vec<Pattern>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
         let mut this = Self {
             include: vec![],
             exclude: vec![],
+            descend: vec![],
         };
         if !project.workspace {
             return Ok(this);
@@ -414,6 +422,14 @@ impl Members {
                 }
                 if !parts.is_empty() {
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
+                    if !value.starts_with('!') {
+                        for (index, part) in parts.iter().enumerate() {
+                            this.descend.push(Pattern::new(&parts[..=index].join("/"))?);
+                            if *part == "**" {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -455,37 +471,61 @@ impl Members {
         if self.include.is_empty() {
             return Ok(Vec::new());
         }
-        let max_depth = if self.include.iter().any(|p| p.as_str().contains("**")) {
-            usize::MAX
-        } else {
-            self.include
-                .iter()
-                .map(|p| p.as_str().matches('/').count())
-                .max()
-                .unwrap_or(0)
-        };
-        let mut pending = vec![(String::new(), 0)];
         let mut directories = Vec::new();
-        while let Some((id, depth)) = pending.pop() {
-            let path = root.join(&id);
-            let entries = fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            for entry in entries {
-                let entry = entry?;
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if entry.file_type()?.is_dir() {
-                    if depth < max_depth
-                        && !matches!(name, ".git" | "node_modules" | "bower_components")
-                    {
-                        let child = if id.is_empty() {
-                            name.to_owned()
-                        } else {
-                            format!("{id}/{name}")
-                        };
-                        pending.push((child, depth + 1));
-                    }
-                } else if !id.is_empty() && MANIFEST_NAMES.contains(&name) && self.contains(&id) {
-                    directories.push(id.clone());
+        let walk = walkdir::WalkDir::new(root)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|entry| {
+                if entry.depth() == 0 || !entry.file_type().is_dir() {
+                    return true;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("entry under walk root");
+                !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | "node_modules" | "bower_components")
+                ) && self.descend.iter().any(|p| {
+                    p.matches_path_with(
+                        relative,
+                        MatchOptions {
+                            require_literal_leading_dot: false,
+                            ..GLOB_OPTIONS
+                        },
+                    )
+                })
+            });
+        for entry in walk {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if e.loop_ancestor().is_some() => continue,
+                Err(e)
+                    if e.io_error()
+                        .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+                        && e.path().is_some_and(Path::is_symlink) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if entry.depth() < 2
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| MANIFEST_NAMES.contains(&name))
+            {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(root)?
+                .parent()
+                .expect("non-root manifest");
+            if let Some(dir) = path.to_str() {
+                let id = dir.replace(std::path::MAIN_SEPARATOR, "/");
+                if self.contains(&id) {
+                    directories.push(id);
                 }
             }
         }
@@ -522,16 +562,7 @@ impl Members {
             return false;
         }
         let path = format!("{dir}/package.json");
-        let matches = |p: &Pattern| {
-            p.matches_with(
-                &path,
-                MatchOptions {
-                    case_sensitive: true,
-                    require_literal_separator: true,
-                    require_literal_leading_dot: true,
-                },
-            )
-        };
+        let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
     }
 }
