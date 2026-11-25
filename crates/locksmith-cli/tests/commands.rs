@@ -1868,6 +1868,8 @@ fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() 
         .unwrap();
     }
     for (version, yaml, members, code) in [
+        ("", "{}", vec![], 0),
+        ("", "packages: ['internal']", vec!["internal"], 0),
         ("9.15.9", "{}", vec!["internal"], 0),
         ("10.4.1", "{}", vec!["internal"], 0),
         ("10.4.1", "linkWorkspacePackages: true", vec![], 2),
@@ -1878,8 +1880,10 @@ fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() 
         ("12.18.0", "packages: ['../*']", vec!["../shared"], 0),
         ("12.18.0", "packages: ['../sha*']", vec![], 1),
     ] {
-        let mut manifest =
-            json!({"packageManager":format!("pnpm@{version}"),"pnpm":{"packages":["unused"]}});
+        let mut manifest = json!({"pnpm":{"packages":["unused"]}});
+        if !version.is_empty() {
+            manifest["packageManager"] = json!(format!("pnpm@{version}"));
+        }
         let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
         for &id in &members {
             lock["importers"][id] = json!({});

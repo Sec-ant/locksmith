@@ -106,6 +106,8 @@ Run `locksmith validate [FILE]` to check YAML structure and internal references,
 
 Use `locksmith validate --workspace [FILE]` to also check that workspace members, dependency declarations, recorded settings, and configured patches match the lockfile. A `workspace:` dependency must have a local pin. A relative `workspace:` link must point to the declared path, which pnpm allows to be absent from the checkout. For a named dependency, the selected member must have the declared name and satisfy any explicit version range. Some pnpm releases reuse a frozen link after its target changes. The lockfile's directory is the workspace root. The check reads local inputs, works outside Git, and does not install packages. A workspace with `pnpm-workspace.yaml` can omit its root package manifest. The check returns `2` if a pnpmfile can change the effective declarations.
 
+When the workspace omits `packages` and the pnpm version is unknown, Locksmith selects only the root package. Projects using the recursive default of pnpm before 10.5 can declare their pnpm version in `packageManager`.
+
 In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also checks package availability and integrity.
 
 ## Inspect peer bindings and package instances

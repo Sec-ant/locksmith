@@ -407,11 +407,11 @@ impl Members {
             None if project
                 .pnpm_version
                 .as_ref()
-                .is_some_and(|v| v >= &node_semver::Version::from((10, 5, 0))) =>
+                .is_some_and(|v| v < &node_semver::Version::from((10, 5, 0))) =>
             {
-                Vec::new()
+                vec!["**".into()]
             }
-            None => vec!["**".into()],
+            None => Vec::new(),
             Some(v) => serde_json::from_value(v.clone())?,
         };
         for value in patterns {
