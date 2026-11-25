@@ -1,29 +1,29 @@
 class Locksmith < Formula
   desc "Merge, repair, and converge pnpm lockfiles"
   homepage "https://github.com/Sec-ant/locksmith"
-  version "0.3.6"
+  version "0.3.7"
 
   on_macos do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.6/locksmith-aarch64-apple-darwin.tar.gz"
-      sha256 "d45a73a2314c4cc9a35fc67e7644703dc9ad1261c693091f85c2e669c60a16dd"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.7/locksmith-aarch64-apple-darwin.tar.gz"
+      sha256 "1d8dd0786f5296f8a3ecc6046ce877ca1cdaf486df3d85255063bad2e4b16325"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.6/locksmith-x86_64-apple-darwin.tar.gz"
-      sha256 "929fae280b847bae1acfffd0fc010854b0245d1193709c47f16828c1ff3a1717"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.7/locksmith-x86_64-apple-darwin.tar.gz"
+      sha256 "e1209961ed883ee7aa63df920c34844dc69582cd6b2c84eff3d3380489363497"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.6/locksmith-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "33a7975e89bed9798d212c55a6df316a95460672e1ea01f17e236c4a75b999fe"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.7/locksmith-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "2c62c25c60ed4dfe8c35f3a36dff77aee9dcc5e16cef3558574d6808710b8112"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.6/locksmith-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "7eac2c4bf7120be64988d1523660efcca570051a06bcd1ab25090a5c9c7bd42b"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.7/locksmith-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "ef242964825e52033c63f865803ba43dccdbad04a97f281bcb68cf7df54992a1"
     end
   end
 
