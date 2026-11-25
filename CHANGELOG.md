@@ -1,3 +1,14 @@
+## 0.3.6 (2026-11-25)
+
+### Features
+
+- Detect outdated workspace members and dependency declarations with `locksmith validate --workspace` without installing dependencies.
+
+### Fixes
+
+- Use the pnpm version recorded in the lockfile to load workspace configuration for `repair` when `packageManager` is absent.
+- Use the root-only workspace default when `pnpm-workspace.yaml` omits `packages`, including when the pnpm version is unknown. An explicitly declared or recorded pnpm version before 10.5 retains its recursive default for an empty workspace configuration.
+
 ## 0.3.5 (2026-11-24)
 
 ### Features
