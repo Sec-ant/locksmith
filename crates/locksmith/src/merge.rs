@@ -87,7 +87,7 @@ fn three_way(
             theirs.document(kind),
         );
         if let Some(mut document) = document {
-            for (key, value) in std::mem::take(&mut context.peers.generated) {
+            for (key, value) in context.peers.into_generated() {
                 let snapshots = document
                     .as_object_mut()
                     .expect("document mapping")

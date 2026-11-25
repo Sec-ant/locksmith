@@ -14,7 +14,7 @@ impl Merger<'_> {
         name: &str,
         spec: &str,
     ) -> Option<String> {
-        let (target, version) = crate::reconcile::alias(spec).unwrap_or((name, spec));
+        let (target, version) = crate::manifest::alias(spec).unwrap_or((name, spec));
         let version = version.parse::<node_semver::Version>().ok()?.to_string();
         let release = format!("{target}@{version}");
         let donor_side = parents.len().checked_sub(1)?;

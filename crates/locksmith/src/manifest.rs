@@ -5,6 +5,16 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
+pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
+    let alias = specifier.strip_prefix("npm:")?;
+    Some(
+        alias
+            .rsplit_once('@')
+            .filter(|(name, _)| !name.is_empty())
+            .unwrap_or((alias, "*")),
+    )
+}
+
 /// pnpm omits rule maps with no entries when writing the lockfile.
 pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
     document
@@ -196,11 +206,7 @@ pub(crate) fn check(
                     continue;
                 }
                 let resolved_key;
-                let (range, version) = if let Some(alias) = specifier.strip_prefix("npm:") {
-                    let (target, range) = alias
-                        .rsplit_once('@')
-                        .filter(|(name, _)| !name.is_empty())
-                        .unwrap_or((alias, "*"));
+                let (range, version) = if let Some((target, range)) = alias(specifier) {
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));

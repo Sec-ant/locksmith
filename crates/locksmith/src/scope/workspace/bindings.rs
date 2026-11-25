@@ -469,7 +469,7 @@ impl super::Projection {
             ));
         }
         if let Some(peers) = merger {
-            let generated = peers.generated;
+            let generated = peers.into_generated();
             let output = std::sync::Arc::make_mut(
                 result
                     .documents

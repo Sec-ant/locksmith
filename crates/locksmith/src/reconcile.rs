@@ -334,15 +334,6 @@ fn environment_source(
     ))
 }
 
-pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
-    let alias = specifier.strip_prefix("npm:")?;
-    Some(
-        alias
-            .rsplit_once('@')
-            .filter(|(n, _)| !n.is_empty())
-            .unwrap_or((alias, "*")),
-    )
-}
 fn opaque(specifier: &str) -> bool {
     !specifier.starts_with("catalog:")
         && !specifier.starts_with("npm:")
@@ -378,7 +369,7 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
 
 fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
     let pin = graph::package_key(reference);
-    if let Some((target, _)) = spec.and_then(alias) {
+    if let Some((target, _)) = spec.and_then(manifest::alias) {
         return (target == name && pin == version)
             || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
     }
@@ -386,7 +377,7 @@ fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference:
 }
 
 fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
-    let (range, version) = if let Some((target, range)) = alias(specifier) {
+    let (range, version) = if let Some((target, range)) = manifest::alias(specifier) {
         let Some(version) = reference
             .strip_prefix(&format!("{target}@"))
             .or_else(|| (name == target).then_some(reference))
@@ -538,29 +529,5 @@ impl<'a> GraphSources<'a> {
             }
             candidates
         })
-    }
-}
-
-fn key_in_inputs(
-    name: &str,
-    reference: &str,
-    docs: [&Value; 4],
-    generated: &BTreeMap<String, Value>,
-) -> String {
-    let named = format!("{name}@{reference}");
-    if generated.contains_key(&named)
-        || docs
-            .iter()
-            .any(|d| d.get("snapshots").and_then(|v| v.get(&named)).is_some())
-    {
-        named
-    } else if generated.contains_key(reference)
-        || docs
-            .iter()
-            .any(|d| d.get("snapshots").and_then(|v| v.get(reference)).is_some())
-    {
-        reference.into()
-    } else {
-        named
     }
 }

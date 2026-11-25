@@ -1,7 +1,7 @@
 //! Apply final overrides, extensions and patches to a selected snapshot.
 use super::{
-    GraphSources, PeerChanges, PeerRequirements, RepairedSnapshot, accepts, alias,
-    authorized_patch, desired_patch, key_in_inputs, missing, peer_names, reference,
+    GraphSources, PeerChanges, PeerRequirements, RepairedSnapshot, accepts, authorized_patch,
+    desired_patch, missing, peer_names, reference,
 };
 use crate::{LockfileError, Value, graph, manifest, peer};
 use serde_json::json;
@@ -215,7 +215,7 @@ fn extend_dependencies(
         {
             continue;
         }
-        let actual_name = alias(&desired).map_or(name, |(name, _)| name);
+        let actual_name = manifest::alias(&desired).map_or(name, |(name, _)| name);
         let mut selected = None;
         for existing_patch in [true, false] {
             for (candidate_side, candidate) in
@@ -321,7 +321,7 @@ pub(super) fn repair_snapshot(
                             return true;
                         }
                         let key = graph::snapshot_key(name, reference, Some(source_snapshots));
-                        source_snapshots.contains_key(&key) || peers.generated.contains_key(&key)
+                        source_snapshots.contains_key(&key) || peers.has_generated(&key)
                     })
             });
     if materialized && changed_peers.is_empty() {
@@ -372,7 +372,7 @@ pub(super) fn repair_snapshot(
                 continue;
             }
             let reference = value.as_str().expect("checked reference");
-            let old_key = key_in_inputs(name, reference, sources.docs, &peers.generated);
+            let old_key = peers.snapshot_key(name, reference);
             let own_peer = package
                 .get("peerDependencies")
                 .and_then(|v| v.get(name))
@@ -555,7 +555,7 @@ pub(super) fn repair_snapshot(
             } else {
                 old_version
             };
-            let actual_name = alias(desired).map_or(old_name, |(n, _)| n);
+            let actual_name = manifest::alias(desired).map_or(old_name, |(n, _)| n);
             let previous = previous.resolve(peers);
             let mut providers = previous.clone();
             if let Some(bindings) = peers.binding_context(side, &old_key, previous) {
@@ -747,7 +747,7 @@ pub(super) fn repair_snapshot(
             if reference.starts_with("link:") {
                 continue;
             }
-            let child = key_in_inputs(&name, &reference, sources.docs, &peers.generated);
+            let child = peers.snapshot_key(&name, &reference);
             let child_side = peers
                 .origin_side(&child)
                 .or_else(|| {
@@ -795,12 +795,7 @@ pub(super) fn repair_snapshot(
             .find_map(|group| result.get(group)?.get(&name)?.as_str())
             .expect("selected dependency");
         requirements
-            .entry(key_in_inputs(
-                &name,
-                reference,
-                sources.docs,
-                &peers.generated,
-            ))
+            .entry(peers.snapshot_key(&name, reference))
             .or_default()
             .extend(names);
     }
@@ -810,12 +805,7 @@ pub(super) fn repair_snapshot(
             .find_map(|group| result.get(group)?.get(&name)?.as_str())
             .expect("selected dependency");
         affected
-            .entry(key_in_inputs(
-                &name,
-                reference,
-                sources.docs,
-                &peers.generated,
-            ))
+            .entry(peers.snapshot_key(&name, reference))
             .or_default()
             .extend(names);
     }

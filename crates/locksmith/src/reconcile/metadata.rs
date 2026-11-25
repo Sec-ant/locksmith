@@ -1,10 +1,10 @@
 //! Construct the project-wide settings, catalogs, checksums and patch records.
-use super::{MergeContext, alias, missing};
+use super::{MergeContext, missing};
 use crate::{LockfileError, Value, graph, manifest, peer};
 use serde_json::json;
 
 pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Option<&str>) -> bool {
-    let range = alias(specifier).map_or(specifier, |(_, range)| range);
+    let range = manifest::alias(specifier).map_or(specifier, |(_, range)| range);
     match range.parse::<node_semver::Range>() {
         Ok(wanted) => version
             .parse::<node_semver::Version>()
@@ -187,9 +187,9 @@ pub(crate) fn resolve(
                     if entry
                         .get("specifier")
                         .and_then(Value::as_str)
-                        .and_then(alias)
+                        .and_then(manifest::alias)
                         .map(|(n, _)| n)
-                        != alias(specifier).map(|(n, _)| n)
+                        != manifest::alias(specifier).map(|(n, _)| n)
                     {
                         return None;
                     }
@@ -197,7 +197,7 @@ pub(crate) fn resolve(
                         .then(|| json!({"specifier":specifier,"version":version}))
                 })
                 .or_else(|| {
-                    let (actual, range) = alias(specifier).unwrap_or((name, specifier));
+                    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
                     let range = range.parse::<node_semver::Range>().ok()?;
                     order.iter().find_map(|&side| {
                         let index = versions[side].get_or_insert_with(|| {

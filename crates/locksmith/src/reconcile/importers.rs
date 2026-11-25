@@ -1,6 +1,6 @@
 //! Select workspace pins, then bind each importer to its final peer providers.
 use super::{
-    GraphSources, MergeContext, accepts, alias, authorized_patch, desired_patch, missing, opaque,
+    GraphSources, MergeContext, accepts, authorized_patch, desired_patch, missing, opaque,
     peer_names, reference,
 };
 use crate::{
@@ -612,8 +612,8 @@ impl PinSelector<'_, '_> {
                         .get("specifier")?
                         .as_str()
                 });
-                let actual_name =
-                    alias(catalog_specifier.unwrap_or(specifier)).map_or(name, |(name, _)| name);
+                let actual_name = manifest::alias(catalog_specifier.unwrap_or(specifier))
+                    .map_or(name, |(name, _)| name);
                 for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
                     if *side == super::PUBLISHED
                         || (!sources.prefer_baseline
@@ -661,7 +661,7 @@ impl PinSelector<'_, '_> {
                 })
                 .map(String::as_str)
                 .unwrap_or(specifier);
-            let (actual, selector) = alias(effective).unwrap_or((name, effective));
+            let (actual, selector) = manifest::alias(effective).unwrap_or((name, effective));
             if let Some(choice) = registry.selected(actual, selector) {
                 selected = sources
                     .candidates()

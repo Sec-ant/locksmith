@@ -1,8 +1,5 @@
 //! Resolve local dependencies against the final workspace manifests.
-use crate::{
-    LockfileError, Value, WorkspaceConfig, graph, manifest,
-    reconcile::{alias, missing},
-};
+use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, reconcile::missing};
 use std::collections::{BTreeMap, HashMap};
 
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
@@ -93,7 +90,7 @@ impl<'a> WorkspaceLinks<'a> {
                     .filter(|(n, _)| !n.is_empty())
                     .unwrap_or((name, request))
             } else {
-                let (name, range) = alias(specifier).unwrap_or((name, specifier));
+                let (name, range) = manifest::alias(specifier).unwrap_or((name, specifier));
                 if range.parse::<node_semver::Range>().is_err() {
                     return Ok(None);
                 }

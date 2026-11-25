@@ -657,7 +657,7 @@ impl Projector<'_> {
                     && !peer_names.contains(name)
                     && installed_edge.is_some_and(|(_, pin)| {
                         (spec.parse::<node_semver::Range>().is_ok()
-                            || reconcile::alias(spec).is_some())
+                            || manifest::alias(spec).is_some())
                             && !reconcile::accepts(name, spec, pin, donor)
                     });
                 if required_missing || wrong_pin {
@@ -798,7 +798,7 @@ impl Projector<'_> {
         for (k, v) in self.records {
             output["snapshots"][k] = v;
         }
-        bindings::insert_rebound(output, self.peers.generated)?;
+        bindings::insert_rebound(output, self.peers.into_generated())?;
         Ok(self.affected)
     }
 }

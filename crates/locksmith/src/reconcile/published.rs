@@ -7,7 +7,7 @@ use std::{
 use indexmap::IndexMap;
 use serde_json::{Map, json};
 
-use super::{MergeContext, accepts, alias, desired_patch, missing, reference};
+use super::{MergeContext, accepts, desired_patch, missing, reference};
 use crate::{
     LockfileError, RegistryMetadata, RegistryRequest, Value, WorkspaceConfig, graph, manifest,
 };
@@ -321,7 +321,7 @@ pub(super) fn catalog_version<'a>(
     name: &str,
     specifier: &str,
 ) -> Option<&'a str> {
-    let (actual, range) = alias(specifier).unwrap_or((name, specifier));
+    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
     registry?
         .selected(actual, range)?
         .rsplit_once('@')
