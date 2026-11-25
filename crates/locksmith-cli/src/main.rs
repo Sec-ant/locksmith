@@ -1,14 +1,13 @@
 //! Command-line adapters for the in-memory locksmith library.
 use std::{
     error::Error,
-    fs,
     io::{self, Write},
     process::ExitCode,
 };
 
 use args::{Command, Merge};
 use bpaf::{Args, ParseFailure};
-use locksmith::{Lockfile, LockfileError};
+use locksmith::LockfileError;
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[global_allocator]
@@ -23,6 +22,7 @@ mod merge;
 mod policy;
 mod registry;
 mod repair;
+mod validate;
 mod workspace;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -57,11 +57,7 @@ fn run(command: Command) -> Result<()> {
             reference,
             allow_network,
         } => repair::run(&reference, allow_network)?,
-        Command::Validate { file } => {
-            let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            Lockfile::try_from(text)?.validate()?;
-            return Ok(());
-        }
+        Command::Validate { file, workspace } => return validate::run(&file, workspace),
         Command::Inspect {
             json,
             pnpm_version,
@@ -114,7 +110,8 @@ fn main() -> ExitCode {
                 Some(
                     LockfileError::Parse(_)
                     | LockfileError::InvalidDocument(_)
-                    | LockfileError::InvalidGraph(_),
+                    | LockfileError::InvalidGraph(_)
+                    | LockfileError::ManifestMismatch { .. },
                 ) if validating => ExitCode::from(1),
                 _ => ExitCode::from(2),
             }

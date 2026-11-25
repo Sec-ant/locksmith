@@ -110,6 +110,52 @@ impl Lockfile {
         self.validate_with_config(None)
     }
 
+    /// Check the graph and compare its importers against the complete set of
+    /// workspace manifests. Callers supply effective manifests if hooks apply.
+    pub fn validate_workspace(
+        &self,
+        manifests: &BTreeMap<String, Value>,
+        config: &crate::WorkspaceConfig,
+    ) -> Result<(), LockfileError> {
+        self.validate_with_config(Some(config))?;
+        let document = self
+            .project()
+            .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
+        let recorded = crate::LockSettings::from_document(document);
+        let configured = &config.resolution.lock;
+        if recorded.auto_install_peers != configured.auto_install_peers
+            || recorded.exclude_links_from_lockfile != configured.exclude_links_from_lockfile
+        {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "dependency settings differ",
+            ));
+        }
+        let effective =
+            crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
+        if effective.as_ref() != crate::manifest::rule_map(document, "overrides") {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "overrides differ",
+            ));
+        }
+        let overrides = crate::manifest::Overrides::new(document, config);
+        for id in graph::section(document, "importers")
+            .into_iter()
+            .flat_map(|m| m.keys())
+        {
+            if !manifests.contains_key(id) {
+                crate::manifest::check(&overrides, id, None, "workspace")?;
+            }
+        }
+        for (id, manifest) in manifests {
+            crate::manifest::check(&overrides, id, Some(manifest), "workspace")?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_with_config(
         &self,
         config: Option<&crate::WorkspaceConfig>,

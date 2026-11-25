@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Component, Path},
 };
 
@@ -427,6 +428,50 @@ impl Members {
             .into_keys()
             .map(str::to_owned)
             .collect())
+    }
+
+    /// Discover manifests from disk, including projects absent from Git or the lockfile.
+    pub fn directories_on_disk(&self, root: &Path) -> Result<Vec<String>> {
+        if self.include.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max_depth = if self.include.iter().any(|p| p.as_str().contains("**")) {
+            usize::MAX
+        } else {
+            self.include
+                .iter()
+                .map(|p| p.as_str().matches('/').count())
+                .max()
+                .unwrap_or(0)
+        };
+        let mut pending = vec![(String::new(), 0)];
+        let mut directories = Vec::new();
+        while let Some((id, depth)) = pending.pop() {
+            let path = root.join(&id);
+            let entries = fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if entry.file_type()?.is_dir() {
+                    if depth < max_depth
+                        && !matches!(name, ".git" | "node_modules" | "bower_components")
+                    {
+                        let child = if id.is_empty() {
+                            name.to_owned()
+                        } else {
+                            format!("{id}/{name}")
+                        };
+                        pending.push((child, depth + 1));
+                    }
+                } else if !id.is_empty() && MANIFEST_NAMES.contains(&name) && self.contains(&id) {
+                    directories.push(id.clone());
+                }
+            }
+        }
+        directories.sort_unstable();
+        directories.dedup();
+        Ok(directories)
     }
 
     fn manifest_paths<'a>(&self, paths: &'a str, prefix: &str) -> BTreeMap<&'a str, &'a str> {

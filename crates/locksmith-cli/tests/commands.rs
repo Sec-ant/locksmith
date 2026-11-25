@@ -1252,6 +1252,75 @@ snapshots:
 }
 
 #[test]
+fn validate_workspace_detects_manifest_and_membership_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    let member = root.join("apps/web");
+    fs::create_dir_all(root.join("apps/example")).unwrap();
+    fs::create_dir_all(&member).unwrap();
+    fs::write(root.join("package.json"), r#"{"private":true}"#).unwrap();
+    fs::write(root.join("apps/example/package.json"), "{}").unwrap();
+    fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages: ['apps/*', '!apps/example']\n",
+    )
+    .unwrap();
+    let manifest = member.join("package.json");
+    let current = r#"{"dependencies":{"foo":"^1.0.0"}}"#;
+    fs::write(&manifest, current).unwrap();
+    let lock = "\
+lockfileVersion: '9.0'
+importers:
+  .: {}
+  apps/web:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {tarball: https://example.org/foo-1.0.0.tgz}
+snapshots:
+  foo@1.0.0: {}
+";
+    let file = root.join("pnpm-lock.yaml");
+    fs::write(&file, lock).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(CLI)
+            .current_dir(dir.path())
+            .arg("validate")
+            .args(args)
+            .arg("project/pnpm-lock.yaml")
+            .output()
+            .unwrap()
+    };
+    let check = || run(&["--workspace"]);
+    let expect_stale = |diagnostic: &str| {
+        let result = check();
+        assert_eq!(result.status.code(), Some(1), "{}", report(&result));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+    };
+    let result = check();
+    assert!(result.status.success(), "{}", report(&result));
+    assert!(result.stdout.is_empty() && result.stderr.is_empty());
+
+    fs::write(&manifest, current.replace("^1.0.0", "^2.0.0")).unwrap();
+    expect_stale("dependency foo");
+    assert!(run(&[]).status.success());
+    fs::write(&manifest, current).unwrap();
+
+    let new_member = root.join("apps/new");
+    fs::create_dir(&new_member).unwrap();
+    fs::write(new_member.join("package.yaml"), "name: new\n").unwrap();
+    expect_stale("missing importer");
+    fs::remove_file(new_member.join("package.yaml")).unwrap();
+    fs::remove_file(manifest).unwrap();
+    expect_stale("absent project");
+    assert_eq!(fs::read_to_string(file).unwrap(), lock);
+}
+
+#[test]
 fn inspect_reads_the_lockfiles_own_workspace_without_git_or_writes() {
     let sandbox = tempfile::tempdir().unwrap();
     let dir = sandbox.path().join("nested");
