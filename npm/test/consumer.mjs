@@ -55,7 +55,27 @@ const bootstrap = {
 };
 const managed = `---\n${JSON.stringify(bootstrap)}\n---\nlockfileVersion: '9.0'\nimporters: {'.': {}}\n`;
 const modernContext = { ...context, manifests: { '.': modernRoot } };
+for (const [input, code] of [
+  ["lockfileVersion: '6.0'\nimporters: {}\n", 'UNSUPPORTED_VERSION'],
+  ["---\nlockfileVersion: [\n---\nlockfileVersion: '9.0'\nimporters: {}\n", 'INVALID_YAML'],
+]) {
+  await assert.rejects(merge(input, input, input, modernContext), error => error.code === code);
+}
 const managedHandle = await parse(managed);
+// The selected boot document must agree under both interpretations of a duplicate snapshot.
+const emptySnapshot = '"pnpm@12.21.0":{}';
+const brokenSnapshot = '"pnpm@12.21.0":{"dependencies":{"missing":"1.0.0"}}';
+for (const bodies of [[brokenSnapshot, emptySnapshot], [emptySnapshot, brokenSnapshot]]) {
+  const duplicate = managed.replace(emptySnapshot, bodies.join(','));
+  await assert.rejects(merge(managed, duplicate, managed, modernContext), /duplicate snapshot/i);
+}
+const olderManaged = managed.replaceAll('12.21.0', '12.18.0');
+for (const baseline of [olderManaged, yaml]) {
+  const migrated = await converge(baseline, managedHandle, [
+    { importer: '.', before: {}, after: {} },
+  ], { configuration: {} });
+  assert.deepEqual(await (await parse(migrated)).document('environment'), bootstrap);
+}
 for (const result of await Promise.all([
   merge(managed, managedHandle, managed, modernContext),
   converge(managedHandle, managed, [{ importer: '.', before: modernRoot, after: modernRoot }], { configuration: {} }),

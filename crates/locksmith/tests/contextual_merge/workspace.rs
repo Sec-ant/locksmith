@@ -852,6 +852,52 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
         .is_err()
     );
     assert!(merge(&old, &old, &old, Some(&ctx)).is_err());
+    let mut incorrect = new.environment().unwrap().clone();
+    incorrect["importers"]["."]["configDependencies"]["config"]["specifier"] = json!("1.0.0");
+    let incorrect = Lockfile::parse(&format!("---\n{incorrect}\n---\n{project}\n")).unwrap();
+    assert!(
+        incorrect
+            .validate_workspace(
+                &manifests,
+                &Default::default(),
+                &before,
+                ctx.patches,
+                |_| Ok(None)
+            )
+            .is_err()
+    );
+    for (url, valid) in [
+        ("https://registry.test/config/-/config-2.0.0.tgz", true),
+        ("https://registry.test/artifacts/custom.tgz", false),
+        ("https://mirror.test/config/-/config-2.0.0.tgz", false),
+        (
+            "https://registry.test/custom?file=/config/-/config-2.0.0.tgz",
+            false,
+        ),
+    ] {
+        let cfg = WorkspaceConfig::from_pnpm(
+            &json!({"registry":"https://registry.test","configDependencies":{"config":{
+                "integrity":"2.0.0+sha512-example","tarball":url
+            }}}),
+        )
+        .unwrap();
+        assert_eq!(
+            new.validate_workspace(&manifests, &Default::default(), &cfg, ctx.patches, |_| Ok(
+                None
+            ))
+            .is_ok(),
+            valid
+        );
+    }
+    let mut broken = new.environment().unwrap().clone();
+    broken["snapshots"] = json!({});
+    let broken = Lockfile::parse(&format!("---\n{broken}\n---\n{project}\n")).unwrap();
+    assert_eq!(
+        merge(&old, &broken, &new, Some(&ctx))
+            .unwrap()
+            .environment(),
+        new.environment()
+    );
 }
 
 #[test]
@@ -1030,6 +1076,7 @@ fn workspace_operations_check_the_recorded_package_manager_pin() {
         (version, version, true),
         ("12.20.0", "12.20.0", false),
         (version, "12.20.0", false),
+        ("12.20.0", version, false),
     ] {
         check_manager_pin(
             manifest.clone(),

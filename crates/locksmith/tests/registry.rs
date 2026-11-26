@@ -452,38 +452,40 @@ fn registry_requests_cover_independent_missing_pins_across_workspace_members() {
 
 #[test]
 fn published_sibling_dependencies_are_requested_in_one_batch() {
-    let mut registry = RegistryMetadata::default();
-    let request = RegistryRequest::Version {
-        name: "parent".into(),
-        selector: "1.0.0".into(),
-    };
-    registry.insert(&request, json!({"name":"parent","version":"1.0.0","dependencies":{"a":"1","b":"2"},"dist":{"shasum":"0123456789abcdef0123456789abcdef01234567","tarball":"https://example.org/parent/-/parent-1.0.0.tgz"}}),"https://example.org",false).unwrap();
-    let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {'.': {}}\n").unwrap();
-    let cfg = WorkspaceConfig::default();
-    let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"parent":"1.0.0"}}))]);
-    let ctx = MergeContext {
-        registry: Some(&registry),
-        target: MergeTarget::Ours,
-        manifests: &manifests,
-        configuration: &cfg,
-        configurations: [&cfg; 3],
-        patches: &BTreeMap::new(),
-    };
-    let mut names = std::collections::BTreeSet::new();
-    for error in ctx.merge_with_requests([&lock; 3]).unwrap_err() {
-        let LockfileError::ResolutionRequired {
-            path,
-            request: Some(request),
-            ..
-        } = error
-        else {
-            panic!("{error}")
+    for group in ["dependencies", "peerDependencies"] {
+        let mut registry = RegistryMetadata::default();
+        let request = RegistryRequest::Version {
+            name: "parent".into(),
+            selector: "1.0.0".into(),
         };
-        assert_eq!(path, ["snapshots", "parent@1.0.0", request.name()]);
-        names.insert(request.name().to_owned());
+        registry.insert(&request, json!({"name":"parent","version":"1.0.0",group:{"a":"1","b":"2"},"dist":{"shasum":"0123456789abcdef0123456789abcdef01234567","tarball":"https://example.org/parent/-/parent-1.0.0.tgz"}}),"https://example.org",false).unwrap();
+        let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {'.': {}}\n").unwrap();
+        let cfg = WorkspaceConfig::default();
+        let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"parent":"1.0.0"}}))]);
+        let ctx = MergeContext {
+            registry: Some(&registry),
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configuration: &cfg,
+            configurations: [&cfg; 3],
+            patches: &BTreeMap::new(),
+        };
+        let mut names = std::collections::BTreeSet::new();
+        for error in ctx.merge_with_requests([&lock; 3]).unwrap_err() {
+            let LockfileError::ResolutionRequired {
+                path,
+                request: Some(request),
+                ..
+            } = error
+            else {
+                panic!("{error}")
+            };
+            assert_eq!(path, ["snapshots", "parent@1.0.0", request.name()]);
+            names.insert(request.name().to_owned());
+        }
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["a".into(), "b".into()])
+        );
     }
-    assert_eq!(
-        names,
-        std::collections::BTreeSet::from(["a".into(), "b".into()])
-    );
 }

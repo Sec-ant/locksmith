@@ -202,7 +202,13 @@ pub(crate) fn converge_upgrade(
     let mut current = std::borrow::Cow::Borrowed(installed);
     let mut seen = BTreeSet::new();
     loop {
-        let next = resolve_sources([baseline, baseline, &current], context, None, true, None)?;
+        let next = resolve_sources(
+            [baseline, baseline, &current],
+            context,
+            Some(Source::Theirs as usize),
+            true,
+            None,
+        )?;
         if next.documents == current.documents {
             return Ok(next);
         }
@@ -273,6 +279,7 @@ fn resolve_sources(
                 .is_none_or(|selected| selected == side)
                 .then_some(context.configuration)
         }),
+        [false; 3],
     )?;
     let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;
@@ -459,6 +466,7 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
 
 fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
     let pin = graph::package_key(reference);
+    let spec = spec.map(|s| manifest::pinned_specifier(s, reference));
     if let Some(request) = spec.and_then(|s| s.strip_prefix("workspace:"))
         && let Some(path) = version.strip_prefix("file:")
     {
@@ -476,6 +484,7 @@ fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference:
 }
 
 fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
+    let specifier = manifest::pinned_specifier(specifier, reference);
     let (range, version) = if let Some((target, range)) = manifest::alias(specifier) {
         let Some(version) = reference
             .strip_prefix(&format!("{target}@"))
@@ -494,6 +503,31 @@ pub(crate) fn desired_patch<'a>(
     key: &str,
     metadata: &'a Value,
     docs: [&Value; 4],
+) -> Option<Option<&'a str>> {
+    desired_patch_with_index(key, metadata, docs, None)
+}
+
+pub(crate) type PatchIndex<'a> = HashMap<&'a str, Vec<(&'a str, &'a Value)>>;
+
+pub(crate) fn patch_index(document: &Value) -> PatchIndex<'_> {
+    let mut index = PatchIndex::new();
+    for (selector, patch) in graph::section(document, "patchedDependencies")
+        .into_iter()
+        .flatten()
+    {
+        let (name, range) = manifest::selector(selector);
+        if let Some(range) = range {
+            index.entry(name).or_default().push((range, patch));
+        }
+    }
+    index
+}
+
+pub(crate) fn desired_patch_with_index<'a>(
+    key: &str,
+    metadata: &'a Value,
+    docs: [&Value; 4],
+    index: Option<&PatchIndex<'a>>,
 ) -> Option<Option<&'a str>> {
     let package = graph::package_key(key);
     let Some(patches) = metadata
@@ -528,20 +562,29 @@ pub(crate) fn desired_patch<'a>(
         && let Some((name, version)) = package.rsplit_once('@')
     {
         let version = version.parse::<node_semver::Version>().ok();
-        let matching: Vec<_> = patches
-            .iter()
-            .filter_map(|(selector, patch)| {
-                let range = selector
-                    .strip_prefix(name)?
-                    .strip_prefix('@')?
-                    .parse::<node_semver::Range>()
-                    .ok()?;
-                version
-                    .as_ref()
-                    .is_some_and(|v| v.satisfies(&range))
-                    .then_some((range, patch))
-            })
-            .collect();
+        let matches = |(range, patch): (&str, &'a Value)| {
+            let range = range.parse::<node_semver::Range>().ok()?;
+            version
+                .as_ref()
+                .is_some_and(|v| v.satisfies(&range))
+                .then_some((range, patch))
+        };
+        let matching: Vec<_> = match index {
+            Some(index) => index
+                .get(name)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter_map(matches)
+                .collect(),
+            None => patches
+                .iter()
+                .filter_map(|(selector, patch)| {
+                    let range = selector.strip_prefix(name)?.strip_prefix('@')?;
+                    matches((range, patch))
+                })
+                .collect(),
+        };
         if matching.is_empty() {
             declared = patches.get(name);
         } else {

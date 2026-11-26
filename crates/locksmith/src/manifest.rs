@@ -97,13 +97,43 @@ pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     )
 }
 
-/// A bare npm: range keeps the dependency key as its target package.
-pub(crate) fn registry_request<'a>(name: &'a str, specifier: &'a str) -> (&'a str, &'a str) {
+/// A plain version in a lock references the original dependency. Older pnpm versions
+/// encode a numeric package alias as `name@version` instead.
+pub(crate) fn pinned_specifier<'a>(specifier: &'a str, pin: &str) -> &'a str {
     if let Some(range) = specifier.strip_prefix("npm:")
         && range.parse::<node_semver::Range>().is_ok()
+        && graph::package_key(pin)
+            .parse::<node_semver::Version>()
+            .is_ok()
     {
-        (name, range)
+        range
     } else {
+        specifier
+    }
+}
+
+impl WorkspaceConfig {
+    /// pnpm 11.1 added npm:<range> as shorthand for a range on the dependency's own name.
+    pub(crate) fn registry_specifier<'a>(&self, specifier: &'a str) -> &'a str {
+        if let Some(range) = specifier.strip_prefix("npm:")
+            && self
+                .pnpm_version
+                .as_ref()
+                .is_none_or(|v| v >= &node_semver::Version::from((11, 1, 0)))
+            && range.parse::<node_semver::Range>().is_ok()
+        {
+            range
+        } else {
+            specifier
+        }
+    }
+
+    pub(crate) fn registry_request<'a>(
+        &self,
+        name: &'a str,
+        specifier: &'a str,
+    ) -> (&'a str, &'a str) {
+        let specifier = self.registry_specifier(specifier);
         alias(specifier).unwrap_or((name, specifier))
     }
 }
@@ -394,7 +424,7 @@ pub(crate) fn check_manifest(
                 }
                 let resolved_key;
                 let (range, version) = if specifier.starts_with("npm:") {
-                    let (target, range) = registry_request(name, specifier);
+                    let (target, range) = overrides.config.registry_request(name, specifier);
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));

@@ -1,11 +1,13 @@
 """Time a contextual CLI merge against an isolated registry of independent packages."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -48,11 +50,19 @@ with tempfile.TemporaryDirectory() as directory, HTTPServer(("127.0.0.1", 0), Re
     (root / "context").write_text(json.dumps({"target": "ours", "manifests": {".": {"dependencies": dependencies}},
                                               "configuration": config, "configurations": [config] * 3, "patches": {}}))
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    command = [binary, "merge", "lock", "lock", "lock", "--context", "context", "--allow-network"]
+    env = {"PATH": os.environ["PATH"], "HOME": directory, "NO_PROXY": "127.0.0.1"}
+    samples = 1
     try:
-        subprocess.run([binary, "merge", "lock", "lock", "lock", "--context", "context", "--allow-network"],
-                       cwd=root, stdout=subprocess.DEVNULL, check=True,
-                       env={"PATH": os.environ["PATH"], "HOME": directory, "NO_PROXY": "127.0.0.1"})
+        if sys.argv[3:] == ["--hyperfine"]:
+            samples = 13  # Two warmups and eleven measured runs.
+            subprocess.run(["hyperfine", "--shell=none", "--warmup", "2", "--runs", "11",
+                            shlex.join(command)], cwd=root, env=env, check=True)
+        else:
+            start = time.perf_counter_ns()
+            subprocess.run(command, cwd=root, stdout=subprocess.DEVNULL, env=env, check=True)
+            print((time.perf_counter_ns() - start) / 1_000_000)
     finally:
         server.shutdown()
-    if sorted(requests) != sorted(dependencies):
-        raise ValueError("each missing package must be requested exactly once")
+    if sorted(requests) != sorted(list(dependencies) * samples):
+        raise ValueError("each missing package must be requested once per merge")

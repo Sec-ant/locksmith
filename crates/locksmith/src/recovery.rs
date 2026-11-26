@@ -135,15 +135,21 @@ pub(crate) fn resolve(
 }
 
 /// Read the bootstrap importer and package resolutions even when snapshot keys repeat.
-pub(crate) fn bootstrap_candidate(text: &str) -> Option<Lockfile> {
+pub(crate) fn bootstrap_candidate(text: &str) -> Option<(Lockfile, bool)> {
+    let (lock, alternatives) = candidate(text).ok()?;
+    lock.environment().is_some().then_some((lock, alternatives))
+}
+
+// Snapshot alternatives are resolved during the merge. Other input errors are final.
+pub(crate) fn candidate(text: &str) -> Result<(Lockfile, bool), LockfileError> {
+    let mut alternatives = false;
     let lock = match Lockfile::parse(text) {
-        Ok(lock) => lock,
-        // Snapshot values do not affect bootstrap selection. The merge evaluates
-        // every interpretation before it publishes the chosen environment.
-        Err(LockfileError::Parse(_)) => parse_with_alternatives(text, |_, _, _| {}).ok()?,
-        Err(_) => return None,
-    };
-    lock.environment().is_some().then_some(lock)
+        Err(LockfileError::Parse(_)) => {
+            parse_with_alternatives(text, |_, _, _| alternatives = true)
+        }
+        result => result,
+    }?;
+    Ok((lock, alternatives))
 }
 
 fn parse_with_alternatives(

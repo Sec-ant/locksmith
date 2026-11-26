@@ -121,7 +121,10 @@ pub fn from_file<P: AsRef<Path>>(
     };
     let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
     let root = manifests.get(".").ok_or("missing root manifest")?;
-    let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
+    let mut source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
+    for settings in source.iter_mut().chain([&mut raw["configuration"]]) {
+        crate::registry::apply_bootstrap_registry(settings);
+    }
     let inputs = Sources::read(files)?;
     let (configurations, config, merge) = target.workspace_configurations(
         Some(root),

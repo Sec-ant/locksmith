@@ -428,6 +428,7 @@ impl PinSelector<'_, '_> {
             workspace_packages,
         } = self;
         let docs = sources.documents();
+        let specifier = context.configuration.registry_specifier(specifier);
         let resolved = workspace_packages.resolve(name, specifier, id, package)?;
         let local = resolved.as_ref().map(|(link, _)| link);
         if specifier.starts_with("workspace:") && !injected(name, package, context.configuration) {
@@ -621,8 +622,9 @@ impl PinSelector<'_, '_> {
                         .get("specifier")?
                         .as_str()
                 });
-                let actual_name = manifest::alias(catalog_specifier.unwrap_or(specifier))
-                    .map_or(name, |(name, _)| name);
+                let (actual_name, _) = context
+                    .configuration
+                    .registry_request(name, catalog_specifier.unwrap_or(specifier));
                 for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
                     if *side == super::PUBLISHED
                         || (!sources.prefer_baseline
@@ -670,7 +672,7 @@ impl PinSelector<'_, '_> {
                 })
                 .map(String::as_str)
                 .unwrap_or(specifier);
-            let (actual, selector) = manifest::alias(effective).unwrap_or((name, effective));
+            let (actual, selector) = context.configuration.registry_request(name, effective);
             if let Some(choice) = registry.selected(actual, selector) {
                 selected = sources
                     .candidates()

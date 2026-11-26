@@ -53,10 +53,10 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
-        Self::bootstrap_lockfile(text)?.recorded_pnpm_version()
+        Self::bootstrap_lockfile(text)?.0.recorded_pnpm_version()
     }
 
-    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<Lockfile> {
+    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, bool)> {
         if !text.contains("\n---") {
             return None;
         }

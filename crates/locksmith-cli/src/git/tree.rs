@@ -36,6 +36,13 @@ pub(crate) fn entries(listing: &[u8]) -> impl Iterator<Item = Result<(ObjectKind
         })
 }
 
+pub struct LinkedObject {
+    pub kind: ObjectKind,
+    pub id: String,
+    pub physical_path: Vec<u8>,
+    pub links: usize,
+}
+
 #[derive(Clone)]
 pub(super) struct TreeEntry {
     kind: ObjectKind,
@@ -44,8 +51,28 @@ pub(super) struct TreeEntry {
 
 impl Blobs {
     fn entry(&mut self, tree: &str, name: &[u8]) -> Result<Option<TreeEntry>> {
-        if !self.directories.contains_key(tree) {
-            let listing = output_bytes(&["ls-tree", "-z", "--full-tree", tree])?;
+        if let Some(directory) = self.directories.get(tree) {
+            return Ok(directory.get(name).cloned());
+        }
+        let config_names = || {
+            crate::workspace::CONFIG_FILES
+                .iter()
+                .copied()
+                .chain(crate::workspace::DEFAULT_HOOK_FILES)
+                .chain(["pnpm-lock.yaml"])
+        };
+        let restricted = config_names().any(|path| path.as_bytes() == name);
+        let cache = if restricted {
+            &mut self.config_entries
+        } else {
+            &mut self.directories
+        };
+        if !cache.contains_key(tree) {
+            let mut args = vec!["ls-tree", "-z", "--full-tree", tree, "--"];
+            if restricted {
+                args.extend(config_names());
+            }
+            let listing = output_bytes(&args)?;
             let mut directory = BTreeMap::new();
             for entry in entries(&listing) {
                 let (kind, id, name) = entry?;
@@ -57,17 +84,14 @@ impl Blobs {
                     },
                 );
             }
-            self.directories.insert(tree.to_owned(), directory);
+            cache.insert(tree.to_owned(), directory);
         }
-        Ok(self.directories[tree].get(name).cloned())
+        Ok(cache[tree].get(name).cloned())
     }
 
     pub fn read(&mut self, tree: &str, path: &str) -> Result<Option<String>> {
         let mut location = TreePath::new(tree);
-        if !location
-            .follow(self, path.as_bytes(), &BTreeSet::new())?
-            .inside(path)?
-        {
+        if !location.follow(self, path.as_bytes())?.inside(path)? {
             return Ok(None);
         }
         let entry = location.current();
@@ -82,20 +106,14 @@ impl Blobs {
         tree: &str,
         prefix: &str,
         path: &str,
-    ) -> Result<Option<(ObjectKind, String)>> {
+    ) -> Result<Option<LinkedObject>> {
         let mut location = TreePath::new(tree);
-        let conflicts = BTreeSet::new();
-        if !location
-            .follow(self, prefix.as_bytes(), &conflicts)?
-            .inside(prefix)?
-        {
+        if !location.follow(self, prefix.as_bytes())?.inside(prefix)? {
             return Ok(None);
         }
         let mut ancestors = BTreeSet::from([location.physical_path()]);
         for part in path.split('/') {
-            if !location
-                .follow(self, part.as_bytes(), &conflicts)?
-                .inside(path)?
+            if !location.follow(self, part.as_bytes())?.inside(path)?
                 || (location.current().kind == ObjectKind::Tree
                     && !ancestors.insert(location.physical_path()))
             {
@@ -103,17 +121,21 @@ impl Blobs {
             }
         }
         let target = location.current();
-        Ok(Some((target.kind, target.id.clone())))
+        Ok(Some(LinkedObject {
+            kind: target.kind,
+            id: target.id.clone(),
+            physical_path: location.physical_path(),
+            links: location.links,
+        }))
     }
 
     pub fn check_linked_conflicts(
         &mut self,
         tree: &str,
-        conflicts: &BTreeSet<Vec<u8>>,
         inputs: impl Iterator<Item = String>,
     ) -> Result<()> {
         for path in inputs {
-            TreePath::new(tree).follow(self, path.as_bytes(), conflicts)?;
+            TreePath::new(tree).follow(self, path.as_bytes())?;
         }
         Ok(())
     }
@@ -168,12 +190,7 @@ impl TreePath {
             .join(&b'/')
     }
 
-    fn follow(
-        &mut self,
-        blobs: &mut Blobs,
-        path: &[u8],
-        conflicts: &BTreeSet<Vec<u8>>,
-    ) -> Result<Destination> {
+    fn follow(&mut self, blobs: &mut Blobs, path: &[u8]) -> Result<Destination> {
         if path.starts_with(b"/") {
             return Ok(Destination::Outside);
         }
@@ -191,13 +208,13 @@ impl TreePath {
                 }
                 _ => (),
             }
-            if !conflicts.is_empty() {
+            if !blobs.conflicts.is_empty() {
                 let mut current = self.physical_path();
                 if !current.is_empty() {
                     current.push(b'/');
                 }
                 current.extend_from_slice(part);
-                if conflicts.contains(&current) {
+                if blobs.conflicts.contains(&current) {
                     return Err(format!(
                         "resolve dependency configuration first:\n  {}",
                         String::from_utf8_lossy(&current)
@@ -218,7 +235,7 @@ impl TreePath {
                 if target.is_empty() {
                     return Ok(Destination::Missing);
                 }
-                let destination = self.follow(blobs, &target, conflicts)?;
+                let destination = self.follow(blobs, &target)?;
                 if destination != Destination::Found {
                     return Ok(destination);
                 }

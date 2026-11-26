@@ -42,11 +42,31 @@ struct Registry {
     agent: Agent,
     rc: BTreeMap<String, String>,
     config: Value,
-    packages: BTreeMap<String, Packument>,
+    packages: BTreeMap<String, std::result::Result<Packument, String>>,
     global_auth_routes: BTreeMap<String, String>,
     env_auth_routes: BTreeMap<String, String>,
     min_age: u64,
     now: i64,
+}
+
+fn registry_override() -> Option<String> {
+    env_config("pnpm", "registry").or_else(|| env_config("npm", "registry"))
+}
+
+/// Bootstrap tarball URLs use the same effective default registry as dependency lookups.
+pub fn apply_bootstrap_registry(settings: &mut Value) {
+    if settings["configDependencies"]
+        .as_object()
+        .is_some_and(|deps| deps.values().any(|dep| dep.get("tarball").is_some()))
+        && let Some(url) = registry_override()
+        && let Some(map) = settings.as_object_mut()
+        && let Some(routes) = map
+            .entry("registries")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+    {
+        routes.insert("default".into(), Value::String(url));
+    }
 }
 
 fn read(path: &Path) -> Result<Option<String>> {
@@ -359,7 +379,7 @@ impl Registry {
                     .map(|url| (url.as_str(), false))
             })
         });
-        let registry_env = env_config("pnpm", "registry").or_else(|| env_config("npm", "registry"));
+        let registry_env = registry_override();
         let environment_route = scope
             .and_then(|scope| self.env_auth_routes.get(scope))
             .or_else(|| self.env_auth_routes.get("default"));
@@ -429,6 +449,33 @@ impl Registry {
         Ok(None)
     }
 
+    fn fetch_package(&self, name: &str, base: &str) -> Result<Packument> {
+        let url = format!("{base}{}", name.replace('/', "%2f"));
+        let mut request = self.agent.get(&url).header(
+            "Accept",
+            if self.min_age > 0 {
+                "application/json"
+            } else {
+                "application/vnd.npm.install-v1+json, application/json"
+            },
+        );
+        if let Some(auth) = self.auth(&url, name)? {
+            request = request.header("Authorization", &auth);
+        }
+        let mut res = request
+            .call()
+            .map_err(|e| format!("registry metadata for {name}: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("registry metadata for {name}: HTTP {}", res.status()).into());
+        }
+        let doc: Packument = serde_json::from_reader(BufReader::new(res.body_mut().as_reader()))
+            .map_err(|e| format!("registry metadata for {name}: {e}"))?;
+        if doc.name != name {
+            return Err(format!("registry returned a different package for {name}").into());
+        }
+        Ok(doc)
+    }
+
     fn satisfy(
         &mut self,
         req: &RegistryRequest,
@@ -445,33 +492,12 @@ impl Registry {
         }
         let base = self.registry(name)?;
         if !self.packages.contains_key(name) {
-            let url = format!("{base}{}", name.replace('/', "%2f"));
-            let mut request = self.agent.get(&url).header(
-                "Accept",
-                if self.min_age > 0 {
-                    "application/json"
-                } else {
-                    "application/vnd.npm.install-v1+json, application/json"
-                },
-            );
-            if let Some(auth) = self.auth(&url, name)? {
-                request = request.header("Authorization", &auth);
-            }
-            let mut res = request
-                .call()
-                .map_err(|e| format!("registry metadata for {name}: {e}"))?;
-            if !res.status().is_success() {
-                return Err(format!("registry metadata for {name}: HTTP {}", res.status()).into());
-            }
-            let doc: Packument =
-                serde_json::from_reader(BufReader::new(res.body_mut().as_reader()))
-                    .map_err(|e| format!("registry metadata for {name}: {e}"))?;
-            if doc.name != name {
-                return Err(format!("registry returned a different package for {name}").into());
-            }
-            self.packages.insert(name.to_owned(), doc);
+            let result = self
+                .fetch_package(name, &base)
+                .map_err(|error| error.to_string());
+            self.packages.insert(name.to_owned(), result);
         }
-        let doc = &self.packages[name];
+        let doc = self.packages[name].as_ref().map_err(String::as_str)?;
         let selected = match req {
             RegistryRequest::Manifest { version, .. } => version.as_str(),
             RegistryRequest::Version { selector, .. } => self.select(doc, selector, direct)?,

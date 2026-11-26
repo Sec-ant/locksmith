@@ -186,7 +186,7 @@ fn lookup(name: &str, spec: &str, config: &WorkspaceConfig) -> Option<RegistryRe
     } else {
         spec
     };
-    RegistryRequest::version(name, spec)
+    RegistryRequest::version(name, config.registry_specifier(spec))
 }
 
 pub(crate) fn need_version(
@@ -313,11 +313,12 @@ pub(crate) fn declaration(
 }
 
 pub(super) fn catalog_version<'a>(
+    config: &WorkspaceConfig,
     registry: Option<&'a RegistryMetadata>,
     name: &str,
     specifier: &str,
 ) -> Option<&'a str> {
-    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+    let (actual, range) = config.registry_request(name, specifier);
     registry?
         .selected(actual, range)?
         .rsplit_once('@')
@@ -393,7 +394,7 @@ pub(crate) fn records(
         output["patchedDependencies"] = patches.clone();
     }
     let mut missing_requests = super::MissingRequests::new(additional);
-    let mut missing_peer = None;
+    let mut missing_peers = Vec::new();
     for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
@@ -431,6 +432,7 @@ pub(crate) fn records(
                 (name, field, spec, Some(*optional))
             }))
         {
+            let spec = config.registry_specifier(spec);
             let published = |req: &RegistryRequest| {
                 let locator = registry.selected(req.name(), req.selector()).or_else(|| {
                     peer?;
@@ -471,7 +473,7 @@ pub(crate) fn records(
                 );
                 if peer.is_some() {
                     // Ordinary dependencies, including aliases, can supply this peer on the next pass.
-                    missing_peer.get_or_insert(error);
+                    missing_peers.push(error);
                 } else {
                     missing_requests.record(error)?;
                 }
@@ -485,10 +487,12 @@ pub(crate) fn records(
         output["packages"][key] = package;
         output["snapshots"][instance] = body;
     }
-    missing_requests.finish()?;
-    if let Some(error) = missing_peer {
-        return Err(error);
+    if missing_requests.first.is_none() {
+        for error in missing_peers {
+            missing_requests.record(error)?;
+        }
     }
+    missing_requests.finish()?;
     Ok(output)
 }
 

@@ -39,6 +39,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let policy = Policy::from_project(&working);
     let base_config = Policy::from_project(&project).configuration(&project.config)?;
     let config = policy.configuration(&working.config)?;
+    let path = format!("{prefix}pnpm-lock.yaml");
+    let baseline_text = blobs
+        .read(tree, &path)?
+        .ok_or_else(|| format!("missing {reference}:{path}"))?;
+    let working_text = fs::read_to_string("pnpm-lock.yaml")?;
     let upgrade = base_config.changes_pnpm_version(&config);
     let reconcile_bootstrap =
         upgrade || base_config.config_dependencies != config.config_dependencies;
@@ -62,7 +67,12 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             | "trustLockfile"
             | "verifyDepsBeforeRun"
             | "pmOnFail"
+            | "ignorePnpmfile"
             | "minimumReleaseAgeExclude" => upgrade,
+            "pnpmfileChecksum" => {
+                upgrade
+                    && project.config.get("ignorePnpmfile") != working.config.get("ignorePnpmfile")
+            }
             _ => false,
         };
         if a != b && !supported {
@@ -90,11 +100,6 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     } else {
         BTreeMap::new()
     };
-    let path = format!("{prefix}pnpm-lock.yaml");
-    let baseline_text = blobs
-        .read(tree, &path)?
-        .ok_or_else(|| format!("missing {reference}:{path}"))?;
-    let working_text = fs::read_to_string("pnpm-lock.yaml")?;
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
     let (baseline, candidate, [mut before, mut after]) =

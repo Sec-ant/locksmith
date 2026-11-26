@@ -23,15 +23,22 @@ impl MergeTarget {
         final_settings: &Value,
     ) -> Result<([WorkspaceConfig; 3], WorkspaceConfig, ContextualMerge<'a>), LockfileError> {
         let bootstrap = bootstrap_locks(inputs);
-        let locks = bootstrap.each_ref().map(|lock| lock.as_deref());
+        let locks = bootstrap.each_ref().map(|(lock, _)| lock.as_deref());
         let [base, ours, theirs] = [0, 1, 2].map(|i| {
             let version = locks[i].and_then(Lockfile::recorded_pnpm_version);
             WorkspaceConfig::from_pnpm_source(branches[i], manifest, version)
         });
-        let ((), config, bootstrap) = select_workspace(self, manifest, locks, |version| {
-            WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
-                .map(|config| ((), config))
-        })?;
+        let ((), config, bootstrap) = select_workspace(
+            self,
+            manifest,
+            locks,
+            bootstrap.each_ref().map(|(_, provisional)| *provisional),
+            |version| {
+                WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
+                    .map(|config| ((), config))
+            },
+        )
+        .map_err(|error| input_error(inputs, error))?;
         Ok((
             [base?, ours?, theirs?],
             config,
@@ -59,9 +66,11 @@ impl MergeTarget {
         let (project, config, bootstrap) = select_workspace(
             self,
             manifest,
-            bootstrap.each_ref().map(|lock| lock.as_deref()),
+            bootstrap.each_ref().map(|(lock, _)| lock.as_deref()),
+            bootstrap.each_ref().map(|(_, provisional)| *provisional),
             load,
-        )?;
+        )
+        .map_err(|error| input_error(inputs, error))?;
         Ok((
             project,
             config,
@@ -73,10 +82,23 @@ impl MergeTarget {
     }
 }
 
-fn bootstrap_locks<'a>(inputs: [MergeInput<'a>; 3]) -> [Option<Cow<'a, Lockfile>>; 3] {
+fn input_error<E: From<LockfileError>>(inputs: [MergeInput<'_>; 3], error: E) -> E {
+    inputs
+        .into_iter()
+        .find_map(|input| match input {
+            MergeInput::Yaml(text) => crate::recovery::candidate(text).err().map(E::from),
+            MergeInput::Parsed(_) => None,
+        })
+        .unwrap_or(error)
+}
+
+fn bootstrap_locks<'a>(inputs: [MergeInput<'a>; 3]) -> [(Option<Cow<'a, Lockfile>>, bool); 3] {
     inputs.map(|input| match input {
-        MergeInput::Parsed(lock) => Some(Cow::Borrowed(lock)),
-        MergeInput::Yaml(yaml) => RepairInput::bootstrap_lockfile(yaml).map(Cow::Owned),
+        MergeInput::Parsed(lock) => (Some(Cow::Borrowed(lock)), false),
+        MergeInput::Yaml(yaml) => RepairInput::bootstrap_lockfile(yaml)
+            .map_or((None, false), |(lock, alternatives)| {
+                (Some(Cow::Owned(lock)), alternatives)
+            }),
     })
 }
 
@@ -84,12 +106,13 @@ fn select_workspace<T, E: From<LockfileError>>(
     target: MergeTarget,
     manifest: Option<&Value>,
     locks: [Option<&Lockfile>; 3],
+    provisional: [bool; 3],
     mut load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
 ) -> Result<(T, WorkspaceConfig, usize), E> {
     let versions = locks.map(|lock| lock.and_then(Lockfile::recorded_pnpm_version));
     if versions[0] == versions[1] && versions[0] == versions[2] {
         let (project, config) = load(versions[0].clone())?;
-        let side = environment_source(locks, target, manifest, [Some(&config); 3])?;
+        let side = environment_source(locks, target, manifest, [Some(&config); 3], provisional)?;
         return Ok((project, config, side));
     }
     let mut candidates = versions.map(load);
@@ -100,7 +123,7 @@ fn select_workspace<T, E: From<LockfileError>>(
     let configs = candidates
         .each_ref()
         .map(|result| result.as_ref().ok().map(|(_, config)| config));
-    let side = environment_source(locks, target, manifest, configs)?;
+    let side = environment_source(locks, target, manifest, configs, provisional)?;
     candidates.swap(0, side);
     let [selected, _, _] = candidates;
     let (project, config) = selected?;
@@ -114,8 +137,10 @@ pub(super) fn environment_source(
     target: MergeTarget,
     root: Option<&Value>,
     configurations: [Option<&WorkspaceConfig>; 3],
+    provisional: [bool; 3],
 ) -> Result<usize, LockfileError> {
     let mut best = None;
+    let mut invalid_environment = None;
     let mut matched_config = false;
     let mut wanted = None;
     for side in [target.index(), target.other_index(), Source::Base as usize] {
@@ -147,6 +172,16 @@ pub(super) fn environment_source(
                 }
             }
         };
+        // Recovery validates each interpretation of duplicated snapshots after selection.
+        if !provisional[side]
+            && let Some(env) = lock.and_then(Lockfile::environment)
+        {
+            let issues = crate::graph::validate(env, crate::DocumentKind::Environment);
+            if !issues.is_empty() {
+                invalid_environment.get_or_insert(issues);
+                continue;
+            }
+        }
         let priority = (missing_pin, !same_runner);
         if priority == (false, false) {
             return Ok(side);
@@ -157,6 +192,9 @@ pub(super) fn environment_source(
     }
     if let Some((_, side)) = best {
         return Ok(side);
+    }
+    if let Some(issues) = invalid_environment {
+        return Err(LockfileError::InvalidGraph(issues));
     }
     if matched_config {
         let message = wanted.map_or_else(

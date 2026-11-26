@@ -111,6 +111,7 @@ export function inspect(lock: LockInput, options?: { configuration?: Configurati
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>
 /** Merge the branches against their ancestor. A conflict or unresolved selection rejects with a LockfileError. */
 export function merge(base: LockInput, ours: LockInput, theirs: LockInput, context?: MergeContext): Promise<string>
+/** For a pnpm version migration, include every final workspace manifest in changes. */
 export function converge(baseline: LockInput, candidate: LockInput, changes: ManifestChange[], options?: ConvergeOptions): Promise<string>
 /** Repair the dependencies reachable from the supplied projects. Use validate() to check all recorded references. */
 export function repair(yaml: string, context: RepairContext): Promise<string>

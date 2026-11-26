@@ -29,6 +29,9 @@ ureq = "3"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 base64.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 mimalloc = { version = "0.1.52", features = ["v2", "no_thp"] }
 

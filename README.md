@@ -176,7 +176,7 @@ Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full AP
 
 ## Performance
 
-Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times and also exercises merging with the final workspace manifests and validating workspace settings. Separate loopback registry workloads resolve 64 and 512 missing dependency versions. Two further inspection workloads have 1,000 and 4,000 projects linking to an external directory. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
+Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times and also exercises merging with the final workspace manifests and validating workspace settings. Separate loopback registry workloads resolve 64 and 512 missing dependency versions. Two further inspection workloads have 1,000 and 4,000 projects linking to an external directory. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory for the file-based workloads. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 

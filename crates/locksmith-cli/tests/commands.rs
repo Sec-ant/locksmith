@@ -1269,6 +1269,7 @@ fn a_blobless_clone_fetches_missing_workspace_manifests_together() {
     let result = Command::new(CLI)
         .current_dir(clone.0.path())
         .env("GIT_TRACE2_EVENT", &trace)
+        .env("GIT_NO_LAZY_FETCH", "0")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["repair", baseline.trim()])
@@ -2113,7 +2114,7 @@ fn validate_resolves_only_symlinks_selected_by_a_workspace_pattern() {
         ("app", 0),
         ("'*', '!scratch'", 0),
         ("'**', '!scratch/**'", 0),
-        ("scratch", 2),
+        ("scratch", 0),
     ] {
         write_input(
             root,
@@ -2954,6 +2955,111 @@ fn only_non_utf8_conflicts_reached_through_a_manifest_link_block_the_driver() {
 
 #[cfg(unix)]
 #[test]
+fn a_shadowed_workspace_manifest_is_never_followed() {
+    let r = Repo::new();
+    std::os::unix::fs::symlink(
+        "/unused-manifest",
+        r.0.path().join("apps/web/package.json5"),
+    )
+    .unwrap();
+    r.commit("add a lower-priority manifest link");
+    let out = r.cmd(CLI, &["repair", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+
+    let r = Repo::new();
+    r.write("outside/unused.json", "{}");
+    std::os::unix::fs::symlink(
+        "../../outside/unused.json",
+        r.0.path().join("apps/web/package.json5"),
+    )
+    .unwrap();
+    r.commit("link the lower-priority manifest");
+    r.git(&["branch", "-f", "topic", "HEAD"]);
+    r.branches(|r, side| r.write("outside/unused.json", &json!({"side":side}).to_string()));
+    let out = r.cmd("git", &["merge", "--no-edit", "topic"]);
+    assert!(!out.status.success());
+    assert_eq!(
+        r.git(&["diff", "--name-only", "--diff-filter=U"]).trim(),
+        "outside/unused.json",
+        "{}",
+        report(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lower_priority_manifest_name_can_also_link_a_nested_member_directory() {
+    let r = Repo::new();
+    r.write(
+        "pnpm-workspace.yaml",
+        "packages: ['apps/*', 'apps/web/package.json5/*', '!apps/[a/b]']\npmOnFail: ignore\n",
+    );
+    r.write(
+        "sources/collection/nested/package.json",
+        r#"{"name":"nested"}"#,
+    );
+    std::os::unix::fs::symlink(
+        "../../sources/collection",
+        r.0.path().join("apps/web/package.json5"),
+    )
+    .unwrap();
+    r.commit("add nested workspace member");
+    let out = r.cmd(CLI, &["repair", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert!(
+        graph(&out.stdout)["importers"]
+            .get("apps/web/package.json5/nested")
+            .is_some()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unresolved_member_directory_link_blocks_the_lock_even_if_the_preview_has_no_manifest() {
+    let r = Repo::new();
+    for path in ["old", "empty", "member"] {
+        r.write(&format!("sources/{path}/readme"), "tracked");
+    }
+    r.write("sources/member/package.json", r#"{"name":"member"}"#);
+    let link = r.0.path().join("apps/tool");
+    std::os::unix::fs::symlink("../sources/old", &link).unwrap();
+    r.commit("link to an empty member");
+    r.git(&["branch", "-f", "topic", "HEAD"]);
+    r.branches(|_, side| {
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(
+            if side == "ours" {
+                "../sources/empty"
+            } else {
+                "../sources/member"
+            },
+            &link,
+        )
+        .unwrap();
+    });
+    let out = r.cmd("git", &["merge", "--no-edit", "topic"]);
+    assert!(!out.status.success());
+    assert!(
+        r.git(&["diff", "--name-only", "--diff-filter=U"])
+            .lines()
+            .any(|p| p == "pnpm-lock.yaml"),
+        "{}",
+        report(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn converge_ignores_a_cyclic_directory_symlink_like_pnpm() {
+    let r = Repo::new();
+    std::os::unix::fs::symlink("self", r.0.path().join("apps/self")).unwrap();
+    r.commit("add a symlink cycle");
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+}
+
+#[cfg(unix)]
+#[test]
 fn a_conflicted_target_manifest_keeps_its_linked_workspaces_lock_unmerged() {
     let r = Repo::new();
     r.write("sources/tool/package.json", r#"{"name":"tool"}"#);
@@ -2991,25 +3097,33 @@ fn a_conflicted_target_manifest_keeps_its_linked_workspaces_lock_unmerged() {
 #[cfg(unix)]
 #[test]
 fn converge_checks_the_installed_importer_for_a_new_working_directory_link() {
-    let r = Repo::new();
-    r.write(
-        "sources/tool/package.json",
-        r#"{"name":"tool","dependencies":{"local":"link:../../local"}}"#,
-    );
-    std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
-    let out = r.cmd(CLI, &["converge", "HEAD"]);
-    assert_eq!(out.status.code(), Some(2), "{}", report(&out));
-    assert!(report(&out).contains("apps/tool"));
-    let mut doc = graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
-    doc["importers"]["apps/tool"] = json!({"dependencies":{"local":{"specifier":"link:../../local","version":"link:../../local"}}});
-    r.write("pnpm-lock.yaml", &doc.to_string());
-    let out = r.cmd(CLI, &["converge", "HEAD"]);
-    assert!(out.status.success(), "{}", report(&out));
-    let importer = &graph(&out.stdout)["importers"]["apps/tool"];
-    assert_eq!(
-        importer["dependencies"]["local"]["version"],
-        "link:../../local"
-    );
+    for assumed_unchanged in [false, true] {
+        let r = Repo::new();
+        r.write(
+            "sources/tool/package.json",
+            r#"{"name":"tool","dependencies":{"local":"link:../../local"}}"#,
+        );
+        if assumed_unchanged {
+            r.write("apps/tool", "regular file in the index");
+            r.commit("track an ordinary file");
+            r.git(&["update-index", "--assume-unchanged", "apps/tool"]);
+            fs::remove_file(r.0.path().join("apps/tool")).unwrap();
+        }
+        std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
+        let out = r.cmd(CLI, &["converge", "HEAD"]);
+        assert_eq!(out.status.code(), Some(2), "{}", report(&out));
+        assert!(report(&out).contains("apps/tool"));
+        let mut doc = graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
+        doc["importers"]["apps/tool"] = json!({"dependencies":{"local":{"specifier":"link:../../local","version":"link:../../local"}}});
+        r.write("pnpm-lock.yaml", &doc.to_string());
+        let out = r.cmd(CLI, &["converge", "HEAD"]);
+        assert!(out.status.success(), "{}", report(&out));
+        let importer = &graph(&out.stdout)["importers"]["apps/tool"];
+        assert_eq!(
+            importer["dependencies"]["local"]["version"],
+            "link:../../local"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3035,6 +3149,56 @@ fn git_workspace_commands_ignore_unrelated_non_utf8_tree_entries() {
     for operation in ["repair", "converge"] {
         let out = r.cmd(CLI, &[operation, "HEAD"]);
         assert!(out.status.success(), "{}", report(&out));
+    }
+}
+
+#[test]
+fn newly_declaring_a_runner_migrates_the_workspace_even_without_a_bootstrap_document() {
+    let r = Repo::new();
+    r.write("package.json", "{}");
+    r.write("pnpm-workspace.yaml", "packages: ['apps/*']\n");
+    r.commit("start with an unspecified pnpm version");
+    r.write("package.json", r#"{"packageManager":"pnpm@10.34.9"}"#);
+    r.write(
+        "pnpm-workspace.yaml",
+        "packages: ['apps/*']\npmOnFail: ignore\n",
+    );
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(
+        graph(&out.stdout),
+        graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes())
+    );
+}
+
+#[test]
+fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "package.json", "{}");
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        "packages: []\nconfigDependencies:\n  tool:\n    integrity: 1.0.0+sha512-fixture\n    tarball: https://private.example/tool/-/tool-1.0.0.tgz\n",
+    );
+    let boot = json!({"lockfileVersion":"9.0","importers":{".":{"configDependencies":{"tool":{"specifier":"1.0.0","version":"1.0.0"}}}},
+        "packages":{"tool@1.0.0":{"resolution":{"integrity":"sha512-fixture"}}},"snapshots":{"tool@1.0.0":{}}});
+    write_input(
+        root,
+        "pnpm-lock.yaml",
+        format!("---\n{boot}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"),
+    );
+    for (registry, valid) in [
+        ("https://private.example", true),
+        ("https://other.example", false),
+    ] {
+        let out = Command::new(CLI)
+            .current_dir(root)
+            .env("pnpm_config_registry", registry)
+            .args(["validate", "--workspace"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), valid, "{}", report(&out));
     }
 }
 

@@ -155,6 +155,7 @@ pub fn converge_with_recorded_baselines(
     }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
         && (before.changes_pnpm_version(after)
+            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
             || before.config_dependencies != after.config_dependencies)
     {
         let installed = candidate.project().ok_or_else(|| {

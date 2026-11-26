@@ -271,9 +271,23 @@ pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn lazy_fetch_disabled() -> Result<bool> {
+    if env::var_os("GIT_NO_LAZY_FETCH").is_none() {
+        return Ok(false);
+    }
+    let value = output(&[
+        "--config-env=locksmith.noLazyFetch=GIT_NO_LAZY_FETCH",
+        "config",
+        "--type=bool",
+        "--get",
+        "locksmith.noLazyFetch",
+    ])?;
+    Ok(value.trim() == "true")
+}
+
 /// Fetch missing selected blobs together on a blobless clone, including link targets.
 pub fn prefetch_manifests<'a>(objects: impl ExactSizeIterator<Item = &'a str>) -> Result<()> {
-    if objects.len() == 0 || env::var_os("GIT_NO_LAZY_FETCH").is_some() {
+    if objects.len() == 0 || lazy_fetch_disabled()? {
         return Ok(());
     }
     let remotes = Command::new("git")
@@ -375,7 +389,9 @@ fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
 
 /// The single cat-file process reads just the configuration blobs requested.
 pub struct Blobs {
+    pub conflicts: BTreeSet<Vec<u8>>,
     directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
+    config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -390,7 +406,9 @@ impl Blobs {
         let input = child.stdin.take().expect("piped git stdin");
         let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
         Ok(Self {
+            conflicts: BTreeSet::new(),
             directories: BTreeMap::new(),
+            config_entries: BTreeMap::new(),
             child,
             input,
             output,

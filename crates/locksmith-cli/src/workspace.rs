@@ -117,6 +117,7 @@ impl Project {
     ) -> Result<Self> {
         let version = locksmith::WorkspaceConfig::project_pnpm_version(&root, recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
+        crate::registry::apply_bootstrap_registry(&mut config);
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
@@ -231,6 +232,14 @@ pub fn manifests(
         let root = format!("{tree}:{}", prefix.trim_end_matches('/'));
         members.committed_paths(&root, "", tree, prefix, &mut paths, blobs)?;
         git::prefetch_manifests(paths.values().map(|(_, id)| id.as_str()))?;
+        if !blobs.conflicts.is_empty() {
+            blobs.check_linked_conflicts(
+                tree,
+                paths
+                    .iter()
+                    .map(|(id, (name, _))| format!("{prefix}{id}/{name}")),
+            )?;
+        }
         for (id, (name, oid)) in paths {
             let text = blobs
                 .read_object(&oid)?
@@ -396,6 +405,7 @@ pub struct Members {
     exclude: Vec<Pattern>,
     descend: BTreeMap<String, Vec<Pattern>>,
     excluded_trees: Vec<Pattern>,
+    component_patterns: Option<BTreeMap<String, Pattern>>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
@@ -408,6 +418,7 @@ impl Members {
             exclude: vec![],
             descend: BTreeMap::new(),
             excluded_trees: Vec::new(),
+            component_patterns: Some(BTreeMap::new()),
         };
         if !project.workspace {
             return Ok(this);
@@ -453,6 +464,18 @@ impl Members {
                     }
                 }
                 if !parts.is_empty() {
+                    if let Some(components) = &mut this.component_patterns {
+                        for &part in &parts {
+                            // A character class can contain a slash. Only the full glob is authoritative.
+                            if !components.contains_key(part) {
+                                let Ok(pattern) = Pattern::new(part) else {
+                                    this.component_patterns = None;
+                                    break;
+                                };
+                                components.insert(part.into(), pattern);
+                            }
+                        }
+                    }
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
                     if !value.starts_with('!') {
                         let parents = parts.iter().take_while(|&&p| p == "..").count();
@@ -481,7 +504,13 @@ impl Members {
         if self.include.is_empty() {
             return Ok(directories);
         }
-        let mut args = vec!["ls-files", "-zc", "--others", "--exclude-standard"];
+        let mut args = vec![
+            "ls-files",
+            "-zcv",
+            "--stage",
+            "--others",
+            "--exclude-standard",
+        ];
         let exclude;
         if !self.include.iter().any(|p| p.as_str().contains("**"))
             && let Some(depth) = self
@@ -497,9 +526,36 @@ impl Members {
             args.push(&exclude);
         }
         let paths = git::output_bytes(&args)?;
+        // An indexed regular file may have become a directory symlink in the worktree.
+        let changed = git::output_bytes(&[
+            "diff-files",
+            "--relative",
+            "--name-only",
+            "-z",
+            "--diff-filter=T",
+            "--",
+            ".",
+        ])?;
+        let changed: BTreeSet<_> = changed.split(|&b| b == 0).collect();
         let root = std::env::current_dir()?.canonicalize()?;
         let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
-        for path in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        for record in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+            let (path, possible_link) = if let Some(path) = record.strip_prefix(b"? ") {
+                (path, true)
+            } else {
+                let tab = record
+                    .iter()
+                    .position(|&b| b == b'\t')
+                    .ok_or("invalid git ls-files entry")?;
+                let path = &record[tab + 1..];
+                (
+                    path,
+                    record.get(2..8) == Some(b"120000")
+                        || changed.contains(path)
+                        || record[0].is_ascii_lowercase()
+                        || record[0] == b'S',
+                )
+            };
             let Ok(path) = std::str::from_utf8(path) else {
                 continue;
             };
@@ -510,7 +566,7 @@ impl Members {
                 directories.insert(id.to_owned());
             }
             // Git lists a directory symlink itself, never its member manifests.
-            if !self.may_visit(path, descend) {
+            if !possible_link || !self.may_visit(path, descend) {
                 continue;
             }
             let link = root.join(path);
@@ -614,6 +670,7 @@ impl Members {
         blobs: &mut Blobs,
     ) -> Result<()> {
         let listing = git::output_bytes(&["ls-tree", "-rz", "--full-tree", object])?;
+        let mut empty_links = BTreeSet::new();
         for entry in git::entries(&listing) {
             let (kind, oid, path) = entry?;
             if !matches!(kind, git::ObjectKind::Blob | git::ObjectKind::Symlink) {
@@ -635,21 +692,52 @@ impl Members {
             let manifest = logical
                 .rsplit_once('/')
                 .filter(|(id, name)| MANIFEST_NAMES.contains(name) && self.contains(id));
+            let manifest = manifest.filter(|(id, name)| {
+                found
+                    .get(*id)
+                    .is_none_or(|(preferred, _)| *name < preferred.as_str())
+            });
             if kind == git::ObjectKind::Symlink {
                 let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
                 let directory = self.may_visit(&logical, descend);
                 if manifest.is_none() && !directory {
                     continue;
                 }
-                let Some((kind, target)) = blobs.linked_object(tree, prefix, &logical)? else {
+                let Some(target) = blobs.linked_object(tree, prefix, &logical)? else {
                     continue;
                 };
-                if kind == git::ObjectKind::Tree && directory {
-                    self.committed_paths(&target, &logical, tree, prefix, found, blobs)?;
-                } else if kind == git::ObjectKind::Blob
+                if target.kind == git::ObjectKind::Tree && directory {
+                    // Sibling aliases with equivalent glob matches have identical descendants.
+                    // Reuse only empty matches: nonempty aliases each have their own importer IDs.
+                    let (parent, name) = logical.rsplit_once('/').unwrap_or(("", &logical));
+                    let pattern_matches: Vec<_> = self
+                        .component_patterns
+                        .iter()
+                        .flat_map(|patterns| patterns.values())
+                        .map(|pattern| pattern.matches_with(name, GLOB_OPTIONS))
+                        .collect();
+                    let cache_key = (
+                        parent.to_owned(),
+                        target.physical_path,
+                        target.links,
+                        name.starts_with('.'),
+                        pattern_matches,
+                    );
+                    if empty_links.contains(&cache_key) {
+                        continue;
+                    }
+                    let start = found.len();
+                    self.committed_paths(&target.id, &logical, tree, prefix, found, blobs)?;
+                    if found.len() == start
+                        && self.component_patterns.is_some()
+                        && blobs.conflicts.is_empty()
+                    {
+                        empty_links.insert(cache_key);
+                    }
+                } else if target.kind == git::ObjectKind::Blob
                     && let Some((id, name)) = manifest
                 {
-                    Self::record_manifest(found, id, name, &target);
+                    Self::record_manifest(found, id, name, &target.id);
                 }
             } else if let Some((id, name)) = manifest {
                 Self::record_manifest(found, id, name, oid);
@@ -698,6 +786,10 @@ fn linked_directory(path: &Path) -> Result<Option<PathBuf>> {
     match path.canonicalize() {
         Ok(target) => Ok(fs::metadata(&target)?.is_dir().then_some(target)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(1921) => Ok(None), // ERROR_CANT_RESOLVE_FILENAME
         Err(e) => Err(format!("{}: {e}", path.display()).into()),
     }
 }

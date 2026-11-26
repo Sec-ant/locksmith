@@ -35,6 +35,10 @@ pub(crate) fn catalog_consumer_fits(
         let Some(version) = catalog_entry_version(spec, entry) else {
             return false;
         };
+        let effective = manifest::pinned_specifier(spec, reference);
+        if effective != spec && !catalog_version_fits(effective, version, None) {
+            return false;
+        }
         if super::catalog_pin_matches(name, Some(spec), version, reference) {
             return true;
         }
@@ -195,7 +199,7 @@ pub(crate) fn resolve(
                         .then(|| json!({"specifier":specifier,"version":version}))
                 })
                 .or_else(|| {
-                    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+                    let (actual, range) = config.registry_request(name, specifier);
                     let range = range.parse::<node_semver::Range>().ok()?;
                     order.iter().find_map(|&side| {
                         let index = versions[side].get_or_insert_with(|| {
@@ -223,7 +227,7 @@ pub(crate) fn resolve(
                     })
                 })
                 .or_else(|| {
-                    super::published::catalog_version(context.registry, name, specifier)
+                    super::published::catalog_version(config, context.registry, name, specifier)
                         .map(|version| json!({"specifier":specifier,"version":version}))
                 });
             if let Some(entry) = entry {

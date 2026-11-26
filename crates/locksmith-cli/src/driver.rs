@@ -103,6 +103,11 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     if root_conflict {
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
+    blobs.conflicts = conflicts
+        .iter()
+        .filter(|p| p.as_slice() != path.as_bytes())
+        .cloned()
+        .collect();
     let locks = crate::merge::Sources::read(files)?;
     let target = git::preferred_target(&inputs)?;
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
@@ -113,15 +118,11 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
             let config = policy::Policy::from_project(&project).configuration(&project.config)?;
             Ok((project, config))
         })?;
-    let mut dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
+    let dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
-    if conflicts.iter().any(|p| p.as_slice() != path.as_bytes()) {
-        for id in manifests.keys().filter(|id| id.as_str() != ".") {
-            dependency_inputs.extend(workspace::MANIFEST_NAMES.map(|name| format!("{id}/{name}")));
-        }
+    if !blobs.conflicts.is_empty() {
         blobs.check_linked_conflicts(
             &tree,
-            &conflicts,
             dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
         )?;
     }
@@ -139,6 +140,8 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
             locksmith::MergeTarget::Ours => 1,
             locksmith::MergeTarget::Theirs => 2,
         };
+        // Credentials come from the preferred commit, whose paths have no preview conflicts.
+        blobs.conflicts.clear();
         credentials = blobs.read(&revisions[side], &path)?;
     }
     drop(blobs);

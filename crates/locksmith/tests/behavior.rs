@@ -278,7 +278,12 @@ fn patch_hashes_must_be_declared() {
 
 #[test]
 fn a_snapshot_patch_marker_needs_a_hash_and_closing_parenthesis() {
-    for reference in ["1.0.0(patch_hash=abc", "1.0.0(patch_hash=)"] {
+    for reference in [
+        "1.0.0(patch_hash=abc",
+        "1.0.0(patch_hash=)",
+        "1.0.0(patch_hash=abc)(patch_hash=def)",
+        "1.0.0(host@1.0.0)(patch_hash=abc)",
+    ] {
         let key = format!("pkg@{reference}");
         let mut document = graph(
             json!({".":{"dependencies":{"pkg":dep(reference)}}}),

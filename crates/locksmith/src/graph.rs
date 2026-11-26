@@ -303,6 +303,7 @@ fn closure_with_snapshots(
     let mut importers: VecDeque<_> = roots.iter().cloned().collect();
     let mut queued_importers = roots.clone();
     let links = LinkedProjects::new(importer_records);
+    let patches = crate::reconcile::patch_index(document);
     let mut traversal = Traversal {
         snapshots: section(document, "snapshots"),
         ..Traversal::default()
@@ -327,7 +328,7 @@ fn closure_with_snapshots(
             )
         } else if let Some((key, snapshot)) = traversal.pending.pop() {
             reached.packages.insert(package_key(key).to_owned());
-            check_snapshot(document, kind, key, &mut issues);
+            check_snapshot(document, kind, key, &patches, &mut issues);
             ("snapshots", key, snapshot, false, ".")
         } else {
             break;
@@ -483,6 +484,7 @@ fn check_snapshot(
     document: &Value,
     kind: DocumentKind,
     key: &str,
+    patches: &crate::reconcile::PatchIndex<'_>,
     issues: &mut Vec<ValidationIssue>,
 ) {
     check_package(document, kind, key, issues);
@@ -490,8 +492,12 @@ fn check_snapshot(
         Err(message) => message,
         Ok(actual)
             if (actual.is_some() || document.get("patchedDependencies").is_some())
-                && crate::reconcile::desired_patch(key, document, [document; 4])
-                    != Some(actual) =>
+                && crate::reconcile::desired_patch_with_index(
+                    key,
+                    document,
+                    [document; 4],
+                    Some(patches),
+                ) != Some(actual) =>
         {
             "snapshot patch hash differs from the applicable patchedDependencies selector"
         }
@@ -600,6 +606,7 @@ pub(crate) fn validate_with_config(
     kind: DocumentKind,
     config: Option<&crate::WorkspaceConfig>,
 ) -> Vec<ValidationIssue> {
+    let patches = crate::reconcile::patch_index(document);
     let mut issues = Vec::new();
     if let Err(error) = crate::LockSettings::from_document(
         document,
@@ -617,7 +624,7 @@ pub(crate) fn validate_with_config(
     // Validation scans all edges once, including unreachable records. It does
     // not need a reachability walk or a per-edge diagnostic allocation on success.
     for (key, snapshot) in section(document, "snapshots").into_iter().flatten() {
-        check_snapshot(document, kind, key, &mut issues);
+        check_snapshot(document, kind, key, &patches, &mut issues);
         check_references(document, snapshot, kind, "snapshots", key, &mut issues);
     }
     for name in ["importers", "snapshots", "packages"] {

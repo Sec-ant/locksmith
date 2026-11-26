@@ -151,25 +151,29 @@ impl Converge {
         changes: &[Change],
     ) -> Result<Lockfile> {
         let root = changes.iter().find(|c| c.importer == ".");
+        let baseline_version = baseline.recorded_pnpm_version();
+        let candidate_version = candidate.recorded_pnpm_version();
+        let migration = baseline_version != candidate_version;
+        let empty = json!({});
+        let final_settings = self.configuration.as_ref().or(migration.then_some(&empty));
         let before = self
             .baseline_configuration
             .as_ref()
+            .or(final_settings.filter(|_| migration))
             .map(|raw| {
                 WorkspaceConfig::from_pnpm_context(
                     raw,
                     root.and_then(|c| c.before.as_ref()),
-                    baseline.recorded_pnpm_version(),
+                    baseline_version,
                 )
             })
             .transpose()?;
-        let after = self
-            .configuration
-            .as_ref()
+        let after = final_settings
             .map(|raw| {
                 WorkspaceConfig::from_pnpm_context(
                     raw,
                     root.and_then(|c| c.after.as_ref()),
-                    candidate.recorded_pnpm_version(),
+                    candidate_version,
                 )
             })
             .transpose()?;

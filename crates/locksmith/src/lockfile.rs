@@ -96,7 +96,14 @@ impl Lockfile {
                 .specifier
                 .parse::<node_semver::Range>()
                 .is_ok_and(|range| resolved.satisfies_with_prerelease(&range, true))
-                && pins.values().all(|pin| pin["version"] == version)
+                && pins.iter().all(|(name, pin)| {
+                    (name == "pnpm" || (name == "@pnpm/exe" && resolved.major() < 12))
+                        && pin["version"] == version
+                        && pin["specifier"]
+                            .as_str()
+                            .and_then(|spec| spec.parse::<node_semver::Range>().ok())
+                            .is_some_and(|range| resolved.satisfies_with_prerelease(&range, true))
+                })
         }))
     }
 
@@ -111,9 +118,14 @@ impl Lockfile {
                 config,
                 self.recorded_pnpm_version().as_ref(),
             )
-            && !self
+            && (!self
                 .matches_pnpm_manager(&manager)
                 .unwrap_or(!manager.requires_pin)
+                || (manager.requires_pin
+                    && config
+                        .and_then(|cfg| cfg.pnpm_version.as_ref())
+                        .zip(self.recorded_pnpm_version().as_ref())
+                        .is_some_and(|(runner, recorded)| runner != recorded)))
         {
             return Err(crate::reconcile::missing(
                 &["importers", ".", "packageManagerDependencies", "pnpm"],
