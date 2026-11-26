@@ -1,3 +1,19 @@
+## 0.3.8 (2026-11-26)
+
+### Fixes
+
+- Keep the final workspace’s configuration dependencies and package-manager pin when merging or converging bootstrap locks. The Git driver, CLI, and Node API interpret the final settings with the pnpm version from the selected bootstrap graph when the manifest leaves a range or omits the version. Repair checks each parent using its recorded pnpm version when recovering missing records. Repair and workspace validation honor `devEngines.packageManager`, `packageManager`, and `pmOnFail`, including when a frozen install requires a bootstrap pin.
+- Resolve linked workspace members and manifests against the selected Git revision, including relative targets containing `.` and `..`. On Git 2.38 and later, blobless clones with one promisor remote fetch the selected missing manifests in a single batch. Convergence checks working directory links against the installed lockfile. A conflict in a linked manifest keeps the lockfile unmerged, including when its target filename contains non-UTF-8 bytes.
+- Ignore unrelated non-UTF-8 filenames when discovering Git workspace members and dependency conflicts.
+- Read peer provider manifests inside the workspace even when their directories are not workspace members.
+- Report invalid lockfile setting types and compare quoted booleans under the selected pnpm version.
+- Resolve the installed npm README’s links to type declarations and repository documentation.
+- Validate the patch hash selected for each locked package version.
+- Use the same default pnpm version policy for the Node `inspect` and `inspectPeers` APIs.
+- Converge minor and patch pnpm upgrades using the final resolver configuration.
+- Batch independent missing workspace and transitive dependency versions during contextual merges with registry access. Reuse a compatible dependency or alias before requesting an auto-installed peer.
+- Preserve unreachable package extension records during `repair`.
+
 ## 0.3.7 (2026-11-25)
 
 ### Fixes
