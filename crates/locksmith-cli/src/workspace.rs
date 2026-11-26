@@ -530,17 +530,26 @@ impl Members {
             exclude = format!("--exclude={}/", "/*".repeat(first_unused_depth));
             args.push(&exclude);
         }
-        let paths = git::output_bytes(&args)?;
         // An indexed regular file may have become a directory symlink in the worktree.
-        let changed = git::output_bytes(&[
-            "diff-files",
-            "--relative",
-            "--name-only",
-            "-z",
-            "--diff-filter=T",
-            "--",
-            ".",
-        ])?;
+        let (paths, changed) = std::thread::scope(|scope| -> Result<_> {
+            let changed = scope.spawn(|| {
+                git::output_bytes(&[
+                    "diff-files",
+                    "--relative",
+                    "--name-only",
+                    "-z",
+                    "--diff-filter=T",
+                    "--",
+                    ".",
+                ])
+                .map_err(|error| error.to_string())
+            });
+            let paths = git::output_bytes(&args)?;
+            Ok((
+                paths,
+                changed.join().expect("Git type change scan panicked")?,
+            ))
+        })?;
         let changed: BTreeSet<_> = changed.split(|&b| b == 0).collect();
         let root = std::env::current_dir()?.canonicalize()?;
         let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
