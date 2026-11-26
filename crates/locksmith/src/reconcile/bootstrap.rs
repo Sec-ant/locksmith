@@ -1,5 +1,5 @@
 //! Select a complete pnpm bootstrap graph and interpret the project with its runner.
-use std::cell::OnceCell;
+use std::{cell::OnceCell, fmt::Display};
 
 use node_semver::Version;
 
@@ -57,7 +57,7 @@ impl MergeTarget {
     ///
     /// # Errors
     /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
-    pub fn workspace_for_bootstrap<'a, T, E: From<LockfileError>>(
+    pub fn workspace_for_bootstrap<'a, T, E: From<LockfileError> + Display>(
         self,
         manifest: Option<&Value>,
         inputs: [MergeInput<'a>; 3],
@@ -73,7 +73,7 @@ impl MergeTarget {
     ///
     /// # Errors
     /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
-    pub fn workspace_for_candidate<'a, T, E: From<LockfileError>>(
+    pub fn workspace_for_candidate<'a, T, E: From<LockfileError> + Display>(
         self,
         manifest: Option<&Value>,
         inputs: [MergeInput<'a>; 3],
@@ -109,7 +109,7 @@ fn input_error<E: From<LockfileError>>(inputs: [MergeInput<'_>; 3], error: E) ->
         .unwrap_or(error)
 }
 
-fn select_workspace<T, E: From<LockfileError>>(
+fn select_workspace<T, E: From<LockfileError> + Display>(
     target: MergeTarget,
     manifest: Option<&Value>,
     locks: [Option<&Lockfile>; 3],
@@ -132,12 +132,27 @@ fn select_workspace<T, E: From<LockfileError>>(
     );
     let side = match selected {
         Ok(side) => side,
-        Err(error) => {
+        Err(mut error) => {
             // An older runner can reject settings valid for a newer candidate.
-            if let [Some(Err(first)), Some(Err(_)), Some(Err(_))] =
-                candidates.map(OnceCell::into_inner)
-            {
+            let candidates = candidates.map(OnceCell::into_inner);
+            if let [Some(Err(first)), Some(Err(_)), Some(Err(_))] = candidates {
                 return Err(first);
+            }
+            let failures: String = ["base", "ours", "theirs"]
+                .into_iter()
+                .zip(candidates)
+                .filter_map(|(side, candidate)| {
+                    candidate?
+                        .err()
+                        .map(|load| format!("\n{side} workspace: {load}"))
+                })
+                .collect();
+            if !failures.is_empty() {
+                if let LockfileError::ResolutionRequired { message, .. } = &mut error {
+                    message.push_str(&failures);
+                } else {
+                    error = LockfileError::WorkspaceInput(format!("{error}{failures}"));
+                }
             }
             return Err(error.into());
         }

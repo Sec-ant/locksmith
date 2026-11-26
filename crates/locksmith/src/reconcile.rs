@@ -113,7 +113,14 @@ pub(crate) fn resolve(
     context: &MergeContext<'_>,
     bootstrap: Option<usize>,
 ) -> Result<Lockfile, LockfileError> {
-    resolve_sources(locks, context, bootstrap, false, None)
+    resolve_sources(locks, context, Bootstrap::Select(bootstrap), false, None)
+}
+
+pub(crate) fn resolve_project(
+    locks: [&Lockfile; 3],
+    context: &MergeContext<'_>,
+) -> Result<Lockfile, LockfileError> {
+    resolve_sources(locks, context, Bootstrap::ProjectOnly, false, None)
 }
 
 struct MissingRequests<'a> {
@@ -177,7 +184,14 @@ pub(crate) fn resolve_with_requests(
     bootstrap: Option<usize>,
 ) -> Result<Lockfile, Vec<LockfileError>> {
     let mut additional = Vec::new();
-    resolve_sources(locks, context, bootstrap, false, Some(&mut additional)).map_err(|first| {
+    resolve_sources(
+        locks,
+        context,
+        Bootstrap::Select(bootstrap),
+        false,
+        Some(&mut additional),
+    )
+    .map_err(|first| {
         let collect = matches!(
             first,
             LockfileError::ResolutionRequired {
@@ -205,7 +219,7 @@ pub(crate) fn converge_upgrade(
         let next = resolve_sources(
             [baseline, baseline, &current],
             context,
-            Some(Source::Theirs as usize),
+            Bootstrap::Select(Some(Source::Theirs as usize)),
             true,
             None,
         )?;
@@ -226,10 +240,15 @@ pub(crate) fn converge_upgrade(
     }
 }
 
+enum Bootstrap {
+    Select(Option<usize>),
+    ProjectOnly,
+}
+
 fn resolve_sources(
     locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
-    bootstrap: Option<usize>,
+    bootstrap: Bootstrap,
     prefer_baseline: bool,
     mut additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Lockfile, LockfileError> {
@@ -270,17 +289,20 @@ fn resolve_sources(
     if prefer_baseline {
         crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
     }
-    let environment = bootstrap::environment_source(
-        locks.map(Some),
-        context.target,
-        context.manifests.get("."),
-        |side| {
-            bootstrap
-                .is_none_or(|selected| selected == side)
-                .then_some(context.configuration)
-        },
-        [false; 3],
-    )?;
+    let environment = match bootstrap {
+        Bootstrap::Select(selected) => Some(bootstrap::environment_source(
+            locks.map(Some),
+            context.target,
+            context.manifests.get("."),
+            |side| {
+                selected
+                    .is_none_or(|selected| selected == side)
+                    .then_some(context.configuration)
+            },
+            [false; 3],
+        )?),
+        Bootstrap::ProjectOnly => None,
+    };
     let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;
     // Migration convergence keeps admissible baseline pins. Headers and the
@@ -406,7 +428,9 @@ fn resolve_sources(
             manifest::check(&overrides, id, Some(value), "merged")?;
         }
         let mut documents = BTreeMap::new();
-        if let Some(env) = locks[environment].documents.get(&DocumentKind::Environment) {
+        if let Some(env) =
+            environment.and_then(|side| locks[side].documents.get(&DocumentKind::Environment))
+        {
             documents.insert(DocumentKind::Environment, Arc::clone(env));
         }
         documents.insert(DocumentKind::Project, Arc::new(output));

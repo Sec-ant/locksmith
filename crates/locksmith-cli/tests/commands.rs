@@ -1063,6 +1063,7 @@ fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
     const LOCK: &str = "pnpm-lock.yaml";
     let repo = Repo::new();
     repo.write("package.json", "{}");
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/*']\n");
     repo.write(".npmrc", "auto-install-peers=false\n");
     repo.write("apps/web/package.json", "{}");
     repo.write(
@@ -1077,7 +1078,7 @@ fn repair_uses_merge_parents_to_resolve_a_conflicting_snapshot() {
 
     let snapshot =
         |version: &str| format!("  widget@1.0.0:\n    dependencies:\n      child: {version}\n");
-    let lock = |snapshots: &str| {
+    let lock = |version: &str, snapshots: &str| {
         let project = format!(
             "# preserve the merged lock's formatting\n\
 lockfileVersion: '9.0'\n\
@@ -1085,7 +1086,7 @@ importers:\n  .: {{}}\n  apps/web:\n    dependencies:\n      widget: {{specifier
 packages:\n  child@1.0.0: {{resolution: {{integrity: sha512-child-one}}}}\n  child@2.0.0: {{resolution: {{integrity: sha512-child-two}}}}\n  widget@1.0.0: {{resolution: {{integrity: sha512-widget}}}}\n\
 snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
         );
-        with_recorded_manager("12.15.0", &project)
+        with_recorded_manager(version, &project)
     };
     let ours = snapshot("1.0.0");
     let theirs = snapshot("2.0.0");
@@ -1095,18 +1096,30 @@ snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
             "apps/web/package.json",
             r#"{"dependencies":{"widget":"1.0.0"}}"#,
         );
-        repo.write(LOCK, &lock(snapshot));
+        repo.write(LOCK, &lock("12.15.0", snapshot));
         repo.commit(branch);
     }
     repo.git(&["switch", "main"]);
     repo.git(&["merge", "-s", "ours", "--no-commit", "topic"]);
-    let damaged = lock(&format!("{theirs}{ours}"));
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.16.0"}"#);
+    let damaged = lock("12.16.0", &format!("{theirs}{ours}"));
     repo.write(LOCK, &damaged);
     repo.commit("keep both snapshots in the merge result");
     let out = repo.cmd(CLI, &["repair"]);
     assert!(out.status.success(), "{}", report(&out));
-    assert_eq!(out.stdout, lock(&ours).as_bytes());
+    assert_eq!(out.stdout, lock("12.16.0", &ours).as_bytes());
     assert_eq!(repo.git(&["show", "HEAD:pnpm-lock.yaml"]), damaged);
+
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.17.0"}"#);
+    repo.git(&["commit", "-a", "--amend", "--no-edit"]);
+    let out = repo.cmd(CLI, &["repair"]);
+    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert!(out.stdout.is_empty());
+    assert!(
+        report(&out).contains("bootstrap graph does not match the declared pnpm@12.17.0"),
+        "{}",
+        report(&out)
+    );
 }
 
 #[test]
@@ -3324,6 +3337,18 @@ fn newly_declaring_a_runner_migrates_the_workspace_even_without_a_bootstrap_docu
     );
 }
 
+fn registry_command(root: &Path) -> Command {
+    let mut command = Command::new(CLI);
+    command
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
 #[test]
 fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs() {
     let dir = tempfile::tempdir().unwrap();
@@ -3345,8 +3370,7 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
         ("https://private.example", true),
         ("https://other.example", false),
     ] {
-        let out = Command::new(CLI)
-            .current_dir(root)
+        let out = registry_command(root)
             .env("pnpm_config_registry", registry)
             .args(["validate", "--workspace"])
             .output()
@@ -3355,16 +3379,11 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
     }
     write_input(
         root,
-        "pnpm/config.yaml",
+        "global/pnpm/config.yaml",
         "registry: https://private.example\n",
     );
-    let out = Command::new(CLI)
-        .current_dir(root)
-        .env("XDG_CONFIG_HOME", root)
-        .env_remove("pnpm_config_registry")
-        .env_remove("PNPM_CONFIG_REGISTRY")
-        .env_remove("npm_config_registry")
-        .env_remove("NPM_CONFIG_REGISTRY")
+    let out = registry_command(root)
+        .env("XDG_CONFIG_HOME", root.join("global"))
         .args(["validate", "--workspace"])
         .output()
         .unwrap();
@@ -3382,8 +3401,7 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
         repo.write(file, &fs::read_to_string(root.join(file)).unwrap());
     }
     let converge = |host| {
-        Command::new(CLI)
-            .current_dir(repo.0.path())
+        registry_command(repo.0.path())
             .env("pnpm_config_registry", host)
             .args(["converge", "HEAD"])
             .output()
@@ -3398,6 +3416,33 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
         "{}",
         report(&mismatch)
     );
+
+    repo.commit("record the config dependency and implicit tarball");
+    let unchanged = converge("https://private.example");
+    assert!(unchanged.status.success(), "{}", report(&unchanged));
+    assert_eq!(
+        unchanged.stdout,
+        fs::read(root.join("pnpm-lock.yaml")).unwrap()
+    );
+
+    let mut stale = boot.clone();
+    stale["packages"]["tool@1.0.0"]["resolution"]["tarball"] =
+        json!("https://other.example/tool/-/tool-1.0.0.tgz");
+    repo.write(
+        "pnpm-lock.yaml",
+        &format!("---\n{stale}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"),
+    );
+    repo.commit("record a stale bootstrap artifact");
+    let candidate = fs::read_to_string(root.join("pnpm-lock.yaml")).unwrap();
+    repo.write("pnpm-lock.yaml", &candidate);
+    let converged = converge("https://private.example");
+    assert!(converged.status.success(), "{}", report(&converged));
+    let lock = Lockfile::try_from(String::from_utf8(converged.stdout).unwrap()).unwrap();
+    assert_eq!(
+        lock.environment(),
+        Lockfile::parse(&candidate).unwrap().environment()
+    );
+
     let cfg = fs::read_to_string(root.join("pnpm-workspace.yaml")).unwrap();
     repo.write(
         "pnpm-workspace.yaml",
@@ -3422,8 +3467,7 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
             "pnpm-lock.yaml",
             format!("---\n{explicit}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"),
         );
-        let out = Command::new(CLI)
-            .current_dir(root)
+        let out = registry_command(root)
             .env("npm_config_userconfig", root)
             .args(["validate", "--workspace"])
             .output()
@@ -3467,8 +3511,7 @@ fn merge_can_select_an_explicit_bootstrap_when_another_candidate_needs_registry_
     boot["packages"]["tool@1.0.0"]["resolution"]["tarball"] = json!(url);
     write_input(root, "explicit", lock(&boot));
     for (ours, theirs) in [("explicit", "implicit"), ("implicit", "explicit")] {
-        let out = Command::new(CLI)
-            .current_dir(root)
+        let out = registry_command(root)
             .env("npm_config_userconfig", root)
             .args(["merge", "implicit", ours, theirs, "--context", "ctx"])
             .output()
@@ -3480,6 +3523,23 @@ fn merge_can_select_an_explicit_bootstrap_when_another_candidate_needs_registry_
             url
         );
     }
+
+    boot["packages"]["tool@1.0.0"]["resolution"]["tarball"] =
+        json!("https://other.example/tool/-/tool-1.0.0.tgz");
+    write_input(root, "wrong", lock(&boot));
+    let out = registry_command(root)
+        .env("npm_config_userconfig", root)
+        .args(["merge", "implicit", "wrong", "wrong", "--context", "ctx"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert!(out.stdout.is_empty());
+    let diagnostic = report(&out);
+    assert!(
+        diagnostic.contains("no bootstrap graph matches"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains(root.to_str().unwrap()), "{diagnostic}");
 }
 
 #[test]

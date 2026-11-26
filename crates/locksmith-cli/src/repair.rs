@@ -126,20 +126,16 @@ fn recover_merge_snapshots(
     let ((base, base_cfg), (ours, ours_cfg), (theirs, theirs_cfg)) = (base?, ours?, theirs?);
     drop(blobs);
     // The first parent is the committed merge's target, independent of current refs.
-    let witness = locksmith::merge(
-        &base,
-        &ours,
-        &theirs,
-        Some(&MergeContext {
+    Ok(Some(RepairInput::parse_with_merge_witness(
+        text,
+        [&base, &ours, &theirs],
+        &MergeContext {
             target: MergeTarget::Ours,
             manifests: context.manifests,
             configurations: [&base_cfg, &ours_cfg, &theirs_cfg],
             configuration: context.configuration,
             patches: context.patches,
             registry: None,
-        }),
-    )?;
-    Ok(Some(RepairInput::parse_with_snapshot_reference(
-        text, &witness,
+        },
     )?))
 }

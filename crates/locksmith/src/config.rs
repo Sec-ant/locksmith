@@ -460,6 +460,7 @@ impl WorkspaceConfig {
         self.changes_pnpm_version(after)
             || self.config_dependencies != after.config_dependencies
             || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
+            || !after.matches_config_dependencies(baseline.environment())
     }
 
     pub(crate) fn matches_pnpm(&self, target: &Self) -> bool {

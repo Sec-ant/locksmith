@@ -39,7 +39,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         .read(tree, &path)?
         .ok_or_else(|| format!("missing {reference}:{path}"))?;
     let working_text = fs::read_to_string("pnpm-lock.yaml")?;
-    let base_config = project.configuration()?;
+    let mut base_config = project.configuration()?;
     let config = working.bootstrap_configuration(Some(working_text.as_str().into()), || {
         working_file(".npmrc")
     })?;
@@ -93,6 +93,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             );
         }
     }
+    // Both sides share the registry settings checked above. The resolved routes
+    // are evidence for checking omitted bootstrap tarball URLs.
+    base_config
+        .config_registries
+        .clone_from(&config.config_registries);
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
     #[cfg(feature = "bench-profile")]

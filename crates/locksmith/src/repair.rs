@@ -13,7 +13,7 @@ use std::{
 use crate::{
     DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig, graph,
     manifest,
-    reconcile::{self, missing},
+    reconcile::{self, MergeContext, missing},
     source::edit,
 };
 
@@ -86,6 +86,20 @@ impl RepairInput {
         reference: &Lockfile,
     ) -> Result<Self, LockfileError> {
         edit::parse_for_repair(text, reference.project()).map(Self)
+    }
+
+    /// Reconcile the source projects to select existing copies of conflicting snapshots.
+    /// The repaired lock retains its own bootstrap document for validation by [`Self::apply`].
+    ///
+    /// # Errors
+    /// Returns a reconciliation error or an error for invalid input or unmatched duplicate snapshots.
+    pub fn parse_with_merge_witness(
+        text: &str,
+        locks: [&Lockfile; 3],
+        context: &MergeContext<'_>,
+    ) -> Result<Self, LockfileError> {
+        let witness = reconcile::resolve_project(locks, context)?;
+        Self::parse_with_snapshot_reference(text, &witness)
     }
 
     /// Repair the original source against this context.
