@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use locksmith::{Lockfile, LockfileError};
@@ -51,20 +51,42 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     }
     let config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
     let patches = workspace::patches(&config, "", read)?;
-    let mut manifests = BTreeMap::new();
     let canonical_root = root.canonicalize()?;
-    let mut external_members = BTreeSet::new();
-    let directories = Members::directories_on_disk(&project, &canonical_root)?;
+    let mut directories = Members::directories_on_disk(&project, &canonical_root)?;
     #[cfg(feature = "bench-profile")]
     let manifests_span = locksmith::profile::span("validate_manifest_reads");
-    for (id, directory) in directories {
-        if let Some(manifest) = workspace::read_manifest(&id, read)? {
-            if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
-                external_members.insert(id.clone());
+    let collect = |directories: BTreeMap<String, PathBuf>| -> Result<_> {
+        let mut manifests = BTreeMap::new();
+        let mut external_members = BTreeSet::new();
+        for (id, directory) in directories {
+            if let Some(manifest) = workspace::read_manifest(&id, read)? {
+                if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
+                    external_members.insert(id.clone());
+                }
+                manifests.insert(id, manifest);
             }
-            manifests.insert(id, manifest);
         }
-    }
+        Ok((manifests, external_members))
+    };
+    let (mut manifests, external_members) = if directories.len() >= 32 {
+        let boundary = directories
+            .keys()
+            .nth(directories.len() / 2)
+            .unwrap()
+            .clone();
+        let later = directories.split_off(&boundary);
+        // Read two adjacent ranges so the first manifest error keeps its original order.
+        std::thread::scope(|scope| -> Result<_> {
+            let later = scope.spawn(|| collect(later).map_err(|error| error.to_string()));
+            let (mut manifests, mut external) = collect(directories)?;
+            let (mut more, mut links) = later.join().expect("manifest reader panicked")?;
+            manifests.append(&mut more);
+            external.append(&mut links);
+            Ok((manifests, external))
+        })?
+    } else {
+        collect(directories)?
+    };
     if has_root_manifest {
         manifests.insert(".".into(), project.root);
     }
