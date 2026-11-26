@@ -376,11 +376,11 @@ impl RegistrySettings {
 
     fn auth(&self, url: &str, name: &str) -> Result<Option<String>> {
         let uri: Uri = url.parse()?;
-        let authority = uri.authority().ok_or("missing registry host")?;
-        if self.rc.is_empty() {
-            return Ok(None);
-        }
-        let mut scope = format!("//{authority}{}", uri.path());
+        let mut scope = format!(
+            "//{}{}",
+            uri.authority().ok_or("missing registry host")?,
+            uri.path()
+        );
         while let Some(end) = scope.rfind('/') {
             if end < 2 {
                 break;
