@@ -10,6 +10,8 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use crate::{LockfileError, Value};
 
 pub(crate) fn verify(text: &str, expected: &Value) -> Result<(), LockfileError> {
+    #[cfg(feature = "bench-profile")]
+    let _span = crate::profile::span("verify_yaml");
     serde_saphyr::with_deserializer_from_str_with_options(
         text,
         crate::source::options(text.len()),

@@ -166,6 +166,8 @@ fn three_way(
     ours: &Lockfile,
     theirs: &Lockfile,
 ) -> Result<Lockfile, LockfileError> {
+    #[cfg(feature = "bench-profile")]
+    let _span = crate::profile::span("three_way_merge");
     let mut documents = std::collections::BTreeMap::new();
     let mut conflicts = Vec::new();
     for kind in [DocumentKind::Environment, DocumentKind::Project] {

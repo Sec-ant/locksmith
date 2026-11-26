@@ -19,6 +19,8 @@ pub(super) struct Impact<'a> {
 
 impl<'a> Impact<'a> {
     pub fn build(doc: &'a Value) -> Result<Self, LockfileError> {
+        #[cfg(feature = "bench-profile")]
+        let _span = crate::profile::span("inspect_graph");
         let mut graph = DiGraph::new();
         let mut nodes = |section| -> BTreeMap<&'a str, NodeIndex> {
             let keys: BTreeSet<_> = graph::section(doc, section)

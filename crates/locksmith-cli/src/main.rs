@@ -96,7 +96,12 @@ fn main() -> ExitCode {
     };
     let driver = matches!(command, Command::Merge(Merge::Git { .. }));
     let validating = matches!(command, Command::Validate { .. });
-    match run(command) {
+    let result = run(command);
+    #[cfg(feature = "bench-profile")]
+    for (component, elapsed) in locksmith::profile::take_samples() {
+        eprintln!("locksmith-profile\t{component}\t{}", elapsed.as_nanos());
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("locksmith: {error}");

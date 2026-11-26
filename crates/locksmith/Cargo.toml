@@ -13,6 +13,9 @@ name = "locksmith"
 [lints]
 workspace = true
 
+[features]
+bench-profile = []
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

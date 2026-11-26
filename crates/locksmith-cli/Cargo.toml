@@ -14,6 +14,9 @@ name = "locksmith"
 path = "src/main.rs"
 doc = false
 
+[features]
+bench-profile = ["locksmith/bench-profile"]
+
 [dependencies]
 bpaf = { version = "0.9.29", features = ["derive"] }
 locksmith = { package = "es-locksmith", path = "../locksmith" }

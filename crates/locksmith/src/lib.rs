@@ -35,6 +35,9 @@ mod lockfile;
 mod manifest;
 mod merge;
 mod peer;
+#[cfg(feature = "bench-profile")]
+#[doc(hidden)]
+pub mod profile;
 mod reconcile;
 mod recovery;
 mod registry;
