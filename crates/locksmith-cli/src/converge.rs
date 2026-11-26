@@ -166,18 +166,34 @@ fn workspace_manifests(
 ) -> Result<[BTreeMap<String, Value>; 2]> {
     #[cfg(feature = "bench-profile")]
     let _span = locksmith::profile::span("converge_manifest_collection");
-    let before = workspace::manifests(project, &mut blobs, tree, prefix)?;
-    #[cfg(feature = "bench-profile")]
-    let _span = locksmith::profile::span("worktree_manifests");
     let mut after = BTreeMap::from([(".".into(), working.root.clone())]);
-    if working.workspace {
-        for id in Members::new(working)?.working_directories(prefix)? {
-            if let Some(manifest) = workspace::read_manifest(&id, working_file)? {
-                after.insert(id, manifest);
-            }
-        }
+    if !working.workspace {
+        return Ok([
+            workspace::manifests(project, &mut blobs, tree, prefix)?,
+            after,
+        ]);
     }
-    Ok([before, after])
+    let (before, after) = std::thread::scope(|scope| {
+        let before = scope.spawn(move || {
+            workspace::manifests(project, &mut blobs, tree, prefix)
+                .map_err(|error| error.to_string())
+        });
+        let after = (|| -> Result<_> {
+            #[cfg(feature = "bench-profile")]
+            let _span = locksmith::profile::span("worktree_manifests");
+            for id in Members::new(working)?.working_directories(prefix)? {
+                if let Some(manifest) = workspace::read_manifest(&id, working_file)? {
+                    after.insert(id, manifest);
+                }
+            }
+            Ok(after)
+        })();
+        (
+            before.join().expect("committed manifest reader panicked"),
+            after,
+        )
+    });
+    Ok([before?, after?])
 }
 
 /// Installed importers can name generated projects whose manifests Git ignores.
