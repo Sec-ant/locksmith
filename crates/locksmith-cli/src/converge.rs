@@ -99,9 +99,10 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let inputs_span = locksmith::profile::span("converge_input_collection");
     let (baseline, candidate, [mut before, mut after]) =
         std::thread::scope(|scope| -> Result<_> {
+            // The working lock approximates the combined work of both parsers.
             let parallel = candidate_text
                 .as_ref()
-                .is_some_and(|text| crate::parallel_parse(text.len() as u64));
+                .is_some_and(|text| crate::parallel_parse((text.len() as u64).saturating_mul(2)));
             let baseline = scope.spawn(move || Lockfile::try_from(baseline_text));
             let manifests = || workspace_manifests(&project, &working, blobs, tree, prefix);
             let candidate = || candidate_text.map(Lockfile::try_from).transpose();
