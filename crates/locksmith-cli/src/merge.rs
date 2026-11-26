@@ -17,9 +17,10 @@ pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile
     #[cfg(feature = "bench-profile")]
     let _span = locksmith::profile::span("merge_input_parsing");
     let paths = files.map(AsRef::as_ref);
+    // The base size approximates each of the three lockfiles from the same workspace.
     if paths[0]
         .metadata()
-        .is_ok_and(|file| crate::parallel_parse(file.len()))
+        .is_ok_and(|file| crate::parallel_parse(file.len().saturating_mul(3)))
     {
         return thread::scope(|scope| {
             let spawn =
