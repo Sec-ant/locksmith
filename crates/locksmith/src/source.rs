@@ -432,26 +432,40 @@ pub(crate) fn render(
                 entries.sort_unstable_by_key(|(key, _)| *key);
                 entries
             };
-            for (entry, value) in entries {
-                let original = sources.iter().enumerate().find_map(|(i, source)| {
-                    let record = source.documents.get(&kind)?.get(key)?.get(entry)?;
-                    if record != value || (key == "importers" && !ordered_importer(record)) {
-                        return None;
-                    }
+            let source_sections: Vec<_> = sources
+                .iter()
+                .enumerate()
+                .filter_map(|(i, source)| {
+                    let records = source.documents.get(&kind)?.get(key)?.as_object()?;
                     let layout = source.layouts.get(&kind)?;
-                    if preserve_baseline
-                        && i == 0
-                        && let Some(range) =
-                            layout.original_spelling.get(key).and_then(|m| m.get(entry))
-                    {
-                        return Some(&layout.text[range.clone()]);
-                    }
-                    let entries = layout.entries.get(key)?;
-                    let index = entries
-                        .binary_search_by(|(name, _)| name.text(&layout.text).cmp(entry))
-                        .ok()?;
-                    Some(&layout.text[entries[index].1.clone()])
-                });
+                    let original_spelling = (preserve_baseline && i == 0)
+                        .then(|| layout.original_spelling.get(key))
+                        .flatten();
+                    Some((
+                        records,
+                        layout.text.as_str(),
+                        original_spelling,
+                        layout.entries.get(key),
+                    ))
+                })
+                .collect();
+            for (entry, value) in entries {
+                let original = source_sections.iter().find_map(
+                    |(records, text, original_spelling, blocks)| {
+                        let record = records.get(entry)?;
+                        if record != value || (key == "importers" && !ordered_importer(record)) {
+                            return None;
+                        }
+                        if let Some(range) = original_spelling.and_then(|m| m.get(entry)) {
+                            return Some(&text[range.clone()]);
+                        }
+                        let blocks = (*blocks)?;
+                        let index = blocks
+                            .binary_search_by(|(name, _)| name.text(text).cmp(entry))
+                            .ok()?;
+                        Some(&text[blocks[index].1.clone()])
+                    },
+                );
                 if let Some(original) = original {
                     output.push_str(original.trim_end_matches('\n'));
                     output.push_str("\n\n");
