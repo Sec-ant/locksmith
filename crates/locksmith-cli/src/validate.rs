@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, ErrorKind, Read},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -11,28 +11,6 @@ use crate::{
     Result,
     workspace::{self, Members, Project},
 };
-
-fn read_manifest_file(path: &Path) -> io::Result<String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // A FIFO must not block a manifest reader or the scoped threads joining it.
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let mut file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "expected a regular manifest file",
-        ));
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
-}
 
 pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -55,8 +33,9 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     };
     let read_manifest = |relative: &str| {
         let path = root.join(relative);
-        match read_manifest_file(&path) {
-            Ok(text) => Ok(Some(text)),
+        match workspace::read_regular_file(&path) {
+            Ok(Some(text)) => Ok(Some(text)),
+            Ok(None) => Err(format!("{}: expected a regular manifest file", path.display()).into()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", path.display()).into()),
         }
@@ -79,7 +58,12 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
+    let mut config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
+    if let Ok(policy) =
+        std::env::var("pnpm_config_pm_on_fail").or_else(|_| std::env::var("PNPM_CONFIG_PM_ON_FAIL"))
+    {
+        config.pm_on_fail = Some(policy);
+    }
     let patches = workspace::patches(&config, "", read)?;
     let canonical_root = root.canonicalize()?;
     let mut directories = Members::directories_on_disk(&project, &canonical_root)?;
@@ -168,10 +152,9 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         {
             return Err(invalid());
         }
-        if !fs::metadata(&file).map_err(io)?.is_file() {
-            return Err(invalid());
-        }
-        let contents = fs::read_to_string(&file).map_err(io)?;
+        let contents = workspace::read_regular_file(&file)
+            .map_err(io)?
+            .ok_or_else(invalid)?;
         workspace::parse_manifest("package.json", &contents)
             .map(Some)
             .map_err(|_| invalid())

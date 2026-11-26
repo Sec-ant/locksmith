@@ -32,7 +32,9 @@ impl MergeTarget {
             self,
             manifest,
             locks,
-            bootstrap.each_ref().map(|(_, provisional)| *provisional),
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
             |lock| {
                 let version = lock.and_then(Lockfile::recorded_pnpm_version);
                 WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
@@ -84,7 +86,9 @@ impl MergeTarget {
             self,
             manifest,
             bootstrap.each_ref().map(|(lock, _)| lock.as_deref()),
-            bootstrap.each_ref().map(|(_, provisional)| *provisional),
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
             load,
         )
         .map_err(|error| input_error(inputs, error))?;
@@ -113,7 +117,7 @@ fn select_workspace<T, E: From<LockfileError> + Display>(
     target: MergeTarget,
     manifest: Option<&Value>,
     locks: [Option<&Lockfile>; 3],
-    provisional: [bool; 3],
+    duplicate_snapshots: [&[String]; 3],
     mut load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
 ) -> Result<(T, WorkspaceConfig, usize), E> {
     let mut candidates = [OnceCell::new(), OnceCell::new(), OnceCell::new()];
@@ -128,7 +132,7 @@ fn select_workspace<T, E: From<LockfileError> + Display>(
                 .ok()
                 .map(|(_, config)| config)
         },
-        provisional,
+        duplicate_snapshots,
     );
     let side = match selected {
         Ok(side) => side,
@@ -170,7 +174,7 @@ pub(super) fn environment_source<'a>(
     target: MergeTarget,
     root: Option<&Value>,
     mut configuration: impl FnMut(usize) -> Option<&'a WorkspaceConfig>,
-    provisional: [bool; 3],
+    duplicate_snapshots: [&[String]; 3],
 ) -> Result<usize, LockfileError> {
     let mut best = None;
     let mut invalid_environment = None;
@@ -205,14 +209,13 @@ pub(super) fn environment_source<'a>(
                 }
             }
         };
-        // Recovery validates each interpretation of duplicated snapshots after selection.
-        if !provisional[side]
-            && let Some(env) = lock.and_then(Lockfile::environment)
-        {
-            let issues = crate::graph::validate_with_config(
+        if let Some(env) = lock.and_then(Lockfile::environment) {
+            // Recovery checks each duplicate snapshot body after selecting an environment.
+            let issues = crate::graph::validate_with_unresolved_snapshots(
                 env,
                 crate::DocumentKind::Environment,
                 Some(config),
+                duplicate_snapshots[side],
             );
             if !issues.is_empty() {
                 invalid_environment.get_or_insert(issues);

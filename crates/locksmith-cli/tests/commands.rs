@@ -108,6 +108,31 @@ fn report(out: &Output) -> String {
         String::from_utf8_lossy(&out.stderr)
     )
 }
+
+fn output_with_timeout(command: &mut Command) -> Output {
+    use std::{
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let mut process = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            process.kill().unwrap();
+            process.wait().unwrap();
+            panic!("command did not finish: {command:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    process.wait_with_output().unwrap()
+}
+
 fn graph(data: &[u8]) -> Value {
     let lock = Lockfile::parse(std::str::from_utf8(data).unwrap()).unwrap();
     lock.validate().unwrap();
@@ -1266,6 +1291,24 @@ fn pnpm10_normalizes_parent_segments_before_matching_workspace_globs() {
 }
 
 #[test]
+fn pnpm10_negated_classes_do_not_select_the_literal_bracket_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "package.json", r#"{"packageManager":"pnpm@10.34.9"}"#);
+    write_input(root, "pnpm-workspace.yaml", "packages: ['apps/[!v/w]eb']\n");
+    for path in ["apps/xeb", "apps/veb", "apps/web", "apps/[!v/w]eb"] {
+        write_input(root, &format!("{path}/package.json"), "{}");
+    }
+    // pnpm 10.34.9 selects xeb and the root for this pattern.
+    write_input(
+        root,
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\nimporters: {.: {}, apps/xeb: {}}\n",
+    );
+    check_workspace(root, 0, "negated character class");
+}
+
+#[test]
 fn normalized_workspace_globs_and_pnpm_manifest_formats_keep_healthy_importers() {
     let repo = Repo::new();
     let lock = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
@@ -2247,12 +2290,6 @@ fn a_locked_modern_manager_uses_dev_engines_over_a_legacy_pin() {
 #[cfg(unix)]
 #[test]
 fn parallel_workspace_validation_reports_the_first_error_without_waiting_on_a_fifo() {
-    use std::{
-        process::Stdio,
-        thread,
-        time::{Duration, Instant},
-    };
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_input(root, "package.json", "{}");
@@ -2273,28 +2310,57 @@ fn parallel_workspace_validation_reports_the_first_error_without_waiting_on_a_fi
         .unwrap();
     assert!(fifo.status.success(), "{}", report(&fifo));
 
-    let mut process = Command::new(CLI)
-        .current_dir(root)
-        .args(["validate", "--workspace"])
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while process.try_wait().unwrap().is_none() {
-        if Instant::now() >= deadline {
-            process.kill().unwrap();
-            process.wait().unwrap();
-            panic!("workspace validation blocked on a manifest FIFO");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let out = process.wait_with_output().unwrap();
+    let out = output_with_timeout(
+        Command::new(CLI)
+            .current_dir(root)
+            .args(["validate", "--workspace"]),
+    );
     assert_eq!(out.status.code(), Some(2), "{}", report(&out));
     assert!(
         report(&out).contains("apps/00/package.json"),
         "{}",
         report(&out)
     );
+}
+
+#[test]
+fn workspace_validation_reads_the_environment_manager_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    write_input(
+        root,
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
+    );
+    write_input(root, "pnpm-workspace.yaml", "packages: []\n");
+    let validate = || {
+        let mut command = registry_command(root);
+        command.args(["validate", "--workspace"]);
+        command
+    };
+    let out = validate().output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert!(report(&out).contains("packageManagerDependencies"));
+    let out = validate()
+        .env("pnpm_config_pm_on_fail", "ignore")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        "packages: []\npmOnFail: ignore\n",
+    );
+    let out = validate().output().unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    let out = validate()
+        .env("pnpm_config_pm_on_fail", "download")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert!(report(&out).contains("packageManagerDependencies"));
 }
 
 #[test]
@@ -3677,6 +3743,39 @@ fn converge_replaces_an_invalid_baseline_manager_pin_even_when_the_version_is_un
 }
 
 #[test]
+fn converge_retains_equivalent_qualified_and_plain_pins_for_npm_shorthand() {
+    for (target, old_pin, retained) in [
+        ("foo", "foo@1.2.0", true),
+        ("foo", "1.2.0", true),
+        ("other", "other@1.2.0", false),
+    ] {
+        let repo = Repo::new();
+        repo.write("pnpm-workspace.yaml", "packages: []\npmOnFail: ignore\n");
+        let writes = |target: &str, version: &str, spec: &str, pin: &str| {
+            let key = format!("{target}@{version}");
+            repo.write(
+                "package.json",
+                &json!({"packageManager":"pnpm@12.21.0","dependencies":{"foo":spec}}).to_string(),
+            );
+            repo.write("pnpm-lock.yaml", &json!({"lockfileVersion":"9.0",
+                "importers":{".":{"dependencies":{"foo":{"specifier":spec,"version":pin}}}},
+                "packages":{&key:{"resolution":{"integrity":"sha512-fixture"}}},"snapshots":{&key:{}}
+            }).to_string());
+        };
+        writes(target, "1.2.0", &format!("npm:{target}@^1"), old_pin);
+        repo.commit("record the baseline dependency");
+        writes("foo", "1.3.0", "npm:1", "1.3.0");
+
+        let out = repo.cmd(CLI, &["converge", "HEAD"]);
+        assert!(out.status.success(), "{}", report(&out));
+        let doc = graph(&out.stdout);
+        let dep = &doc["importers"]["."]["dependencies"]["foo"];
+        assert_eq!(dep["specifier"], "npm:1");
+        assert_eq!(dep["version"], if retained { old_pin } else { "1.3.0" });
+    }
+}
+
+#[test]
 fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -3690,11 +3789,11 @@ fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
         "snapshots":{"plugin@1.0.0":{"dependencies":{"host":"link:vendor/host"}}}});
     write_input(root, "pnpm-lock.yaml", doc.to_string());
     let inspect = || {
-        let out = Command::new(CLI)
-            .current_dir(root)
-            .args(["inspect", "--json"])
-            .output()
-            .unwrap();
+        let out = output_with_timeout(
+            Command::new(CLI)
+                .current_dir(root)
+                .args(["inspect", "--json"]),
+        );
         assert!(out.status.success(), "{}", report(&out));
         serde_json::from_slice::<Value>(&out.stdout).unwrap()
     };
@@ -3704,6 +3803,20 @@ fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
     let peers = inspect();
     assert_eq!(peers["peers"][0]["status"], "unknown");
     assert_eq!(peers["peers"][0]["reason"], "providerVersion");
+    #[cfg(unix)]
+    {
+        fs::remove_file(root.join("vendor")).unwrap();
+        let directory = root.join("vendor/host");
+        fs::create_dir_all(&directory).unwrap();
+        let fifo = Command::new("mkfifo")
+            .arg(directory.join("package.json"))
+            .output()
+            .unwrap();
+        assert!(fifo.status.success(), "{}", report(&fifo));
+        let peers = inspect();
+        assert_eq!(peers["peers"][0]["status"], "unknown");
+        assert_eq!(peers["peers"][0]["reason"], "providerVersion");
+    }
 }
 
 #[test]

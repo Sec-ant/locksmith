@@ -1,7 +1,7 @@
 use super::{cfg, lock};
 use locksmith::{
-    Lockfile, LockfileError, MergeContext, MergeTarget, PeerRules, RepairContext, Value,
-    WorkspaceConfig, inspect_peers, merge, repair,
+    ConvergeOptions, Lockfile, LockfileError, MergeContext, MergeTarget, PeerRules, RepairContext,
+    Value, WorkspaceConfig, converge, inspect_peers, merge, repair,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -890,6 +890,22 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
     };
     let merged = merge(&old, &old, &new, Some(&ctx)).unwrap();
     assert_eq!(merged.environment(), new.environment());
+    let converged = converge(
+        &old,
+        &new,
+        &[],
+        ConvergeOptions {
+            configuration: Some(&after),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(converged.environment(), new.environment());
+    converged
+        .validate_workspace(&manifests, &Default::default(), &after, ctx.patches, |_| {
+            Ok(None)
+        })
+        .unwrap();
     assert!(
         old.validate_workspace(
             &manifests,
@@ -930,6 +946,21 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
                 |_| Ok(None)
             )
             .is_ok(),
+            valid,
+            "{pin}"
+        );
+    }
+    for (pin, valid) in [("2.0.0", true), ("link:./local", false)] {
+        assert_eq!(
+            make(pin)
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &config(&format!("{pin}+sha512-example")),
+                    ctx.patches,
+                    |_| Ok(None),
+                )
+                .is_ok(),
             valid,
             "{pin}"
         );

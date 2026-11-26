@@ -489,3 +489,44 @@ fn published_sibling_dependencies_are_requested_in_one_batch() {
         );
     }
 }
+
+#[test]
+fn terminal_peer_errors_take_precedence_over_pending_registry_requests() {
+    let mut registry = RegistryMetadata::default();
+    for (name, group, dependency, spec) in [
+        ("a", "peerDependencies", "p", "catalog:missing"),
+        ("b", "dependencies", "q", "1.0.0"),
+    ] {
+        let request = RegistryRequest::Version {
+            name: name.into(),
+            selector: "1.0.0".into(),
+        };
+        registry.insert(&request, json!({"name":name,"version":"1.0.0",
+            group:{dependency:spec},"dist":{"shasum":"0123456789abcdef0123456789abcdef01234567",
+                "tarball":format!("https://example.org/{name}/-/{name}-1.0.0.tgz")}
+        }), "https://example.org", false).unwrap();
+    }
+    let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {'.': {}}\n").unwrap();
+    let config = WorkspaceConfig::default();
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"dependencies":{"a":"1.0.0","b":"1.0.0"}}),
+    )]);
+    let context = MergeContext {
+        registry: Some(&registry),
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configuration: &config,
+        configurations: [&config; 3],
+        patches: &BTreeMap::new(),
+    };
+    let errors = context.merge_with_requests([&lock; 3]).unwrap_err();
+    assert!(
+        matches!(
+            errors.as_slice(),
+            [LockfileError::ResolutionRequired { path, request: None, .. }]
+                if path == &["snapshots", "a@1.0.0", "p"]
+        ),
+        "{errors:?}"
+    );
+}

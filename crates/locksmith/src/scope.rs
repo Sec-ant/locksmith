@@ -198,13 +198,17 @@ pub fn converge_with_recorded_baselines(
             },
         );
     }
-    // Correcting only the bootstrap pin leaves the baseline's project graph eligible.
+    let stale_bootstrap = options
+        .configuration
+        .is_some_and(|config| !config.matches_config_dependencies(baseline.environment()))
+        || root.is_some_and(|root| {
+            baseline
+                .check_package_manager(root, options.configuration)
+                .is_err()
+        });
+    // Reuse the installed bootstrap independently of the project graph.
     let reconciled;
-    let baseline = if root.is_some_and(|root| {
-        baseline
-            .check_package_manager(root, options.configuration)
-            .is_err()
-    }) {
+    let baseline = if stale_bootstrap {
         let kind = crate::DocumentKind::Environment;
         let mut documents = baseline.documents.clone();
         if let Some(environment) = candidate.documents.get(&kind) {

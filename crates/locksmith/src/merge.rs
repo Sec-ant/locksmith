@@ -14,13 +14,12 @@ pub enum MergeInput<'a> {
 }
 
 impl<'a> MergeInput<'a> {
-    pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, bool) {
+    pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, Vec<String>) {
         match self {
-            Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), false),
+            Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), Vec::new()),
             Self::Yaml(text) => crate::RepairInput::bootstrap_lockfile(text)
-                .map_or((None, false), |(lock, provisional)| {
-                    (Some(Cow::Owned(lock)), provisional)
-                }),
+                .map(|(lock, duplicates)| (Some(Cow::Owned(lock)), duplicates))
+                .unwrap_or_default(),
         }
     }
 

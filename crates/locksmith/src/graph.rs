@@ -604,6 +604,15 @@ pub(crate) fn validate_with_config(
     kind: DocumentKind,
     config: Option<&crate::WorkspaceConfig>,
 ) -> Vec<ValidationIssue> {
+    validate_with_unresolved_snapshots(document, kind, config, &[])
+}
+
+pub(crate) fn validate_with_unresolved_snapshots(
+    document: &Value,
+    kind: DocumentKind,
+    config: Option<&crate::WorkspaceConfig>,
+    unresolved: &[String],
+) -> Vec<ValidationIssue> {
     let patches = crate::reconcile::patch_index(document);
     let mut issues = Vec::new();
     if let Err(error) = crate::LockSettings::from_document(
@@ -623,7 +632,9 @@ pub(crate) fn validate_with_config(
     // not need a reachability walk or a per-edge diagnostic allocation on success.
     for (key, snapshot) in section(document, "snapshots").into_iter().flatten() {
         check_snapshot(document, kind, key, &patches, &mut issues);
-        check_references(document, snapshot, kind, "snapshots", key, &mut issues);
+        if !unresolved.contains(key) {
+            check_references(document, snapshot, kind, "snapshots", key, &mut issues);
+        }
     }
     for name in ["importers", "snapshots", "packages"] {
         if document.get(name).is_some_and(|value| !value.is_object()) {

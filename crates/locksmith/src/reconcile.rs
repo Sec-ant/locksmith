@@ -299,7 +299,7 @@ fn resolve_sources(
                     .is_none_or(|selected| selected == side)
                     .then_some(context.configuration)
             },
-            [false; 3],
+            [&[]; 3],
         )?),
         Bootstrap::ProjectOnly => None,
     };
@@ -512,26 +512,24 @@ fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference:
                     || package == crate::workspace_links::workspace_request(name, request).0)
         });
     }
-    if let Some((target, _)) = spec.and_then(manifest::alias) {
-        return (target == name && pin == version)
-            || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
-    }
-    pin == version
+    let target = spec
+        .and_then(manifest::alias)
+        .map_or(name, |(target, _)| target);
+    version_from_pin(name, target, pin) == Some(version)
 }
 
 fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
-    let (range, version) = if let Some((target, range)) = manifest::alias(specifier) {
-        let Some(version) = reference
-            .strip_prefix(&format!("{target}@"))
-            .or_else(|| (name == target).then_some(reference))
-        else {
-            return false;
-        };
-        (range, graph::package_key(version))
-    } else {
-        (specifier, graph::package_key(reference))
-    };
-    manifest::matches_version(range, Some(version))
+    let (target, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+    manifest::matches_version(
+        range,
+        version_from_pin(name, target, graph::package_key(reference)),
+    )
+}
+
+fn version_from_pin<'a>(name: &str, target: &str, pin: &'a str) -> Option<&'a str> {
+    pin.strip_prefix(target)
+        .and_then(|suffix| suffix.strip_prefix('@'))
+        .or_else(|| (name == target).then_some(pin))
 }
 // The outer None denotes competing selectors without a unique applicable patch.
 pub(crate) fn desired_patch<'a>(

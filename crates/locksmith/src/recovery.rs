@@ -135,18 +135,20 @@ pub(crate) fn resolve(
 }
 
 /// Read the bootstrap importer and package resolutions even when snapshot keys repeat.
-pub(crate) fn bootstrap_candidate(text: &str) -> Option<(Lockfile, bool)> {
+pub(crate) fn bootstrap_candidate(text: &str) -> Option<(Lockfile, Vec<String>)> {
     let (lock, alternatives) = candidate(text).ok()?;
     lock.environment().is_some().then_some((lock, alternatives))
 }
 
 // Snapshot alternatives are resolved during the merge. Other input errors are final.
-pub(crate) fn candidate(text: &str) -> Result<(Lockfile, bool), LockfileError> {
-    let mut alternatives = false;
+pub(crate) fn candidate(text: &str) -> Result<(Lockfile, Vec<String>), LockfileError> {
+    let mut alternatives = Vec::new();
     let lock = match Lockfile::parse(text) {
-        Err(LockfileError::Parse(_)) => {
-            parse_with_alternatives(text, |_, _, _| alternatives = true)
-        }
+        Err(LockfileError::Parse(_)) => parse_with_alternatives(text, |kind, key, _| {
+            if kind == DocumentKind::Environment {
+                alternatives.push(key);
+            }
+        }),
         result => result,
     }?;
     Ok((lock, alternatives))

@@ -190,6 +190,7 @@ pub(crate) fn locked_config_resolution<'a>(
         .get(format!("{name}@{version}"))?
         .get("resolution")?;
     (integrity.starts_with("sha")
+        && version.parse::<node_semver::Version>().is_ok()
         && pin["specifier"] == version
         && pin["version"] == version
         && resolution["integrity"] == integrity)

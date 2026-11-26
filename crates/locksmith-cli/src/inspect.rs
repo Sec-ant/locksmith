@@ -33,9 +33,8 @@ pub fn run(file: &Path, override_version: Option<node_semver::Version>, json: bo
             }
             Err(e) => return Err(format!("{}: {e}", path.display()).into()),
         };
-        Ok(Some(
-            fs::read_to_string(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?,
-        ))
+        workspace::read_regular_file(&resolved)
+            .map_err(|e| format!("{}: {e}", resolved.display()).into())
     };
     let root = workspace::read_manifest(".", read)?.unwrap_or_default();
     let version = override_version.or_else(|| {

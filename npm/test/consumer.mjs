@@ -96,6 +96,21 @@ assert.equal((await migratedAliasLock.document('project')).importers['.'].depend
 const staleManager = managed.replace('"specifier":"12.21.0"', '"specifier":"12.20.0"');
 const correctedManager = await converge(staleManager, managed, [{ importer: '.', before: modernRoot, after: modernRoot }]);
 assert.deepEqual(await (await parse(correctedManager)).document('environment'), bootstrap);
+const configBootstrap = version => {
+  const key = `tool@${version}`;
+  return {
+    ...bootstrap,
+    importers: { '.': { ...bootstrap.importers['.'], configDependencies: {
+      tool: { specifier: version, version },
+    } } },
+    packages: { ...bootstrap.packages, [key]: { resolution: {} } },
+    snapshots: { ...bootstrap.snapshots, [key]: {} },
+  };
+};
+const configLock = version => `---\n${JSON.stringify(configBootstrap(version))}\n---\n${yaml}`;
+const updatedConfig = await converge(configLock('1.0.0'), configLock('2.0.0'), [],
+  { configuration: { configDependencies: { tool: '2.0.0' } } });
+assert.deepEqual(await (await parse(updatedConfig)).document('environment'), configBootstrap('2.0.0'));
 for (const result of await Promise.all([
   merge(managed, managedHandle, managed, modernContext),
   converge(managedHandle, managed, [{ importer: '.', before: modernRoot, after: modernRoot }], { configuration: {} }),

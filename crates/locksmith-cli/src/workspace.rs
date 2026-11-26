@@ -3,6 +3,7 @@ mod patterns;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -50,6 +51,25 @@ pub fn read_manifest(
     read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<Option<Value>> {
     Ok(read_named_manifest(dir, read)?.map(|(_, manifest)| manifest))
+}
+
+pub(super) fn read_regular_file(path: &Path) -> io::Result<Option<String>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Opening a FIFO with no writer must not block the manifest reader.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(Some(text))
 }
 
 pub(super) fn read_named_manifest(

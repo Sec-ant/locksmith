@@ -9,6 +9,57 @@ use serde_json::json;
 const EMPTY: &str = "lockfileVersion: '9.0'\nimporters: {'.': {}}\n";
 
 #[test]
+fn duplicate_snapshots_cannot_hide_independent_bootstrap_errors() {
+    let environment = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":"12.21.0","version":"12.21.0"}}}},
+        "packages":{"pnpm@12.21.0":{"resolution":{}},"spare@1.0.0":{"resolution":{}}},
+        "snapshots":{"pnpm@12.21.0":{},"spare@1.0.0":{}}
+    });
+    let good = format!("---\n{environment}\n---\n{EMPTY}");
+    let mut broken = environment.clone();
+    broken["snapshots"]["pnpm@12.21.0"]["dependencies"]["missing"] = json!("1.0.0");
+    let broken = broken.to_string();
+    let duplicate_spare = |text: &str| {
+        text.replace(
+            r#""spare@1.0.0":{}"#,
+            r#""spare@1.0.0":{},"spare@1.0.0":{"custom":"alternative"}"#,
+        )
+    };
+    let duplicated = duplicate_spare(&broken);
+    assert_ne!(broken, duplicated);
+    let mut missing_package = environment.clone();
+    missing_package["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("spare@1.0.0");
+    let raw = json!({});
+    let manifests = BTreeMap::from([(".".into(), json!({"packageManager":"pnpm@12.21.0"}))]);
+    for body in [
+        broken,
+        duplicated,
+        duplicate_spare(&missing_package.to_string()),
+    ] {
+        let other = format!("---\n{body}\n---\n{EMPTY}");
+        let [base, ours, theirs] =
+            [good.as_str(), other.as_str(), good.as_str()].map(MergeInput::from);
+        let (branches, config, prepared) = MergeTarget::Ours
+            .workspace_configurations(manifests.get("."), [base, ours, theirs], [&raw; 3], &raw)
+            .unwrap();
+        let result = prepared
+            .merge(&MergeContext {
+                target: MergeTarget::Ours,
+                registry: None,
+                manifests: &manifests,
+                configuration: &config,
+                configurations: branches.each_ref(),
+                patches: &BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(result.environment(), Some(&environment));
+    }
+}
+
+#[test]
 fn bootstrap_metadata_is_available_from_a_single_yaml_document() {
     let yaml = "lockfileVersion: '9.0'\nimporters:\n  .:\n    packageManagerDependencies:\n      pnpm: {specifier: 12.21.0, version: 12.21.0}\n    configDependencies:\n      tool: {specifier: 1.0.0, version: 1.0.0}\npackages:\n  tool@1.0.0: {resolution: {integrity: sha512-example}}\n";
     let declarations = json!({"tool":{

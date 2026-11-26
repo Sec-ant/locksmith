@@ -214,7 +214,7 @@ fn extend_dependencies(
         {
             continue;
         }
-        let actual_name = manifest::alias(&desired).map_or(name, |(name, _)| name);
+        let (actual_name, _) = sources.configuration.registry_request(name, &desired);
         let mut selected = None;
         for existing_patch in [true, false] {
             for (candidate_side, candidate) in
@@ -571,7 +571,8 @@ pub(super) fn repair_snapshot(
             } else {
                 old_version
             };
-            let actual_name = manifest::alias(desired).map_or(old_name, |(n, _)| n);
+            let dependency = if needs_override { name } else { old_name };
+            let (actual_name, _) = sources.configuration.registry_request(dependency, desired);
             let previous = previous.resolve(peers);
             let mut providers = previous.clone();
             if let Some(bindings) = peers.binding_context(side, &old_key, previous) {

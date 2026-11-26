@@ -128,6 +128,7 @@ fn javascript_class_paths(
         let text = &alt[class.clone()];
         let members = &text[1..text.len() - 1];
         let literal = (!members.contains('/') || crosses_dirs)
+            && !members.starts_with('!')
             && !members.contains([
                 '-', '*', '+', '?', '.', '^', '$', '{', '}', '(', ')', '|', '[', ']',
             ]);

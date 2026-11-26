@@ -469,7 +469,15 @@ pub(crate) fn records(
                     config,
                     format!("no locked resolution satisfies {spec}"),
                 );
-                if peer.is_some() {
+                if peer.is_some()
+                    && matches!(
+                        error,
+                        LockfileError::ResolutionRequired {
+                            request: Some(_),
+                            ..
+                        }
+                    )
+                {
                     // Ordinary dependencies, including aliases, can supply this peer on the next pass.
                     missing_peers.push(error);
                 } else {

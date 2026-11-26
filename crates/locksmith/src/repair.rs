@@ -56,7 +56,7 @@ impl RepairInput {
         Self::bootstrap_lockfile(text)?.0.recorded_pnpm_version()
     }
 
-    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, bool)> {
+    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
         // Ordinary project-only lockfiles need no preliminary parse. Quoted
         // keys can also spell a bootstrap field using escapes.
         if !text.contains("\n---")
