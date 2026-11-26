@@ -595,9 +595,16 @@ impl Members {
             };
             let mut ancestors: BTreeSet<_> = link.ancestors().skip(1).map(Path::to_owned).collect();
             if ancestors.insert(target.clone()) {
-                self.visit(&target, path, descend, &mut ancestors, &mut |id, _| {
-                    directories.insert(id.to_owned());
-                })?;
+                self.visit(
+                    &target,
+                    path,
+                    descend,
+                    &mut ancestors,
+                    false,
+                    &mut |id, _| {
+                        directories.insert(id.to_owned());
+                    },
+                )?;
             }
         }
         Ok(directories)
@@ -615,12 +622,19 @@ impl Members {
         for (id, descend) in &members.descend {
             let path = root.join(id).canonicalize()?;
             let mut ancestors = BTreeSet::from([path.clone()]);
-            members.visit(&path, id, descend, &mut ancestors, &mut |id, directory| {
-                let id = importer_id(root, id);
-                if !id.is_empty() {
-                    found.insert(id, directory.to_owned());
-                }
-            })?;
+            members.visit(
+                &path,
+                id,
+                descend,
+                &mut ancestors,
+                true,
+                &mut |id, directory| {
+                    let id = importer_id(root, id);
+                    if !id.is_empty() {
+                        found.insert(id, directory.to_owned());
+                    }
+                },
+            )?;
         }
         Ok(found)
     }
@@ -631,16 +645,61 @@ impl Members {
         id: &str,
         descend: &[Pattern],
         ancestors: &mut BTreeSet<PathBuf>,
-        found: &mut impl FnMut(&str, &Path),
+        split: bool,
+        found: &mut dyn FnMut(&str, &Path),
     ) -> Result<()> {
         let entries =
             fs::read_dir(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        if !split {
+            return self.visit_entries(entries, id, descend, ancestors, split, found);
+        }
+        let mut entries: Vec<_> = entries.collect();
+        if entries.len() < 32 {
+            return self.visit_entries(entries, id, descend, ancestors, split, found);
+        }
+        let later = entries.split_off(entries.len() / 2);
+        let mut later_ancestors = ancestors.clone();
+        std::thread::scope(|scope| -> Result<()> {
+            let later = scope.spawn(|| {
+                let mut discovered = Vec::new();
+                self.visit_entries(
+                    later,
+                    id,
+                    descend,
+                    &mut later_ancestors,
+                    false,
+                    &mut |id, directory| discovered.push((id.to_owned(), directory.to_owned())),
+                )
+                .map(|()| discovered)
+                .map_err(|error| error.to_string())
+            });
+            // Replay the second range in directory iteration order.
+            self.visit_entries(entries, id, descend, ancestors, false, found)?;
+            for (id, path) in later.join().expect("workspace directory reader panicked")? {
+                found(&id, &path);
+            }
+            Ok(())
+        })
+    }
+
+    fn visit_entries(
+        &self,
+        entries: impl IntoIterator<Item = std::io::Result<fs::DirEntry>>,
+        id: &str,
+        descend: &[Pattern],
+        ancestors: &mut BTreeSet<PathBuf>,
+        split: bool,
+        found: &mut dyn FnMut(&str, &Path),
+    ) -> Result<()> {
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if MANIFEST_NAMES.contains(&name) && !id.is_empty() && self.contains(id) {
-                found(id, directory);
+                found(
+                    id,
+                    entry.path().parent().expect("directory entry has a parent"),
+                );
             }
             if matches!(name, ".git" | "node_modules" | "bower_components") {
                 continue;
@@ -669,7 +728,7 @@ impl Members {
             };
             // Detect cycles on this branch; two aliases may both be genuine importer IDs.
             if ancestors.insert(path.clone()) {
-                self.visit(&path, &child, descend, ancestors, found)?;
+                self.visit(&path, &child, descend, ancestors, split, found)?;
                 ancestors.remove(&path);
             }
         }
