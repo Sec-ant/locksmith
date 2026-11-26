@@ -31,9 +31,9 @@ pub fn run(file: &Path, override_version: Option<node_semver::Version>, json: bo
         ))
     };
     let root = workspace::read_manifest(".", read)?.unwrap_or_default();
-    let version = override_version
-        .or_else(|| workspace::pnpm_version(&root))
-        .or_else(|| lock.recorded_pnpm_version());
+    let version = override_version.or_else(|| {
+        locksmith::WorkspaceConfig::project_pnpm_version(&root, lock.recorded_pnpm_version())
+    });
     let (config, _) = workspace::settings(&root, version.as_ref(), read)?;
     let rules = PeerRules::from_pnpm(&config, PeerVersionMatching::for_pnpm(version.as_ref()))?;
     let mut manifests = BTreeMap::new();

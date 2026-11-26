@@ -206,6 +206,66 @@ fn merge_resolves_partial_upper_bounds_with_boolean_deprecation_metadata() {
 }
 
 #[test]
+fn a_published_alias_can_supply_its_parents_auto_installed_peer() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([
+        (
+            "parent",
+            json!({"name":"parent","versions":{"1.0.0":{
+                "dependencies":{"alias":"npm:p@1.0.0"}, "peerDependencies":{"p":"^1.0.0"}
+            }}}),
+        ),
+        (
+            "p",
+            json!({"name":"p","dist-tags":{"latest":"1.1.0"},"versions":{"1.0.0":{},"1.1.0":{}}}),
+        ),
+    ]));
+    let config = json!({"registry":registry.base, "minimumReleaseAge":0,
+        "trustPolicy":"no-downgrade", "trustPolicyExclude":["parent@1.0.0","p@1.0.0"]});
+    let mut context = json!({"target":"ours","manifests":{".":{"dependencies":{"parent":"1.0.0"}}},
+        "configuration":config,"configurations":[config,config,config],"patches":{}});
+    write(root, "ctx", &context);
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}}}),
+    );
+    let merge = || {
+        run(
+            root,
+            CLI,
+            &[
+                "merge",
+                "lock",
+                "lock",
+                "lock",
+                "--context",
+                "ctx",
+                "--allow-network",
+            ],
+        )
+    };
+    let graph = output(merge());
+    let pin = graph["importers"]["."]["dependencies"]["parent"]["version"]
+        .as_str()
+        .unwrap();
+    let deps = &graph["snapshots"][format!("parent@{pin}")]["dependencies"];
+    assert_eq!(deps["alias"], "p@1.0.0");
+    assert_eq!(deps["p"], "1.0.0");
+    assert!(graph["packages"].get("p@1.1.0").is_none());
+    context["configuration"]["trustPolicyExclude"] = json!(["parent@1.0.0"]);
+    write(root, "ctx", &context);
+    let rejected = merge();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("p@1.0.0 requires publication trust evidence")
+    );
+    assert_eq!(registry.finish().len(), 4);
+}
+
+#[test]
 fn convergence_recovers_an_original_range_only_when_it_can_reuse_a_baseline_pin() {
     let dir = tempdir().unwrap();
     let root = dir.path();

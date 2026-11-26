@@ -16,11 +16,7 @@ pub(super) fn decode<T: DeserializeOwned>(raw: Value) -> Result<T> {
 }
 
 fn configuration(raw: &Value, manifest: Option<&Value>) -> Result<WorkspaceConfig> {
-    let manager = raw
-        .get("packageManager")
-        .or_else(|| manifest?.get("packageManager"));
-    match manager {
-        None => WorkspaceConfig::from_pnpm(raw),
+    let version = match raw.get("packageManager") {
         Some(manager) => {
             let version = manager
                 .as_str()
@@ -31,8 +27,13 @@ fn configuration(raw: &Value, manifest: Option<&Value>) -> Result<WorkspaceConfi
                         "packageManager must be an exact pnpm@version".into(),
                     )
                 })?;
-            WorkspaceConfig::from_pnpm_version(raw, &version)
+            Some(version)
         }
+        None => manifest.and_then(|root| WorkspaceConfig::project_pnpm_version(root, None)),
+    };
+    match version {
+        Some(version) => WorkspaceConfig::from_pnpm_version(raw, &version),
+        None => WorkspaceConfig::from_pnpm(raw),
     }
 }
 

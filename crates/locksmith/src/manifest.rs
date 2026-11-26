@@ -5,16 +5,62 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
-pub(crate) fn pnpm_specifier(manifest: &Value) -> Option<&str> {
-    let declared = manifest
-        .get("packageManager")?
-        .as_str()?
-        .strip_prefix("pnpm@")?;
-    Some(
-        declared
-            .split_once("+sha")
-            .map_or(declared, |(spec, _)| spec),
-    )
+pub(crate) struct PnpmManager<'a> {
+    pub specifier: &'a str,
+    pub requires_pin: bool,
+    on_fail: Option<&'a str>,
+}
+
+impl<'a> PnpmManager<'a> {
+    pub fn managed(manifest: &'a Value, config: Option<&WorkspaceConfig>) -> Option<Self> {
+        let manager = Self::declared(manifest, config.and_then(|c| c.pnpm_version.as_ref()))?;
+        let policy = config
+            .and_then(|c| c.pm_on_fail.as_deref())
+            .or(manager.on_fail);
+        (policy != Some("ignore")).then_some(manager)
+    }
+
+    pub fn declared(manifest: &'a Value, runner: Option<&node_semver::Version>) -> Option<Self> {
+        let engines = &manifest["devEngines"]["packageManager"];
+        let (engine, default_policy) = match engines.as_array() {
+            Some(engines) => {
+                let index = engines
+                    .iter()
+                    .position(|e| e["name"] == "pnpm")
+                    .unwrap_or(0);
+                (
+                    engines.get(index),
+                    (index + 1 < engines.len()).then_some("ignore"),
+                )
+            }
+            None => (Some(engines), None),
+        };
+        if runner.is_none_or(|v| v.major() >= 11)
+            && let Some(engine) =
+                engine.filter(|e| e["name"].as_str().is_some_and(|s| !s.is_empty()))
+        {
+            let specifier = engine["version"].as_str()?;
+            if engine["name"] != "pnpm" || specifier.parse::<node_semver::Range>().is_err() {
+                return None;
+            }
+            return Some(Self {
+                specifier,
+                requires_pin: true,
+                on_fail: engine["onFail"].as_str().or(default_policy),
+            });
+        }
+        let declared = manifest["packageManager"].as_str()?.strip_prefix("pnpm@")?;
+        let specifier = declared.split('+').next()?;
+        let version = specifier.parse::<node_semver::Version>().ok()?;
+        if version.to_string() != specifier {
+            return None;
+        }
+        Some(Self {
+            specifier,
+            requires_pin: version.major() >= 12,
+            on_fail: None,
+        })
+    }
 }
 
 pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {

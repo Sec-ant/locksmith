@@ -166,6 +166,8 @@ pub struct WorkspaceConfig {
     pub override_tie_break: OverrideTieBreak,
     /// pnpm release responsible for this resolution, when known.
     pub pnpm_version: Option<node_semver::Version>,
+    /// Workspace override for the package manager declaration's `onFail` policy.
+    pub pm_on_fail: Option<String>,
     /// Path representation to use in peer snapshot identifiers.
     pub linked_peer_encoding: LinkedPeerEncoding,
     /// Declared package selectors mapped to workspace-relative patch file paths.
@@ -176,6 +178,21 @@ pub struct WorkspaceConfig {
     pub extension_checksum: Option<ExtensionChecksum>,
 }
 impl WorkspaceConfig {
+    /// Read the project's pnpm version, using its locked version for a compatible range
+    /// or when the manifest leaves the version unspecified.
+    pub fn project_pnpm_version(
+        manifest: &Value,
+        recorded: Option<node_semver::Version>,
+    ) -> Option<node_semver::Version> {
+        let Some(manager) = crate::manifest::PnpmManager::declared(manifest, None) else {
+            return recorded;
+        };
+        manager.specifier.parse().ok().or_else(|| {
+            let range = manager.specifier.parse().ok()?;
+            recorded.filter(|v| v.satisfies_with_prerelease(&range, true))
+        })
+    }
+
     /// Decode workspace settings using the lockfile conventions of this pnpm release.
     ///
     /// # Errors
@@ -403,6 +420,7 @@ impl WorkspaceConfig {
             overrides: string_rules(value, "overrides")?,
             override_tie_break: OverrideTieBreak::default(),
             pnpm_version: None,
+            pm_on_fail: decode(value, "pmOnFail")?,
             linked_peer_encoding: LinkedPeerEncoding::default(),
             patches: decode::<Option<_>>(value, "patchedDependencies")?.flatten(),
             patch_encoding: PatchEncoding::default(),

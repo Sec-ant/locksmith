@@ -30,7 +30,7 @@ impl Repo {
         repo.write(".gitattributes", "/pnpm-lock.yaml merge=locksmith\n");
         repo.write(
             "pnpm-workspace.yaml",
-            "packages:\n  - 'apps/*'\n  - '!apps/ignored'\n",
+            "packages:\n  - 'apps/*'\n  - '!apps/ignored'\npmOnFail: ignore\n",
         );
         repo.write(
             "package.json",
@@ -346,7 +346,7 @@ fn converge_across_a_pnpm_upgrade_keeps_baseline_pins_and_applies_final_override
     r.commit("before upgrade");
     r.write(
         "pnpm-workspace.yaml",
-        "packages: []\nallowBuilds: {}\noverrides: {'plugin>color': '-'}\n",
+        "packages: []\npmOnFail: ignore\nallowBuilds: {}\noverrides: {'plugin>color': '-'}\n",
     );
     r.write("package.json", &manifest("12.21.0"));
     r.write("pnpm-lock.yaml", &make("1.1.0", false));
@@ -384,7 +384,7 @@ fn converge_accepts_changes_to_an_ignored_explicit_hook_across_pnpm_versions() {
     let repo = Repo::new();
     repo.write(
         "pnpm-workspace.yaml",
-        "packages: ['apps/*']\nignorePnpmfile: true\npnpmfile: hooks/custom.cjs\n",
+        "packages: ['apps/*']\npmOnFail: ignore\nignorePnpmfile: true\npnpmfile: hooks/custom.cjs\n",
     );
     repo.write("hooks/custom.cjs", "module.exports = {};\n");
     repo.commit("ignore the workspace hook");
@@ -595,7 +595,7 @@ fn a_pnpm_upgrade_preserves_the_new_resolvers_peers_and_mainline_additions() {
         "target":"ours",
         "manifests":{".":{"packageManager":"pnpm@12.21.0","dependencies":{"widget":"1.0.0","extra":"1.0.0"}}},
         "configurations":[older,older,{"packageManager":"pnpm@12.21.0"}],
-        "configuration":{"linkWorkspacePackages":false}, "patches":{}
+        "configuration":{"linkWorkspacePackages":false,"pmOnFail":"ignore"}, "patches":{}
     });
     fs::write(dir.path().join("context.json"), context.to_string()).unwrap();
     let out = Command::new(CLI)
@@ -1111,7 +1111,7 @@ fn repair_uses_the_hook_setting_supported_by_each_pnpm_version() {
             repo.write(".npmrc", npmrc);
             repo.write(
                 "pnpm-workspace.yaml",
-                &format!("packages: ['apps/*']\n{yaml}"),
+                &format!("packages: ['apps/*']\npmOnFail: ignore\n{yaml}"),
             );
             let mut recorded = lock.clone();
             if active {
@@ -1452,7 +1452,7 @@ fn validate_allows_omitted_implicit_workspace_links_supported_by_pnpm() {
             root,
             "pnpm-workspace.yaml",
             format!(
-                "packages: [lib]\nexcludeLinksFromLockfile: true\nlinkWorkspacePackages: {linking}\ncatalog: {{lib: '^1'}}\n"
+                "packages: [lib]\npmOnFail: ignore\nexcludeLinksFromLockfile: true\nlinkWorkspacePackages: {linking}\ncatalog: {{lib: '^1'}}\n"
             ),
         );
         let lock = json!({"lockfileVersion":"9.0","settings":{"excludeLinksFromLockfile":true},"importers":{".":{},"lib":{}}});
@@ -1625,7 +1625,7 @@ fn validate_rejects_mismatched_recorded_resolution_settings() {
         write_input(
             root,
             "pnpm-workspace.yaml",
-            format!("packages: []\n{field}: {configured}\n"),
+            format!("packages: []\npmOnFail: ignore\n{field}: {configured}\n"),
         );
         for (value, status) in [
             (json!({}), 1),
@@ -1749,7 +1749,7 @@ fn validate_filters_ignored_optional_declarations_before_selecting_the_dependenc
         write_input(
             root,
             "pnpm-workspace.yaml",
-            json!({"packages":[], "ignoredOptionalDependencies":rules}),
+            json!({"packages":[], "pmOnFail":"ignore", "ignoredOptionalDependencies":rules}),
         );
         let mut recorded = rules.clone();
         recorded.sort_unstable();
@@ -1809,7 +1809,11 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
             "package.json",
             json!({"packageManager":format!("pnpm@{manager}"),"dependencies":{"lib":spec}}),
         );
-        write_input(&root, "pnpm-workspace.yaml", json!({"packages":globs}));
+        write_input(
+            &root,
+            "pnpm-workspace.yaml",
+            json!({"packages":globs,"pmOnFail":"ignore"}),
+        );
         let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":format!("link:{member}")}}}}});
         if has_importer {
             lock["importers"][member] = json!({});
@@ -1828,7 +1832,7 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
     write_input(
         &root,
         "pnpm-workspace.yaml",
-        "packages: ['linked/*']\nlinkWorkspacePackages: true\nexcludeLinksFromLockfile: true",
+        "packages: ['linked/*']\npmOnFail: ignore\nlinkWorkspacePackages: true\nexcludeLinksFromLockfile: true",
     );
     write_input(
         &root,
@@ -1895,7 +1899,13 @@ fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() 
         }
         write_input(&root, "package.json", &manifest);
         write_input(&root, "pnpm-workspace.yaml", yaml);
-        write_input(&root, "pnpm-lock.yaml", &lock);
+        let project = lock.to_string();
+        let lock = if version.starts_with("12.") {
+            with_recorded_manager(version, &project)
+        } else {
+            project
+        };
+        write_input(&root, "pnpm-lock.yaml", lock);
         check_workspace(&root, code, (version, yaml));
     }
 }
@@ -1958,7 +1968,9 @@ fn validate_checks_recorded_range_links_for_the_releases_that_verify_them() {
             write_input(
                 root,
                 "pnpm-workspace.yaml",
-                format!("packages: [{members}]\nlinkWorkspacePackages: {enabled}\n"),
+                format!(
+                    "packages: [{members}]\npmOnFail: ignore\nlinkWorkspacePackages: {enabled}\n"
+                ),
             );
             let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"lib":{"specifier":spec,"version":"link:lib"}}}}});
             if !members.is_empty() {
@@ -2324,7 +2336,8 @@ fn workspace_commands_preserve_an_ignored_optional_dependency_even_when_another_
 #[test]
 fn writing_mixed_optional_exclusions_preserves_the_installers_choices() {
     let r = Repo::new();
-    let settings = json!({"packages":[],"ignoredOptionalDependencies":["*","!keep"]});
+    let settings =
+        json!({"packages":[],"pmOnFail":"ignore","ignoredOptionalDependencies":["*","!keep"]});
     let mut failures = Vec::new();
     for (version, recorded, filters_on_install, frozen) in [
         ("10.34.9", json!(["!keep", "*"]), true, 0),
@@ -2407,7 +2420,7 @@ fn validate_uses_the_effective_project_scoped_optional_peers_setting() {
         write_input(
             root,
             "pnpm-workspace.yaml",
-            json!({"packages":[],
+            json!({"packages":[],"pmOnFail":"ignore",
             "projectScopedOptionalPeers":configured,"dedupePeerDependents":dedupe}),
         );
         let mut lock = json!({"lockfileVersion":"9.0","settings":{},"importers":{".":{}}});
@@ -2423,7 +2436,11 @@ fn validate_uses_the_effective_project_scoped_optional_peers_setting() {
 fn validate_ignores_a_newer_peer_header_on_versions_that_do_not_check_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write_input(root, "pnpm-workspace.yaml", "packages: []");
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        "packages: []\npmOnFail: ignore",
+    );
     write_input(
         root,
         "pnpm-lock.yaml",
@@ -2450,7 +2467,11 @@ fn validate_ignores_a_newer_peer_header_on_versions_that_do_not_check_it() {
 fn package_json_overrides_apply_only_to_the_pnpm_versions_that_read_them() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write_input(root, "pnpm-workspace.yaml", "packages: []");
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        "packages: []\npmOnFail: ignore",
+    );
     for (version, legacy) in [
         ("9.15.9", true),
         ("10.34.9", true),
@@ -2632,17 +2653,116 @@ fn repair_reads_the_committed_target_of_a_workspace_directory_link() {
         "sources/tool/package.json",
         r#"{"name":"tool","dependencies":{"leaf":"link:../../leaf"}}"#,
     );
-    std::os::unix::fs::symlink("../sources/tool", r.0.path().join("apps/tool")).unwrap();
     let mut doc = graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
-    doc["importers"]["apps/tool"] = json!({"dependencies":{"leaf":{"specifier":"link:../../leaf","version":"link:../../leaf"}}});
+    for (id, target) in [
+        ("apps/tool", "../sources/tool"),
+        ("apps/alias", "./../sources/./tool"),
+    ] {
+        std::os::unix::fs::symlink(target, r.0.path().join(id)).unwrap();
+        doc["importers"][id] = json!({"dependencies":{"leaf":{"specifier":"link:../../leaf","version":"link:../../leaf"}}});
+    }
+    std::os::unix::fs::symlink("./../apps", r.0.path().join("apps/ancestor")).unwrap();
+    std::os::unix::fs::symlink("./self", r.0.path().join("apps/self")).unwrap();
     let source = doc.to_string();
     r.write("pnpm-lock.yaml", &source);
     r.commit("include linked workspace");
     fs::remove_file(r.0.path().join("apps/tool")).unwrap();
+    fs::remove_file(r.0.path().join("apps/alias")).unwrap();
     r.write("sources/tool/package.json", "{}");
     let out = r.cmd(CLI, &["repair", "HEAD"]);
     assert!(out.status.success(), "{}", report(&out));
     assert_eq!(out.stdout, source.as_bytes());
+    std::os::unix::fs::symlink("../../outside", r.0.path().join("apps/escape")).unwrap();
+    r.commit("record an external workspace link");
+    let outside = r.cmd(CLI, &["repair", "HEAD"]);
+    assert!(!outside.status.success());
+    assert!(
+        report(&outside).contains("leaves the committed Git tree"),
+        "{}",
+        report(&outside)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn only_non_utf8_conflicts_reached_through_a_manifest_link_block_the_driver() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    for linked in [true, false] {
+        let r = Repo::new();
+        // Construct the raw tree entries in Git's index. Some filesystems cannot
+        // check out the target filename even though Git can merge its revisions.
+        let stage = |mode: &str, path: &[u8], data: &[u8]| {
+            fs::write(r.0.path().join("content"), data).unwrap();
+            let id = r.git(&["hash-object", "-w", "content"]);
+            let result = Command::new("git")
+                .current_dir(r.0.path())
+                .args(["update-index", "--add", "--cacheinfo", mode, id.trim()])
+                .arg(OsStr::from_bytes(path))
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{}", report(&result));
+        };
+        let target = b"tool-\xff.json";
+        stage(
+            "120000",
+            b"apps/tool/package.json",
+            if linked {
+                b"../../tool-\xff.json"
+            } else {
+                b"../../package.json"
+            },
+        );
+        let revision = |side: &str, parent: &str| {
+            r.side(side);
+            r.git(&["add", "apps/web/package.json", "pnpm-lock.yaml"]);
+            if side == "theirs" {
+                let out = Command::new("git")
+                    .current_dir(r.0.path())
+                    .args(["update-index", "--force-remove", "--"])
+                    .arg(OsStr::from_bytes(target))
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{}", report(&out));
+            } else {
+                stage(
+                    "100644",
+                    target,
+                    json!({"name":side}).to_string().as_bytes(),
+                );
+            }
+            fs::copy(r.0.path().join("pnpm-lock.yaml"), r.0.path().join(side)).unwrap();
+            let tree = r.git(&["write-tree"]);
+            r.git(&["commit-tree", tree.trim(), "-p", parent, "-m", side])
+                .trim()
+                .to_owned()
+        };
+        let base = revision("base", "HEAD");
+        let ours = revision("ours", &base);
+        let theirs = revision("theirs", &base);
+        r.git(&["update-ref", "refs/heads/main", &ours]);
+        let out = Command::new(CLI)
+            .current_dir(r.0.path())
+            .env(format!("GITHEAD_{theirs}"), "theirs")
+            .args([
+                "merge",
+                "--git-driver",
+                "base",
+                "ours",
+                "theirs",
+                "pnpm-lock.yaml",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), !linked, "{}", report(&out));
+        if linked {
+            assert!(
+                report(&out).contains("resolve dependency configuration first"),
+                "{}",
+                report(&out)
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

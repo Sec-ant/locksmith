@@ -25,13 +25,13 @@ pub const CONFIG_FILES: &[&str] = &[
 pub const DEFAULT_HOOK_FILES: [&str; 2] = [".pnpmfile.mjs", ".pnpmfile.cjs"];
 
 pub fn check_conflicts(
-    conflicts: &BTreeSet<String>,
+    conflicts: &BTreeSet<Vec<u8>>,
     relevant: impl Fn(&str) -> bool,
 ) -> Result<()> {
     let paths: Vec<_> = conflicts
         .iter()
+        .filter_map(|p| std::str::from_utf8(p).ok())
         .filter(|p| relevant(p))
-        .map(String::as_str)
         .collect();
     if !paths.is_empty() {
         return Err(format!(
@@ -112,7 +112,7 @@ impl Project {
         recorded_version: Option<node_semver::Version>,
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
-        let version = pnpm_version(&root).or(recorded_version);
+        let version = locksmith::WorkspaceConfig::project_pnpm_version(&root, recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
@@ -143,10 +143,7 @@ impl Project {
 }
 
 pub fn pnpm_version(root: &Value) -> Option<node_semver::Version> {
-    root["packageManager"]
-        .as_str()
-        .and_then(|v| v.strip_prefix("pnpm@"))
-        .and_then(|v| v.parse::<node_semver::Version>().ok())
+    locksmith::WorkspaceConfig::project_pnpm_version(root, None)
 }
 
 /// Read the package-manager settings shared by workspace operations and inspection.
@@ -229,7 +226,7 @@ pub fn manifests(
         let members = Members::new(project)?;
         let mut paths = BTreeMap::new();
         let root = format!("{tree}:{}", prefix.trim_end_matches('/'));
-        members.committed_paths(&root, "", tree, prefix, &mut paths)?;
+        members.committed_paths(&root, "", tree, prefix, &mut paths, blobs)?;
         git::prefetch_manifests(paths.values().map(|(_, id)| id.as_str()))?;
         for (id, (name, oid)) in paths {
             let text = blobs
@@ -611,24 +608,18 @@ impl Members {
         tree: &str,
         prefix: &str,
         found: &mut BTreeMap<String, (String, String)>,
+        blobs: &mut Blobs,
     ) -> Result<()> {
         let listing = git::output_bytes(&["ls-tree", "-rz", "--full-tree", object])?;
-        for entry in listing.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-            let tab = entry
-                .iter()
-                .position(|&b| b == b'\t')
-                .ok_or("invalid Git tree entry")?;
-            let (header, path) = entry.split_at(tab);
-            let Ok(path) = std::str::from_utf8(&path[1..]) else {
-                continue;
-            };
-            let mut fields = std::str::from_utf8(header)?.split_whitespace();
-            let mode = fields.next().ok_or("missing Git entry mode")?;
-            if fields.next() != Some("blob") {
+        for entry in git::entries(&listing) {
+            let (kind, oid, path) = entry?;
+            if !matches!(kind, git::ObjectKind::Blob | git::ObjectKind::Symlink) {
                 continue;
             }
-            let oid = fields.next().ok_or("missing Git blob ID")?;
-            if mode != "120000"
+            let Ok(path) = std::str::from_utf8(path) else {
+                continue;
+            };
+            if kind != git::ObjectKind::Symlink
                 && !MANIFEST_NAMES.contains(&path.rsplit('/').next().expect("path component"))
             {
                 continue;
@@ -641,18 +632,18 @@ impl Members {
             let manifest = logical
                 .rsplit_once('/')
                 .filter(|(id, name)| MANIFEST_NAMES.contains(name) && self.contains(id));
-            if mode == "120000" {
+            if kind == git::ObjectKind::Symlink {
                 let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
                 let directory = self.may_visit(&logical, descend);
                 if manifest.is_none() && !directory {
                     continue;
                 }
-                let Some((kind, target)) = git::linked_object(tree, prefix, &logical)? else {
+                let Some((kind, target)) = blobs.linked_object(tree, prefix, &logical)? else {
                     continue;
                 };
-                if kind == "tree" && directory {
-                    self.committed_paths(&target, &logical, tree, prefix, found)?;
-                } else if kind == "blob"
+                if kind == git::ObjectKind::Tree && directory {
+                    self.committed_paths(&target, &logical, tree, prefix, found, blobs)?;
+                } else if kind == git::ObjectKind::Blob
                     && let Some((id, name)) = manifest
                 {
                     Self::record_manifest(found, id, name, &target);

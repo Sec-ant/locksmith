@@ -9,6 +9,10 @@ use std::{
 
 use super::Result;
 
+mod tree;
+use tree::TreeEntry;
+pub(crate) use tree::{ObjectKind, entries};
+
 pub fn output(args: &[&str]) -> Result<String> {
     checked(Command::new("git").args(args))
 }
@@ -191,7 +195,7 @@ pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget>
     )
 }
 
-pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<String>)> {
+pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<Vec<u8>>)> {
     let [base, ours, theirs] = &inputs.revisions;
     // Git 2.38 can preview a merge but cannot specify its base explicitly.
     // Give HEAD's tree the original parent for this preview only. No ref moves.
@@ -252,9 +256,8 @@ pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<String>)> 
     Ok((
         tree.into(),
         records
-            .filter_map(|field| std::str::from_utf8(field).ok())
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+            .filter(|field| !field.is_empty())
+            .map(<[u8]>::to_vec)
             .collect(),
     ))
 }
@@ -266,128 +269,6 @@ pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
         return Err(failure(&output).into());
     }
     Ok(output.stdout)
-}
-
-/// merge-tree reports physical paths, while a workspace can read the same
-/// configuration through a chain of directory or file symlinks.
-pub fn check_linked_conflicts(
-    tree: &str,
-    conflicts: &BTreeSet<String>,
-    inputs: impl Iterator<Item = String>,
-    blobs: &mut Blobs,
-) -> Result<()> {
-    let entries = output_bytes(&["ls-tree", "-rz", "--full-tree", tree])?;
-    let links: BTreeMap<_, _> = entries
-        .split(|&b| b == 0)
-        .filter_map(|entry| std::str::from_utf8(entry.strip_prefix(b"120000 blob ")?).ok())
-        .filter_map(|entry| entry.split_once('\t').map(|(id, path)| (path, id)))
-        .collect();
-    if !links.is_empty() {
-        let mut checker = LinkedConflicts {
-            links,
-            conflicts,
-            blobs,
-        };
-        for input in inputs {
-            checker.follow(&input, &mut Vec::new(), &mut BTreeSet::new())?;
-        }
-    }
-    Ok(())
-}
-
-struct LinkedConflicts<'a> {
-    links: BTreeMap<&'a str, &'a str>,
-    conflicts: &'a BTreeSet<String>,
-    blobs: &'a mut Blobs,
-}
-
-impl LinkedConflicts<'_> {
-    // False means that this path leaves the tree or loops before reaching an input.
-    fn follow(
-        &mut self,
-        path: &str,
-        parts: &mut Vec<String>,
-        active: &mut BTreeSet<String>,
-    ) -> Result<bool> {
-        if path.starts_with('/') {
-            return Ok(false);
-        }
-        for part in path.split('/') {
-            match part {
-                "" | "." => continue,
-                ".." => {
-                    if parts.pop().is_none() {
-                        return Ok(false);
-                    }
-                    continue;
-                }
-                _ => parts.push(part.to_owned()),
-            }
-            let current = parts.join("/");
-            if self.conflicts.contains(&current) {
-                return Err(format!("resolve dependency configuration first:\n  {current}").into());
-            }
-            if let Some(id) = self.links.get(current.as_str()) {
-                if !active.insert(current.clone()) {
-                    return Ok(false);
-                }
-                parts.pop();
-                let target = self
-                    .blobs
-                    .read_object(id)?
-                    .ok_or_else(|| format!("missing symlink at {current}"))?;
-                if !self.follow(&target, parts, active)? {
-                    return Ok(false);
-                }
-                active.remove(&current);
-            }
-        }
-        Ok(true)
-    }
-}
-
-/// Follow links in the committed tree. Git resolves intermediate links and
-/// distinguishes a missing target from a target outside the repository.
-pub fn linked_object(tree: &str, prefix: &str, path: &str) -> Result<Option<(String, String)>> {
-    if path.contains(['\n', '\r']) {
-        return Err(format!("unsupported linked path {path:?}").into());
-    }
-    let mut queries = format!("{tree}:{}\n", prefix.trim_end_matches('/'));
-    for (at, _) in path.match_indices('/') {
-        queries.push_str(&format!("{tree}:{prefix}{}\n", &path[..at]));
-    }
-    queries.push_str(&format!("{tree}:{prefix}{path}\n"));
-    let result = with_input(
-        &[
-            "cat-file",
-            "--batch-check=%(objecttype) %(objectname)",
-            "--follow-symlinks",
-        ],
-        queries.as_bytes(),
-    )?;
-    let response = checked_output(result)?;
-    let mut records = response.lines();
-    let ancestors = records
-        .by_ref()
-        .take(path.matches('/').count() + 1)
-        .collect::<BTreeSet<_>>();
-    let target = records.next().ok_or("missing linked Git object response")?;
-    if target.starts_with("loop ")
-        || target.starts_with("dangling ")
-        || target.ends_with(" missing")
-        || target.starts_with("notdir ")
-        || ancestors.contains(target)
-    {
-        return Ok(None);
-    }
-    if target.starts_with("symlink ") {
-        return Err(format!("linked path {prefix}{path} leaves the committed Git tree").into());
-    }
-    let (kind, id) = target
-        .split_once(' ')
-        .filter(|(_, id)| oid(id))
-        .ok_or("invalid linked Git object")?;
-    Ok(Some((kind.into(), id.into())))
 }
 
 /// Fetch missing selected blobs together on a blobless clone, including link targets.
@@ -496,6 +377,7 @@ fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
 
 /// The single cat-file process reads just the configuration blobs requested.
 pub struct Blobs {
+    directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -503,27 +385,27 @@ pub struct Blobs {
 impl Blobs {
     pub fn open() -> Result<Self> {
         let mut child = Command::new("git")
-            .args(["cat-file", "--batch", "--follow-symlinks"])
+            .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
         let input = child.stdin.take().expect("piped git stdin");
         let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
         Ok(Self {
+            directories: BTreeMap::new(),
             child,
             input,
             output,
         })
     }
 
-    pub fn read(&mut self, tree: &str, path: &str) -> Result<Option<String>> {
-        if path.contains(['\n', '\r', '\0']) {
-            return Err(format!("unsupported configuration path {path:?}").into());
-        }
-        self.read_object(&format!("{tree}:{path}"))
+    pub fn read_object(&mut self, object: &str) -> Result<Option<String>> {
+        self.bytes(object)?
+            .map(|bytes| String::from_utf8(bytes).map_err(|e| format!("{object}: {e}").into()))
+            .transpose()
     }
 
-    pub fn read_object(&mut self, object: &str) -> Result<Option<String>> {
+    fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
         let input = &mut self.input;
         writeln!(input, "{object}")?;
         input.flush()?;
@@ -547,9 +429,7 @@ impl Blobs {
         if delimiter[0] != b'\n' {
             return Err("invalid git cat-file response".into());
         }
-        Ok(Some(
-            String::from_utf8(bytes).map_err(|e| format!("{object}: {e}"))?,
-        ))
+        Ok(Some(bytes))
     }
 }
 impl Drop for Blobs {

@@ -1,6 +1,6 @@
 //! Metadata transport and registry selection. Constructed only after a local miss.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     env, fs,
     io::{BufReader, ErrorKind},
     path::{Path, PathBuf},
@@ -108,7 +108,7 @@ pub fn resolve(
     purpose: Lookup,
     network: Option<ProjectRc<'_>>,
     config: &Value,
-    root: &Value,
+    pnpm_major: Option<u64>,
     mut solve: impl FnMut(
         Option<&RegistryMetadata>,
     )
@@ -121,62 +121,58 @@ pub fn resolve(
     };
     let mut data = RegistryMetadata::default();
     let mut registry = None;
-    let mut supplied = BTreeSet::new();
+    let mut fetch = |request: &RegistryRequest, data: &mut RegistryMetadata, direct| {
+        let client = match &mut registry {
+            Some(client) => client,
+            None => registry.insert(Registry::new(config, pnpm_major, project)?),
+        };
+        client.satisfy(request, data, direct)
+    };
+    let mut attempts = BTreeMap::new();
     loop {
         let errors = match solve(Some(&data)) {
             Ok(lock) => return Ok(lock),
             Err(errors) => errors,
         };
-        let mut batch = BTreeSet::new();
-        for error in errors {
+        let mut progress = false;
+        let mut unresolved = None;
+        for mut error in errors {
             let locksmith::LockfileError::ResolutionRequired {
                 request: Some(ref request),
                 ref path,
-                ..
+                ref mut message,
             } = error
             else {
                 return Err(error.into());
             };
-            if !batch.insert(request.clone()) {
-                continue;
-            }
-            if !supplied.insert(request.clone()) {
-                return Err(error.into());
-            }
-            let fetched = (|| {
-                let client = match &mut registry {
-                    Some(client) => client,
-                    None => registry.insert(Registry::new(config, root, project)?),
-                };
-                client.satisfy(
-                    request,
-                    &mut data,
-                    path.first().is_some_and(|s| s == "importers"),
-                )
-            })();
-            if let Err(error) = fetched {
-                if purpose == Lookup::Converge
-                    && let RegistryRequest::Manifest { name, version } = request.as_ref()
-                {
-                    data.skip_manifest(name, version);
-                    eprintln!(
-                        "locksmith: keeping installed dependency pins for {name}@{version}: {error}"
-                    );
-                } else {
-                    return Err(locksmith::LockfileError::ResolutionRequired {
-                        path: path.clone(),
-                        message: error.to_string(),
-                        request: Some(request.clone()),
+            let failure = attempts.entry(request.clone()).or_insert_with(|| {
+                let fetched = fetch(request, &mut data, path.first().is_some_and(|s| s == "importers"));
+                if let Err(reason) = fetched {
+                    if purpose == Lookup::Converge
+                        && let RegistryRequest::Manifest { name, version } = request.as_ref()
+                    {
+                        data.skip_manifest(name, version);
+                        eprintln!("locksmith: keeping installed dependency pins for {name}@{version}: {reason}");
+                    } else {
+                        return Some(reason.to_string());
                     }
-                    .into());
                 }
+                progress = true;
+                None
+            });
+            if let Some(reason) = failure {
+                message.clone_from(reason);
             }
+            unresolved.get_or_insert(error);
+        }
+        if !progress {
+            return Err(unresolved.expect("resolution error").into());
         }
     }
 }
 
 impl Registry {
-    fn new(workspace: &Value, root: &Value, project: ProjectRc<'_>) -> Result<Self> {
+    fn new(workspace: &Value, pnpm_major: Option<u64>, project: ProjectRc<'_>) -> Result<Self> {
         let mut rc = BTreeMap::new();
         let home = env::var_os("HOME").map(PathBuf::from);
         let user = env::var_os("PNPM_CONFIG_NPMRC_AUTH_FILE")
@@ -278,10 +274,6 @@ impl Registry {
                 config[field] = serde_json::from_str(v).unwrap_or_else(|_| Value::from(v));
             }
         }
-        let major = root["packageManager"]
-            .as_str()
-            .and_then(|s| s.strip_prefix("pnpm@"))
-            .and_then(|s| s.split('.').next()?.parse::<u64>().ok());
         let min_age = match config.get("minimumReleaseAge") {
             Some(v) => v
                 .as_u64()
@@ -290,7 +282,7 @@ impl Registry {
                 .get("minimum-release-age")
                 .map(|s| s.parse())
                 .transpose()?
-                .unwrap_or(if major.is_some_and(|v| v >= 11) {
+                .unwrap_or(if pnpm_major.is_some_and(|v| v >= 11) {
                     1440
                 } else {
                     0

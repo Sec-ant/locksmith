@@ -68,7 +68,11 @@ pub fn with_context<P: AsRef<Path>>(
         crate::registry::Lookup::Merge,
         network,
         raw,
-        &context.manifests["."],
+        context
+            .configuration
+            .pnpm_version
+            .as_ref()
+            .map(|v| v.major()),
         |registry| {
             let context = MergeContext {
                 registry,

@@ -54,9 +54,11 @@ fn unchanged_pnpm_configuration_can_be_supplied_once() {
     let before = json!({"packageManager":"pnpm@12.21.0"});
     let after =
         json!({"packageManager":"pnpm@12.21.0","pnpm":{"ignoredBuiltDependencies":["tool"]}});
-    let config =
-        locksmith::WorkspaceConfig::from_pnpm_version(&json!({}), &"12.21.0".parse().unwrap())
-            .unwrap();
+    let config = locksmith::WorkspaceConfig::from_pnpm_version(
+        &json!({"pmOnFail":"ignore"}),
+        &"12.21.0".parse().unwrap(),
+    )
+    .unwrap();
     for baseline_configuration in [None, Some(&config)] {
         let output = converge(
             &input,

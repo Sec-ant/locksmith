@@ -133,7 +133,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         crate::registry::Lookup::Converge,
         allow_network.then_some(crate::registry::ProjectRc::Working),
         &working.config,
-        &after["."],
+        working.pnpm_version.as_ref().map(|v| v.major()),
         |registry| {
             locksmith::converge_with_recorded_baselines(
                 &baseline,

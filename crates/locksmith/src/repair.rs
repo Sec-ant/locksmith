@@ -110,8 +110,8 @@ impl RepairInput {
             if !issues.is_empty() {
                 return Err(LockfileError::InvalidGraph(issues));
             }
-            lock.check_package_manager(root)?;
         }
+        lock.check_package_manager(root, Some(context.configuration))?;
         let mut evidence = Evidence::new(lock, context);
         let current = (lock, context.configuration);
         let sources = [

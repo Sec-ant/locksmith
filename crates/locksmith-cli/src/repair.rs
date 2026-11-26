@@ -86,7 +86,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                         credentials: credentials.as_deref(),
                     }),
                 &project.config,
-                &project.root,
+                project.pnpm_version.as_ref().map(|v| v.major()),
                 |registry| {
                     input
                         .apply(&RepairContext {

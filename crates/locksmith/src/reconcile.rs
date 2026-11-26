@@ -427,30 +427,22 @@ fn environment_source(
             "no bootstrap graph matches the final configuration dependencies",
         )
     })?;
-    let order = std::iter::once(first).chain(matching);
-    let Some(version) = manifest::pnpm_specifier(manifest) else {
+    let mut order = std::iter::once(first).chain(matching);
+    let Some(manager) = manifest::PnpmManager::managed(manifest, Some(config)) else {
         return Ok(first);
     };
-    let managers = locks.map(|lock| lock.matches_pnpm_specifier(version));
-    if managers.iter().all(|m| m.is_none()) {
-        return Ok(first);
+    let managers = locks.map(|lock| lock.matches_pnpm_manager(&manager));
+    if let Some(side) = order.clone().find(|&side| managers[side] == Some(true)) {
+        return Ok(side);
     }
-    for side in order.clone() {
-        if managers[side] == Some(true) {
-            return Ok(side);
-        }
-    }
-    // Older pnpm versions can lack a bootstrap document entirely.
-    if version
-        .parse::<node_semver::Version>()
-        .is_ok_and(|v| v.major() < 11)
-        && let Some(side) = order.clone().find(|i| managers[*i].is_none())
+    if !manager.requires_pin
+        && let Some(side) = order.find(|&side| managers[side].is_none())
     {
         return Ok(side);
     }
     Err(missing(
         &["importers", ".", "packageManagerDependencies", "pnpm"],
-        format!("no locked bootstrap graph for pnpm@{version}"),
+        format!("no locked bootstrap graph for pnpm@{}", manager.specifier),
     ))
 }
 

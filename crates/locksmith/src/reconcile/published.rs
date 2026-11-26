@@ -393,6 +393,7 @@ pub(crate) fn records(
         output["patchedDependencies"] = patches.clone();
     }
     let mut missing_requests = super::MissingRequests::new(additional);
+    let mut missing_peer = None;
     for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
@@ -461,13 +462,19 @@ pub(crate) fn records(
                 continue;
             }
             let Some(value) = value else {
-                missing_requests.record(need_version(
+                let error = need_version(
                     &["snapshots", key, name],
                     name,
                     spec,
                     config,
                     format!("no locked resolution satisfies {spec}"),
-                ))?;
+                );
+                if peer.is_some() {
+                    // Ordinary dependencies, including aliases, can supply this peer on the next pass.
+                    missing_peer.get_or_insert(error);
+                } else {
+                    missing_requests.record(error)?;
+                }
                 continue;
             };
             body[field][name] = value.into();
@@ -479,6 +486,9 @@ pub(crate) fn records(
         output["snapshots"][instance] = body;
     }
     missing_requests.finish()?;
+    if let Some(error) = missing_peer {
+        return Err(error);
+    }
     Ok(output)
 }
 

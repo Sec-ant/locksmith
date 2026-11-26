@@ -854,14 +854,15 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
     assert!(merge(&old, &old, &old, Some(&ctx)).is_err());
 }
 
-#[test]
-fn workspace_operations_check_the_recorded_package_manager_pin() {
-    let version = "12.21.0";
-    let config = WorkspaceConfig::from_pnpm_version(&json!({}), &version.parse().unwrap()).unwrap();
-    let manifests = BTreeMap::from([(
-        ".".into(),
-        json!({"packageManager":format!("pnpm@{version}+sha512.abc")}),
-    )]);
+fn check_manager_pin(
+    manifest: serde_json::Value,
+    version: &str,
+    settings: serde_json::Value,
+    recorded: Option<(&str, &str)>,
+    valid: bool,
+) {
+    let config = WorkspaceConfig::from_pnpm_version(&settings, &version.parse().unwrap()).unwrap();
+    let manifests = BTreeMap::from([(".".into(), manifest)]);
     let patches = BTreeMap::new();
     let ctx = MergeContext {
         target: MergeTarget::Ours,
@@ -889,32 +890,116 @@ fn workspace_operations_check_the_recorded_package_manager_pin() {
         configuration: Some(&config),
         registry: None,
     };
+    let project = "lockfileVersion: '9.0'\nimporters: {.: {}}\n";
+    let yaml = match recorded {
+        None => project.to_owned(),
+        Some((specifier, resolved)) => {
+            let env = json!({"lockfileVersion":"9.0","importers":{".":{"configDependencies":{},"packageManagerDependencies":{"pnpm":{"specifier":specifier,"version":resolved}}}},
+                "packages":{format!("pnpm@{resolved}"):{"resolution":{}}},"snapshots":{format!("pnpm@{resolved}"): {}}});
+            format!("---\n{env}\n---\n{project}")
+        }
+    };
+    let lock = Lockfile::parse(&yaml).unwrap();
+    assert_eq!(
+        lock.validate_workspace(&manifests, &Default::default(), &config, &patches, |_| Ok(
+            None
+        ))
+        .is_ok(),
+        valid,
+        "validate {root} {settings}"
+    );
+    assert_eq!(
+        locksmith::repair(&yaml, &repair).is_ok(),
+        valid,
+        "repair {root} {settings}"
+    );
+    assert_eq!(
+        merge(&lock, &lock, &lock, Some(&ctx)).is_ok(),
+        valid,
+        "merge {root} {settings}"
+    );
+    assert_eq!(
+        locksmith::converge(&lock, &lock, &changes, options).is_ok(),
+        valid,
+        "converge {root} {settings}"
+    );
+}
+
+#[test]
+fn workspace_operations_check_the_recorded_package_manager_pin() {
+    let version = "12.21.0";
+    let manifest = json!({"packageManager":format!("pnpm@{version}+sha512.abc")});
     for (specifier, resolved, valid) in [
         (version, version, true),
         ("12.20.0", "12.20.0", false),
         (version, "12.20.0", false),
     ] {
-        let env = json!({"lockfileVersion":"9.0","importers":{".":{"configDependencies":{},"packageManagerDependencies":{"pnpm":{"specifier":specifier,"version":resolved}}}},
-            "packages":{format!("pnpm@{resolved}"):{"resolution":{}}},"snapshots":{format!("pnpm@{resolved}"): {}}});
-        let lock = Lockfile::parse(&format!(
-            "---\n{env}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"
-        ))
-        .unwrap();
-        assert_eq!(
-            locksmith::repair(&lock.to_yaml().unwrap(), &repair).is_ok(),
-            valid
+        check_manager_pin(
+            manifest.clone(),
+            version,
+            json!({}),
+            Some((specifier, resolved)),
+            valid,
         );
-        assert_eq!(
-            lock.validate_workspace(&manifests, &Default::default(), &config, &patches, |_| Ok(
-                None
-            ))
-            .is_ok(),
-            valid
-        );
-        assert_eq!(merge(&lock, &lock, &lock, Some(&ctx)).is_ok(), valid);
-        assert_eq!(
-            locksmith::converge(&lock, &lock, &changes, options).is_ok(),
-            valid
+    }
+}
+
+#[test]
+fn the_package_manager_policy_determines_whether_a_bootstrap_pin_is_required() {
+    for (version, required) in [("10.34.9", false), ("11.28.12", false), ("12.21.0", true)] {
+        let manifest = json!({"packageManager":format!("pnpm@{version}")});
+        check_manager_pin(manifest.clone(), version, json!({}), None, !required);
+        check_manager_pin(manifest, version, json!({"pmOnFail":"ignore"}), None, true);
+    }
+}
+
+#[test]
+fn dev_engines_selects_the_bootstrap_package_manager_and_its_policy() {
+    let spec = "^12.20.0";
+    let engine = json!({"name":"pnpm","version":spec,"onFail":"download"});
+    let manifest = json!({"packageManager":"pnpm@11.28.12","devEngines":{"packageManager":engine}});
+    for (recorded, valid) in [
+        (None, false),
+        (Some((spec, "12.21.0")), true),
+        (Some(("12.21.0", "12.21.0")), true),
+        (Some(("11.28.12", "11.28.12")), false),
+    ] {
+        check_manager_pin(manifest.clone(), "12.21.0", json!({}), recorded, valid);
+    }
+    let ignored = json!({"devEngines":{"packageManager":{"name":"pnpm","version":"11.28.12","onFail":"ignore"}}});
+    let managed = json!({"devEngines":{"packageManager":{"name":"pnpm","version":"11.28.12"}}});
+    // A pnpm 11 bootstrap pin also installs @pnpm/exe.
+    check_manager_pin(
+        managed,
+        "11.28.12",
+        json!({}),
+        Some(("11.28.12", "11.28.12")),
+        false,
+    );
+    check_manager_pin(ignored.clone(), "11.28.12", json!({}), None, true);
+    check_manager_pin(
+        ignored.clone(),
+        "11.28.12",
+        json!({}),
+        Some(("11.27.0", "11.27.0")),
+        true,
+    );
+    check_manager_pin(
+        ignored,
+        "11.28.12",
+        json!({"pmOnFail":"download"}),
+        None,
+        false,
+    );
+    let pnpm = json!({"name":"pnpm","version":"12.21.0"});
+    let npm = json!({"name":"npm","version":"11.0.0"});
+    for (engines, valid) in [(json!([pnpm, npm]), true), (json!([npm, pnpm]), false)] {
+        check_manager_pin(
+            json!({"devEngines":{"packageManager":engines}}),
+            "12.21.0",
+            json!({}),
+            None,
+            valid,
         );
     }
 }

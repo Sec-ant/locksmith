@@ -72,7 +72,10 @@ impl Lockfile {
     }
 
     /// An absent group means the lock does not manage the package manager itself.
-    pub(crate) fn matches_pnpm_specifier(&self, wanted: &str) -> Option<bool> {
+    pub(crate) fn matches_pnpm_manager(
+        &self,
+        manager: &crate::manifest::PnpmManager<'_>,
+    ) -> Option<bool> {
         let pins = self.environment()?["importers"]["."].get("packageManagerDependencies")?;
         Some(pins.as_object().is_some_and(|pins| {
             let Some(version) = pins.get("pnpm").and_then(|pin| pin["version"].as_str()) else {
@@ -81,22 +84,38 @@ impl Lockfile {
             let Ok(resolved) = version.parse::<node_semver::Version>() else {
                 return false;
             };
-            wanted
+            // pnpm shipped its executable as a separate bootstrap dependency from 6.17.1 through 11.x.
+            let release = (resolved.major(), resolved.minor(), resolved.patch());
+            if manager.requires_pin
+                && ((6, 17, 1)..(12, 0, 0)).contains(&release)
+                && !pins.contains_key("@pnpm/exe")
+            {
+                return false;
+            }
+            manager
+                .specifier
                 .parse::<node_semver::Range>()
-                .map_or(true, |range| resolved.satisfies(&range))
-                && pins
-                    .values()
-                    .all(|pin| pin["specifier"] == wanted && pin["version"] == version)
+                .is_ok_and(|range| resolved.satisfies_with_prerelease(&range, true))
+                && pins.values().all(|pin| pin["version"] == version)
         }))
     }
 
-    pub(crate) fn check_package_manager(&self, root: &Value) -> Result<(), LockfileError> {
-        if let Some(wanted) = crate::manifest::pnpm_specifier(root)
-            && self.matches_pnpm_specifier(wanted) == Some(false)
+    pub(crate) fn check_package_manager(
+        &self,
+        root: &Value,
+        config: Option<&crate::WorkspaceConfig>,
+    ) -> Result<(), LockfileError> {
+        if let Some(manager) = crate::manifest::PnpmManager::managed(root, config)
+            && !self
+                .matches_pnpm_manager(&manager)
+                .unwrap_or(!manager.requires_pin)
         {
             return Err(crate::reconcile::missing(
                 &["importers", ".", "packageManagerDependencies", "pnpm"],
-                format!("bootstrap graph does not match the declared pnpm@{wanted}"),
+                format!(
+                    "bootstrap graph does not match the declared pnpm@{}",
+                    manager.specifier
+                ),
             ));
         }
         Ok(())
@@ -184,7 +203,7 @@ impl Lockfile {
             ));
         }
         if let Some(root) = manifests.get(".") {
-            self.check_package_manager(root)?;
+            self.check_package_manager(root, Some(config))?;
         }
         let recorded = config.read_lock_settings(document)?;
         if recorded != config.recorded_settings() {

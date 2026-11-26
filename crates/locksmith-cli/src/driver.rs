@@ -8,7 +8,7 @@ use crate::{Result, git, policy, workspace};
 use workspace::{Members, Project};
 
 fn project_conflicts(
-    conflicts: &BTreeSet<String>,
+    conflicts: &BTreeSet<Vec<u8>>,
     prefix: &str,
     projects: &[&Project],
 ) -> Result<BTreeSet<String>> {
@@ -99,22 +99,21 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let sources = [base?, ours?, theirs?];
     let root_conflict = workspace::CONFIG_FILES
         .iter()
-        .any(|p| conflicts.contains(&format!("{prefix}{p}")));
+        .any(|p| conflicts.contains(format!("{prefix}{p}").as_bytes()));
     if root_conflict {
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
     let project = Project::read(&mut blobs, &tree, prefix, None)?;
     let mut dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
-    if conflicts.iter().any(|p| p != path) {
+    if conflicts.iter().any(|p| p.as_slice() != path.as_bytes()) {
         for id in manifests.keys().filter(|id| id.as_str() != ".") {
             dependency_inputs.extend(workspace::MANIFEST_NAMES.map(|name| format!("{id}/{name}")));
         }
-        git::check_linked_conflicts(
+        blobs.check_linked_conflicts(
             &tree,
             &conflicts,
             dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
-            &mut blobs,
         )?;
     }
     let policy = policy::Policy::from_project(&project);

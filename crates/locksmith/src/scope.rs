@@ -142,7 +142,7 @@ pub fn converge_with_recorded_baselines(
         .find(|c| c.importer == ".")
         .and_then(|c| c.after)
     {
-        candidate.check_package_manager(root)?;
+        candidate.check_package_manager(root, options.configuration)?;
     }
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
         if !config.matches_config_dependencies(candidate.environment()) {
