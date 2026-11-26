@@ -95,6 +95,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     }
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
+    #[cfg(feature = "bench-profile")]
+    let inputs_span = locksmith::profile::span("converge_input_collection");
     let (baseline, candidate, [mut before, mut after]) =
         std::thread::scope(|scope| -> Result<_> {
             let parallel = candidate_text
@@ -116,6 +118,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             let candidate = candidate?.unwrap_or_else(|| baseline.clone());
             Ok((baseline, candidate, manifests))
         })?;
+    #[cfg(feature = "bench-profile")]
+    drop(inputs_span);
     let patches = if base_config.requires_bootstrap_reconciliation(&config, &baseline, &candidate) {
         workspace::patches(&config, "", working_file)?
     } else {
