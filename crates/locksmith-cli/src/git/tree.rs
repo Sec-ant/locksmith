@@ -2,7 +2,7 @@
 //! need to be UTF-8; symlink targets and merge-tree conflict paths are raw bytes.
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Blobs, Result, output_bytes};
+use super::{Blobs, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
@@ -62,31 +62,23 @@ impl Blobs {
                 .chain(["pnpm-lock.yaml"])
         };
         let restricted = config_names().any(|path| path.as_bytes() == name);
-        let cache = if restricted {
-            &mut self.config_entries
-        } else {
-            &mut self.directories
-        };
-        if !cache.contains_key(tree) {
-            let mut args = vec!["ls-tree", "-z", "--full-tree", tree, "--"];
-            if restricted {
-                args.extend(config_names());
-            }
-            let listing = output_bytes(&args)?;
-            let mut directory = BTreeMap::new();
-            for entry in entries(&listing) {
-                let (kind, id, name) = entry?;
-                directory.insert(
-                    name.to_vec(),
-                    TreeEntry {
-                        kind,
-                        id: id.to_owned(),
-                    },
-                );
-            }
-            cache.insert(tree.to_owned(), directory);
+        if restricted && let Some(directory) = self.config_entries.get(tree) {
+            return Ok(directory.get(name).cloned());
         }
-        Ok(cache[tree].get(name).cloned())
+        let object = format!("{tree}^{{tree}}");
+        let (listing, digest_len) = self
+            .object(&object, "tree")?
+            .ok_or_else(|| format!("missing Git tree at {tree}"))?;
+        let directory = read_tree(&listing, digest_len, |name| {
+            !restricted || config_names().any(|path| path.as_bytes() == name)
+        })?;
+        let entry = directory.get(name).cloned();
+        if restricted {
+            self.config_entries.insert(tree.to_owned(), directory);
+        } else {
+            self.directories.insert(tree.to_owned(), directory);
+        }
+        Ok(entry)
     }
 
     pub fn read(&mut self, tree: &str, path: &str) -> Result<Option<String>> {
@@ -139,6 +131,49 @@ impl Blobs {
         }
         Ok(())
     }
+}
+
+fn read_tree(
+    mut bytes: &[u8],
+    digest_len: usize,
+    contains: impl Fn(&[u8]) -> bool,
+) -> Result<BTreeMap<Vec<u8>, TreeEntry>> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut entries = BTreeMap::new();
+    while !bytes.is_empty() {
+        // A raw entry is octal mode, space, filename, NUL, then the binary object ID.
+        let nul = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or("invalid Git tree entry")?;
+        let header = &bytes[..nul];
+        let space = header
+            .iter()
+            .position(|&byte| byte == b' ')
+            .ok_or("invalid Git tree entry")?;
+        let (digest, rest) = bytes[nul + 1..]
+            .split_at_checked(digest_len)
+            .ok_or("truncated Git tree object ID")?;
+        bytes = rest;
+        let name = &header[space + 1..];
+        if !contains(name) {
+            continue;
+        }
+        let mode = u32::from_str_radix(std::str::from_utf8(&header[..space])?, 8)?;
+        let kind = match mode & 0o170000 {
+            0o040000 => ObjectKind::Tree,
+            0o120000 => ObjectKind::Symlink,
+            0o160000 => ObjectKind::Commit,
+            _ => ObjectKind::Blob,
+        };
+        let mut id = String::with_capacity(digest_len * 2);
+        for &byte in digest {
+            id.push(HEX[usize::from(byte >> 4)] as char);
+            id.push(HEX[usize::from(byte & 0xf)] as char);
+        }
+        entries.insert(name.to_vec(), TreeEntry { kind, id });
+    }
+    Ok(entries)
 }
 
 #[derive(PartialEq, Eq)]

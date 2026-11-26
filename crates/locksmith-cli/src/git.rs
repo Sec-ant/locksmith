@@ -438,6 +438,10 @@ impl Blobs {
     }
 
     fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.object(object, "blob")?.map(|(contents, _)| contents))
+    }
+
+    fn object(&mut self, object: &str, kind: &str) -> Result<Option<(Vec<u8>, usize)>> {
         let input = &mut self.input;
         writeln!(input, "{object}")?;
         input.flush()?;
@@ -447,12 +451,14 @@ impl Blobs {
             return Ok(None);
         }
         let mut fields = header.split_whitespace();
-        if !fields.next().is_some_and(oid) || fields.next() != Some("blob") {
-            return Err(format!("expected a Git blob at {object}").into());
-        }
+        let id = fields.next().filter(|id| oid(id));
+        let Some(id) = id.filter(|_| fields.next() == Some(kind)) else {
+            return Err(format!("expected a Git {kind} at {object}").into());
+        };
+        let digest_len = id.len() / 2;
         let length = fields
             .next()
-            .ok_or("missing git blob length")?
+            .ok_or_else(|| format!("missing git {kind} length"))?
             .parse::<usize>()?;
         let mut bytes = vec![0; length];
         self.output.read_exact(&mut bytes)?;
@@ -461,7 +467,7 @@ impl Blobs {
         if delimiter[0] != b'\n' {
             return Err("invalid git cat-file response".into());
         }
-        Ok(Some(bytes))
+        Ok(Some((bytes, digest_len)))
     }
 }
 impl Drop for Blobs {
