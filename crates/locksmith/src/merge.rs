@@ -317,12 +317,15 @@ impl Context<'_> {
                 override_keys(base_map, left, right)
             } else {
                 // Keep the first parent's field order. The writer sorts graph sections.
-                let mut seen = BTreeSet::new();
+                let right_only = right.keys().filter(|key| !left.contains_key(*key));
+                let base_only = base_map
+                    .into_iter()
+                    .flat_map(Map::keys)
+                    .filter(|key| !left.contains_key(*key) && !right.contains_key(*key));
                 Some(
                     left.keys()
-                        .chain(right.keys())
-                        .chain(base_map.into_iter().flat_map(Map::keys))
-                        .filter(|key| seen.insert(*key))
+                        .chain(right_only)
+                        .chain(base_only)
                         .cloned()
                         .collect(),
                 )
