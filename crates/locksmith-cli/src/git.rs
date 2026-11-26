@@ -13,6 +13,9 @@ mod tree;
 use tree::TreeEntry;
 pub(crate) use tree::{ObjectKind, entries};
 
+// Seven SHA-256 object IDs plus newlines fit in the 512-byte minimum pipe capacity.
+pub const BLOB_BATCH_SIZE: usize = 7;
+
 pub fn output(args: &[&str]) -> Result<String> {
     checked(Command::new("git").args(args))
 }
@@ -432,15 +435,39 @@ impl Blobs {
     }
 
     pub fn read_object(&mut self, object: &str) -> Result<Option<String>> {
-        self.bytes(object)?
+        self.request_object(object)?;
+        self.read_object_reply(object)
+    }
+
+    pub fn queue_objects<'a>(&mut self, objects: impl Iterator<Item = &'a str>) -> Result<()> {
+        let mut requests = String::new();
+        for object in objects {
+            requests.push_str(object);
+            requests.push('\n');
+        }
+        self.input.write_all(requests.as_bytes())?;
+        self.input.flush()?;
+        Ok(())
+    }
+
+    pub fn read_object_reply(&mut self, object: &str) -> Result<Option<String>> {
+        self.read_reply(object)?
             .map(|bytes| String::from_utf8(bytes).map_err(|e| format!("{object}: {e}").into()))
             .transpose()
     }
 
     fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
-        let input = &mut self.input;
-        writeln!(input, "{object}")?;
-        input.flush()?;
+        self.request_object(object)?;
+        self.read_reply(object)
+    }
+
+    fn request_object(&mut self, object: &str) -> Result<()> {
+        writeln!(self.input, "{object}")?;
+        self.input.flush()?;
+        Ok(())
+    }
+
+    fn read_reply(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
         let mut header = String::new();
         self.output.read_line(&mut header)?;
         if header.trim_end() == format!("{object} missing") {
