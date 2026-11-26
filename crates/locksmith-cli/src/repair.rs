@@ -7,6 +7,8 @@ use crate::{
 use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget, RepairContext, RepairInput};
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
+    #[cfg(feature = "bench-profile")]
+    let revision_span = locksmith::profile::span("git_revision");
     let revision = git::output(&[
         "rev-parse",
         "--verify",
@@ -16,6 +18,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let commit = revision.trim_end();
     let prefix = git::output(&["rev-parse", "--show-prefix"])?;
     let prefix = prefix.trim_end_matches('\n');
+    #[cfg(feature = "bench-profile")]
+    drop(revision_span);
     let file = format!("{prefix}pnpm-lock.yaml");
     let mut blobs = git::Blobs::open()?;
     let text = blobs

@@ -24,6 +24,8 @@ fn working_file(path: &str) -> Result<Option<String>> {
 }
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
+    #[cfg(feature = "bench-profile")]
+    let revision_span = locksmith::profile::span("git_revision");
     let revision = git::output(&[
         "rev-parse",
         "--verify",
@@ -33,6 +35,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let tree = revision.trim_end();
     let prefix = git::output(&["rev-parse", "--show-prefix"])?;
     let prefix = prefix.trim_end_matches('\n');
+    #[cfg(feature = "bench-profile")]
+    drop(revision_span);
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
@@ -167,7 +171,11 @@ fn workspace_manifests(
     tree: &str,
     prefix: &str,
 ) -> Result<[BTreeMap<String, Value>; 2]> {
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("converge_manifest_collection");
     let before = workspace::manifests(project, &mut blobs, tree, prefix)?;
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("worktree_manifests");
     let mut after = BTreeMap::from([(".".into(), working.root.clone())]);
     if working.workspace {
         for id in Members::new(working)?.working_directories(prefix)? {

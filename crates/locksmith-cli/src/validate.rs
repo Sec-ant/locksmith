@@ -54,7 +54,10 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     let mut manifests = BTreeMap::new();
     let canonical_root = root.canonicalize()?;
     let mut external_members = BTreeSet::new();
-    for (id, directory) in Members::directories_on_disk(&project, &canonical_root)? {
+    let directories = Members::directories_on_disk(&project, &canonical_root)?;
+    #[cfg(feature = "bench-profile")]
+    let manifests_span = locksmith::profile::span("validate_manifest_reads");
+    for (id, directory) in directories {
         if let Some(manifest) = workspace::read_manifest(&id, read)? {
             if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
                 external_members.insert(id.clone());
@@ -65,6 +68,8 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     if has_root_manifest {
         manifests.insert(".".into(), project.root);
     }
+    #[cfg(feature = "bench-profile")]
+    drop(manifests_span);
     let read_linked = |id: &str| {
         let directory = canonical_root.join(id);
         let io = |e| LockfileError::WorkspaceInput(format!("{}: {e}", directory.display()));
@@ -99,6 +104,8 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
             .map(Some)
             .map_err(|_| invalid())
     };
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("validate_workspace_graph");
     Ok(lock.validate_workspace(
         &manifests,
         &external_members,

@@ -246,6 +246,8 @@ pub fn manifests(
     tree: &str,
     prefix: &str,
 ) -> Result<BTreeMap<String, Value>> {
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("committed_manifests");
     let mut manifests = BTreeMap::from([(".".into(), project.root.clone())]);
     if project.workspace {
         let members = Members::new(project)?;
@@ -501,6 +503,8 @@ impl Members {
     }
 
     pub fn working_directories(&self, prefix: &str) -> Result<BTreeSet<String>> {
+        #[cfg(feature = "bench-profile")]
+        let _span = locksmith::profile::span("worktree_member_discovery");
         let mut directories = BTreeSet::new();
         if self.include.is_empty() {
             return Ok(directories);
@@ -595,6 +599,8 @@ impl Members {
         project: &Project,
         root: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
+        #[cfg(feature = "bench-profile")]
+        let _span = locksmith::profile::span("disk_member_discovery");
         let members = Self::from_patterns(project, true)?;
         let mut found = BTreeMap::new();
         for (id, descend) in &members.descend {
