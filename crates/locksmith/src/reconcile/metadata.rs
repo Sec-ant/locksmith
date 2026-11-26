@@ -1,6 +1,6 @@
 //! Construct the project-wide settings, catalogs, checksums and patch records.
 use super::{MergeContext, missing};
-use crate::{LockfileError, Value, graph, manifest, peer};
+use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
 use serde_json::json;
 
 pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Option<&str>) -> bool {
@@ -30,16 +30,21 @@ pub(crate) fn catalog_consumer_fits(
     spec: &str,
     reference: &str,
     entry: Option<&Value>,
+    configuration: Option<&WorkspaceConfig>,
 ) -> bool {
+    let effective = manifest::pinned_specifier(spec, reference, configuration);
     if let Some(entry) = entry {
         let Some(version) = catalog_entry_version(spec, entry) else {
             return false;
         };
-        if super::catalog_pin_matches(name, Some(spec), version, reference) {
+        if effective != spec && !catalog_version_fits(effective, version, None) {
+            return false;
+        }
+        if super::catalog_pin_matches(name, Some(effective), version, reference) {
             return true;
         }
     }
-    super::range_accepts(name, spec, reference)
+    super::range_accepts(name, effective, reference)
 }
 
 pub(crate) fn resolve(
@@ -182,20 +187,19 @@ pub(crate) fn resolve(
                 .find_map(|side| {
                     let entry = docs[*side].get("catalogs")?.get(catalog)?.get(name)?;
                     let version = entry.get("version")?.as_str()?;
-                    if entry
-                        .get("specifier")
-                        .and_then(Value::as_str)
-                        .and_then(manifest::alias)
-                        .map(|(n, _)| n)
-                        != manifest::alias(specifier).map(|(n, _)| n)
+                    let recorded = context.configurations[*side]
+                        .registry_specifier(entry["specifier"].as_str()?);
+                    let effective = config.registry_specifier(specifier);
+                    if manifest::alias(recorded).map(|(n, _)| n)
+                        != manifest::alias(effective).map(|(n, _)| n)
                     {
                         return None;
                     }
-                    catalog_version_fits(specifier, version, entry["specifier"].as_str())
+                    catalog_version_fits(effective, version, Some(recorded))
                         .then(|| json!({"specifier":specifier,"version":version}))
                 })
                 .or_else(|| {
-                    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+                    let (actual, range) = config.registry_request(name, specifier);
                     let range = range.parse::<node_semver::Range>().ok()?;
                     order.iter().find_map(|&side| {
                         let index = versions[side].get_or_insert_with(|| {
@@ -223,7 +227,7 @@ pub(crate) fn resolve(
                     })
                 })
                 .or_else(|| {
-                    super::published::catalog_version(context.registry, name, specifier)
+                    super::published::catalog_version(config, context.registry, name, specifier)
                         .map(|version| json!({"specifier":specifier,"version":version}))
                 });
             if let Some(entry) = entry {

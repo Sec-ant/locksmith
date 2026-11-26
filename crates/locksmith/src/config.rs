@@ -79,21 +79,32 @@ impl Default for LockSettings {
     }
 }
 impl LockSettings {
-    pub(crate) fn from_document(document: &Value) -> Self {
-        Self {
-            auto_install_peers: document["settings"]["autoInstallPeers"]
-                .as_bool()
-                .unwrap_or(true),
-            dedupe_peers: document["settings"]["dedupePeers"]
-                .as_bool()
-                .unwrap_or(false),
-            project_scoped_optional_peers: document["settings"]["projectScopedOptionalPeers"]
-                .as_bool()
-                .unwrap_or(false),
-            exclude_links_from_lockfile: document["settings"]["excludeLinksFromLockfile"]
-                .as_bool()
-                .unwrap_or(false),
-        }
+    pub(crate) fn from_document(
+        document: &Value,
+        version: Option<&node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let Some(settings) = document.get("settings") else {
+            return Ok(Self::default());
+        };
+        let settings = settings
+            .as_object()
+            .ok_or_else(|| LockfileError::InvalidDocument("settings must be a mapping".into()))?;
+        let quoted = version.is_none_or(|v| v.major() >= 12);
+        let boolean = |name: &str, default| match settings.get(name) {
+            None => Ok(default),
+            Some(Value::Bool(value)) => Ok(*value),
+            Some(Value::String(value)) if quoted && value == "true" => Ok(true),
+            Some(Value::String(value)) if quoted && value == "false" => Ok(false),
+            Some(_) => Err(LockfileError::InvalidDocument(format!(
+                "settings/{name} must be a boolean"
+            ))),
+        };
+        Ok(Self {
+            auto_install_peers: boolean("autoInstallPeers", true)?,
+            dedupe_peers: boolean("dedupePeers", false)?,
+            project_scoped_optional_peers: boolean("projectScopedOptionalPeers", false)?,
+            exclude_links_from_lockfile: boolean("excludeLinksFromLockfile", false)?,
+        })
     }
 }
 
@@ -145,6 +156,10 @@ pub struct WorkspaceConfig {
     pub auto_dedupe: bool,
     /// Settings used to interpret importers, snapshots and source compatibility.
     pub resolution: ResolutionSettings,
+    /// Configuration dependencies installed from pnpm's bootstrap lock document.
+    pub config_dependencies: BTreeMap<String, Value>,
+    /// Registry URLs by scope (or `default`) used to reconstruct omitted configuration tarball URLs.
+    pub config_registries: BTreeMap<String, String>,
     /// Catalog name to package declarations, with `default` for the unnamed catalog.
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
     /// Selector/replacement pairs in declaration order (ties can depend on it).
@@ -153,6 +168,8 @@ pub struct WorkspaceConfig {
     pub override_tie_break: OverrideTieBreak,
     /// pnpm release responsible for this resolution, when known.
     pub pnpm_version: Option<node_semver::Version>,
+    /// Workspace override for the package manager declaration's `onFail` policy.
+    pub pm_on_fail: Option<String>,
     /// Path representation to use in peer snapshot identifiers.
     pub linked_peer_encoding: LinkedPeerEncoding,
     /// Declared package selectors mapped to workspace-relative patch file paths.
@@ -162,7 +179,91 @@ pub struct WorkspaceConfig {
     /// Checksum format for package extensions, when the package manager is known.
     pub extension_checksum: Option<ExtensionChecksum>,
 }
+pub(crate) fn locked_config_resolution<'a>(
+    env: &'a Value,
+    name: &str,
+    pin: &Value,
+    version: &str,
+    integrity: &str,
+) -> Option<&'a Value> {
+    let resolution = env["packages"]
+        .get(format!("{name}@{version}"))?
+        .get("resolution")?;
+    (integrity.starts_with("sha")
+        && version.parse::<node_semver::Version>().is_ok()
+        && pin["specifier"] == version
+        && pin["version"] == version
+        && resolution["integrity"] == integrity)
+        .then_some(resolution)
+}
+
 impl WorkspaceConfig {
+    /// Decode an API context's effective settings. An explicit `packageManager` option
+    /// selects the runner. Otherwise use the manifest declaration and the bootstrap lock.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid runner override or invalid pnpm settings.
+    pub fn from_pnpm_context(
+        raw: &Value,
+        manifest: Option<&Value>,
+        recorded: Option<node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let version = match raw.get("packageManager") {
+            Some(manager) => Some(
+                manager
+                    .as_str()
+                    .and_then(|s| s.strip_prefix("pnpm@"))
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| {
+                        LockfileError::InvalidDocument(
+                            "packageManager must be an exact pnpm@version".into(),
+                        )
+                    })?,
+            ),
+            None => match manifest {
+                Some(root) => Self::project_pnpm_version(root, recorded),
+                None => recorded,
+            },
+        };
+        match version {
+            Some(version) => Self::from_pnpm_version(raw, &version),
+            None => Self::from_pnpm(raw),
+        }
+    }
+
+    /// Decode a merge or repair source when only the final manifest is available.
+    /// A source setting can override the runner; otherwise the source's bootstrap version
+    /// takes precedence over the final manifest.
+    ///
+    /// # Errors
+    /// Returns the configuration errors described by [`Self::from_pnpm_context`].
+    pub fn from_pnpm_source(
+        raw: &Value,
+        final_manifest: Option<&Value>,
+        recorded: Option<node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let fallback = if recorded.is_none() {
+            final_manifest
+        } else {
+            None
+        };
+        Self::from_pnpm_context(raw, fallback, recorded)
+    }
+
+    /// Read the project's pnpm version, using its locked version for a compatible range
+    /// or when the manifest leaves the version unspecified.
+    pub fn project_pnpm_version(
+        manifest: &Value,
+        recorded: Option<node_semver::Version>,
+    ) -> Option<node_semver::Version> {
+        let modern_runner = recorded.as_ref().filter(|v| v.major() >= 11);
+        let Some(manager) = crate::manifest::PnpmManager::declared(manifest, modern_runner) else {
+            return recorded;
+        };
+        // A range describes the desired runner. The lock records which runner produced these settings.
+        manager.specifier.parse().ok().or(recorded)
+    }
+
     /// Decode workspace settings using the lockfile conventions of this pnpm release.
     ///
     /// # Errors
@@ -199,6 +300,75 @@ impl WorkspaceConfig {
         Ok(config)
     }
 
+    pub(crate) fn matches_config_dependencies(&self, environment: Option<&Value>) -> bool {
+        // pnpm 9/10 keep configuration packages outside the project lock.
+        if environment.is_none() && self.pnpm_version.as_ref().is_some_and(|v| v.major() < 11) {
+            return true;
+        }
+        let recorded = environment.and_then(|env| env["importers"]["."].get("configDependencies"));
+        let entries = recorded.and_then(Value::as_object);
+        if recorded.is_some() && entries.is_none()
+            || entries.map_or(0, |deps| deps.len()) != self.config_dependencies.len()
+        {
+            return false;
+        }
+        self.config_dependencies.iter().all(|(name, declaration)| {
+            let Some(pin) = entries.and_then(|deps| deps.get(name)) else {
+                return false;
+            };
+            let Some(spec) = declaration
+                .as_str()
+                .or_else(|| declaration.get("integrity")?.as_str())
+            else {
+                return false;
+            };
+            if let Some((version, integrity)) = spec
+                .split_once('+')
+                .filter(|(_, hash)| hash.starts_with("sha"))
+            {
+                let Some(resolution) = locked_config_resolution(
+                    environment.expect("recorded bootstrap dependency"),
+                    name,
+                    pin,
+                    version,
+                    integrity,
+                ) else {
+                    return false;
+                };
+                declaration.get("tarball").is_none_or(|url| {
+                    match resolution.get("tarball") {
+                        Some(locked) => locked == url,
+                        None => {
+                            // pnpm omits a registry's conventional tarball URL, even when explicitly configured.
+                            let bare = name.rsplit('/').next().unwrap();
+                            let base = name
+                                .split_once('/')
+                                .and_then(|(scope, _)| self.config_registries.get(scope))
+                                .or_else(|| self.config_registries.get("default"))
+                                .map_or("https://registry.npmjs.org", String::as_str);
+                            url.as_str()
+                                == Some(&format!(
+                                    "{}/{name}/-/{bare}-{version}.tgz",
+                                    base.trim_end_matches('/')
+                                ))
+                        }
+                    }
+                })
+            } else {
+                declaration.is_string()
+                    && pin["specifier"] == spec
+                    && pin["version"]
+                        .as_str()
+                        .and_then(|v| v.parse::<node_semver::Version>().ok())
+                        .is_some_and(|version| {
+                            spec.parse::<node_semver::Range>().map_or(true, |range| {
+                                version.satisfies_with_prerelease(&range, true)
+                            })
+                        })
+            }
+        })
+    }
+
     /// Some frozen-lockfile checks shipped separately on the pnpm 11 and 12 lines.
     pub(crate) fn since(&self, pnpm11: (u64, u64, u64), pnpm12: (u64, u64, u64)) -> bool {
         self.pnpm_version.as_ref().is_some_and(|v| match v.major() {
@@ -219,8 +389,14 @@ impl WorkspaceConfig {
         settings
     }
 
-    pub(crate) fn read_lock_settings(&self, document: &Value) -> LockSettings {
-        self.supported_lock_settings(LockSettings::from_document(document))
+    pub(crate) fn read_lock_settings(
+        &self,
+        document: &Value,
+    ) -> Result<LockSettings, LockfileError> {
+        Ok(self.supported_lock_settings(LockSettings::from_document(
+            document,
+            self.pnpm_version.as_ref(),
+        )?))
     }
 
     pub(crate) fn recorded_settings(&self) -> LockSettings {
@@ -271,6 +447,24 @@ impl WorkspaceConfig {
             .is_some_and(|(a, b)| a.major() != b.major())
     }
 
+    /// Whether convergence must reconcile a changed, newly specified, or removed runner version.
+    pub fn changes_pnpm_version(&self, other: &Self) -> bool {
+        self.pnpm_version != other.pnpm_version
+    }
+
+    /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
+    pub fn requires_bootstrap_reconciliation(
+        &self,
+        after: &Self,
+        baseline: &crate::Lockfile,
+        candidate: &crate::Lockfile,
+    ) -> bool {
+        self.changes_pnpm_version(after)
+            || self.config_dependencies != after.config_dependencies
+            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
+            || !after.matches_config_dependencies(baseline.environment())
+    }
+
     pub(crate) fn matches_pnpm(&self, target: &Self) -> bool {
         target.pnpm_version.is_none() || self.pnpm_version == target.pnpm_version
     }
@@ -290,6 +484,20 @@ impl WorkspaceConfig {
             decode(value, "catalogs")?.unwrap_or_default();
         if let Some(default) = decode(value, "catalog")? {
             catalogs.insert("default".into(), default);
+        }
+        let mut config_registries = BTreeMap::new();
+        if let Some(url) = value["registry"].as_str() {
+            config_registries.insert("default".into(), url.to_owned());
+        }
+        for (key, entry) in value["registries"].as_object().into_iter().flatten() {
+            if let Some(url) = entry.as_str() {
+                config_registries.insert(key.clone(), url.to_owned());
+            } else if let Some(scopes) = entry["scopes"].as_array() {
+                for scope in scopes.iter().filter_map(Value::as_str) {
+                    let scope = if scope == "@" { "default" } else { scope };
+                    config_registries.insert(scope.to_owned(), key.clone());
+                }
+            }
         }
         let dedupe_peer_dependents = decode(value, "dedupePeerDependents")?.unwrap_or(true);
         let project_scoped_optional_peers =
@@ -332,9 +540,12 @@ impl WorkspaceConfig {
                 .collect(),
             },
             catalogs,
+            config_registries,
+            config_dependencies: decode(value, "configDependencies")?.unwrap_or_default(),
             overrides: string_rules(value, "overrides")?,
             override_tie_break: OverrideTieBreak::default(),
             pnpm_version: None,
+            pm_on_fail: decode(value, "pmOnFail")?,
             linked_peer_encoding: LinkedPeerEncoding::default(),
             patches: decode::<Option<_>>(value, "patchedDependencies")?.flatten(),
             patch_encoding: PatchEncoding::default(),

@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import * as api from 'es-locksmith';
 
 const require = createRequire(import.meta.url);
+const installedReadme = readFileSync(new URL('./README.md', import.meta.resolve('es-locksmith')), 'utf8');
+for (const [, target] of installedReadme.matchAll(/\]\(([^)#]+)(?:#[^)]*)?\)/g)) {
+  if (!target.includes('://')) {
+    assert.ok(readFileSync(new URL(target, import.meta.resolve('es-locksmith'))).length, target);
+  }
+}
 const { parse, merge, converge, repair, validate, inspectPeers, dependencyClosure } = api;
 assert.equal(require('es-locksmith').merge, merge);
 const yaml = "# keep this comment\r\nlockfileVersion: '9.0'\r\nsettings: {autoInstallPeers: true, excludeLinksFromLockfile: false}\r\nimporters: {'.': {}}\r\n";
@@ -28,12 +34,117 @@ const external = await api.inspect(linked);
 assert.deepEqual(external.externalLinks, [{ sourceKind: 'snapshot', from: 'plugin@1.0.0', dependency: 'host', target: '../shared' }]);
 assert.equal(external.peers[0].reason, 'providerVersion');
 assert.deepEqual((await api.inspect(linked, { manifests: { '../shared': { name: 'host', version: '1.4.0' } } })).peers, []);
+const prerelease = await parse(JSON.stringify({
+  lockfileVersion: '9.0', importers: { '.': {} },
+  packages: { 'plugin@1.0.0': { resolution: {}, peerDependencies: { host: '^1' } }, 'host@1.1.0-beta.1': { resolution: {} } },
+  snapshots: { 'plugin@1.0.0': { dependencies: { host: '1.1.0-beta.1' } }, 'host@1.1.0-beta.1': {} },
+}));
+assert.deepEqual((await api.inspect(prerelease)).peers, []);
+assert.deepEqual(await inspectPeers(prerelease), []);
 assert.equal(require('es-locksmith').inspect, api.inspect);
 assert.equal(await merge(lock, yaml, lock), yaml);
 const context = { target: 'ours', manifests: { '.': {} }, configurations: [{}, {}, {}], configuration: {} };
 assert.equal(await merge(yaml, yaml, yaml, context), yaml);
 assert.equal(await converge(yaml, lock, []), yaml);
 assert.equal(await repair(yaml, context), yaml);
+const modernRoot = { packageManager: 'pnpm@9.15.9', devEngines: { packageManager: { name: 'pnpm', version: '^12.20.0' } } };
+const bootstrap = {
+  lockfileVersion: '9.0',
+  importers: { '.': { packageManagerDependencies: { pnpm: { specifier: '12.21.0', version: '12.21.0' } } } },
+  packages: { 'pnpm@12.21.0': { resolution: {} } }, snapshots: { 'pnpm@12.21.0': {} },
+};
+const managed = `---\n${JSON.stringify(bootstrap)}\n---\nlockfileVersion: '9.0'\nimporters: {'.': {}}\n`;
+const modernContext = { ...context, manifests: { '.': modernRoot } };
+for (const [input, code] of [
+  ["lockfileVersion: '6.0'\nimporters: {}\n", 'UNSUPPORTED_VERSION'],
+  ["---\nlockfileVersion: [\n---\nlockfileVersion: '9.0'\nimporters: {}\n", 'INVALID_YAML'],
+]) {
+  await assert.rejects(merge(input, input, input, modernContext), error => error.code === code);
+}
+const managedHandle = await parse(managed);
+// The selected boot document must agree under both interpretations of a duplicate snapshot.
+const emptySnapshot = '"pnpm@12.21.0":{}';
+const brokenSnapshot = '"pnpm@12.21.0":{"dependencies":{"missing":"1.0.0"}}';
+for (const bodies of [[brokenSnapshot, emptySnapshot], [emptySnapshot, brokenSnapshot]]) {
+  const duplicate = managed.replace(emptySnapshot, bodies.join(','));
+  await assert.rejects(merge(managed, duplicate, managed, modernContext), /duplicate snapshot/i);
+}
+const olderManaged = managed.replaceAll('12.21.0', '12.18.0');
+for (const baseline of [olderManaged, yaml]) {
+  const migrated = await converge(baseline, managedHandle, [
+    { importer: '.', before: {}, after: {} },
+  ], { configuration: {} });
+  assert.deepEqual(await (await parse(migrated)).document('environment'), bootstrap);
+}
+const legacyBootstrap = JSON.parse(JSON.stringify(bootstrap).replaceAll('12.21.0', '11.0.0'));
+const aliasLock = (environment, actual, pin) => {
+  const key = `${actual}@${pin.split('@').at(-1)}`;
+  const project = {
+    lockfileVersion: '9.0',
+    importers: { '.': { dependencies: { foo: { specifier: 'npm:1', version: pin } } } },
+    packages: { [key]: { resolution: {} } }, snapshots: { [key]: {} },
+  };
+  return `---\n${JSON.stringify(environment)}\n---\n${JSON.stringify(project)}\n`;
+};
+const numericAlias = { dependencies: { foo: 'npm:1' } };
+const migratedAlias = await converge(aliasLock(legacyBootstrap, '1', '1@2.0.0'), aliasLock(bootstrap, 'foo', '1.2.0'), [
+  { importer: '.', before: numericAlias, after: numericAlias },
+], { configuration: { packageManager: 'pnpm@12.21.0' } });
+const migratedAliasLock = await parse(migratedAlias);
+assert.deepEqual(await migratedAliasLock.document('environment'), bootstrap);
+assert.equal((await migratedAliasLock.document('project')).importers['.'].dependencies.foo.version, '1.2.0');
+const staleManager = managed.replace('"specifier":"12.21.0"', '"specifier":"12.20.0"');
+const correctedManager = await converge(staleManager, managed, [{ importer: '.', before: modernRoot, after: modernRoot }]);
+assert.deepEqual(await (await parse(correctedManager)).document('environment'), bootstrap);
+const configBootstrap = version => {
+  const key = `tool@${version}`;
+  return {
+    ...bootstrap,
+    importers: { '.': { ...bootstrap.importers['.'], configDependencies: {
+      tool: { specifier: version, version },
+    } } },
+    packages: { ...bootstrap.packages, [key]: { resolution: {} } },
+    snapshots: { ...bootstrap.snapshots, [key]: {} },
+  };
+};
+const configLock = version => `---\n${JSON.stringify(configBootstrap(version))}\n---\n${yaml}`;
+const updatedConfig = await converge(configLock('1.0.0'), configLock('2.0.0'), [],
+  { configuration: { configDependencies: { tool: '2.0.0' } } });
+assert.deepEqual(await (await parse(updatedConfig)).document('environment'), configBootstrap('2.0.0'));
+for (const result of await Promise.all([
+  merge(managed, managedHandle, managed, modernContext),
+  converge(managedHandle, managed, [{ importer: '.', before: modernRoot, after: modernRoot }], { configuration: {} }),
+  repair(managed, modernContext),
+])) {
+  assert.deepEqual(await (await parse(result)).document('environment'), bootstrap);
+}
+// A parent from before pnpm 12.19 does not share the final optional-peer policy.
+function parentLock(version, integrity) {
+  const manager = {
+    lockfileVersion: '9.0',
+    importers: { '.': { packageManagerDependencies: { pnpm: { specifier: version, version } } } },
+    packages: { [`pnpm@${version}`]: { resolution: {} } }, snapshots: { [`pnpm@${version}`]: {} },
+  };
+  const project = {
+    lockfileVersion: '9.0',
+    settings: { autoInstallPeers: true, excludeLinksFromLockfile: false },
+    importers: { '.': { dependencies: { lib: { specifier: '1.0.0', version: '1.0.0' } } } },
+    snapshots: { 'lib@1.0.0': {} },
+  };
+  if (version === '12.21.0') project.settings.projectScopedOptionalPeers = true;
+  if (integrity) project.packages = { 'lib@1.0.0': { resolution: { integrity } } };
+  return `---\n${JSON.stringify(manager)}\n---\n${JSON.stringify(project)}\n`;
+}
+const scoped = { projectScopedOptionalPeers: true };
+const fromParent = await repair(parentLock('12.21.0'), {
+  manifests: { '.': { packageManager: 'pnpm@12.21.0', dependencies: { lib: '1.0.0' } } },
+  configuration: scoped,
+  parents: [
+    { yaml: parentLock('12.18.0', 'sha512-old'), configuration: scoped },
+    { yaml: parentLock('12.21.0', 'sha512-new'), configuration: scoped },
+  ],
+});
+assert.equal((await (await parse(fromParent)).document('project')).packages['lib@1.0.0'].resolution.integrity, 'sha512-new');
 await assert.rejects(parse("lockfileVersion: '6.0'"), { code: 'UNSUPPORTED_VERSION', details: { version: '6.0' } });
 const broken = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      foo: {specifier: ^1, version: 1.0.0}\n";
 await assert.rejects(api.inspect(broken), { code: 'INVALID_GRAPH' });

@@ -602,25 +602,17 @@ pub(super) fn rebuild(
         retired: &retired,
         peers,
         source,
-        dedupe: config.resolution.lock.dedupe_peers,
-        share_peers: config.resolution.dedupe_peer_dependents,
-        share_optional: config.resolution.optional_peer_scope
-            == crate::OptionalPeerScope::Workspace,
-        auto_install: config.resolution.lock.auto_install_peers,
+        policy: &config.resolution,
         global: &global,
         project: BTreeSet::new(),
         scope_id: 0,
         environments,
         inputs: &inputs,
-        input_cache: HashMap::new(),
         provider_dependencies: dependencies,
         written: HashMap::new(),
         deferred_contexts: BTreeMap::new(),
-        cache: HashMap::new(),
-        active: HashSet::new(),
-        completed: HashMap::new(),
-        back_edges: HashSet::new(),
         pending: BTreeSet::new(),
+        traversal: Traversal::default(),
         selected_providers: HashMap::new(),
     };
     resolver.resolve_importers(
@@ -700,6 +692,22 @@ struct ResolvedInstance<'a> {
     body: Cow<'a, Value>,
 }
 
+#[derive(Default)]
+struct Traversal {
+    input_cache: HashMap<State, Symbol>,
+    cache: HashMap<State, Symbol>,
+    active: HashSet<Instance>,
+    completed: HashMap<Instance, Symbol>,
+    back_edges: HashSet<Instance>,
+}
+
+impl Traversal {
+    fn remember(&mut self, state: State, input: State, resolved: Symbol) {
+        self.cache.insert(state, resolved);
+        self.input_cache.insert(input, resolved);
+    }
+}
+
 struct Resolver<'a, 'm, 'd, F> {
     snapshots: &'a Map<String, Value>,
     instances: HashMap<&'a str, Vec<&'a str>>,
@@ -709,28 +717,21 @@ struct Resolver<'a, 'm, 'd, F> {
     retired: &'a PeerRequirements,
     peers: &'m mut peer::Merger<'d>,
     source: F,
-    dedupe: bool,
-    share_peers: bool,
-    share_optional: bool,
-    auto_install: bool,
+    policy: &'a crate::ResolutionSettings,
     global: &'a BTreeSet<String>,
     project: BTreeSet<String>,
     scope_id: usize,
     environments: Environments,
     inputs: &'a HashMap<&'a str, InputSnapshot<'a>>,
-    input_cache: HashMap<State, Symbol>,
     provider_dependencies: HashMap<Symbol, Vec<Symbol>>,
     deferred_contexts: BTreeMap<Symbol, DeferredContext>,
     written: HashMap<String, ResolvedInstance<'a>>,
-    cache: HashMap<State, Symbol>,
-    active: HashSet<Instance>,
-    completed: HashMap<Instance, Symbol>,
-    back_edges: HashSet<Instance>,
     pending: BTreeSet<String>,
+    traversal: Traversal,
     selected_providers: HashMap<(Symbol, Symbol), Option<ProviderBinding>>,
 }
 
-impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
+impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
     fn resolve_importers(
         &mut self,
         importers: &mut Map<String, Value>,
@@ -739,7 +740,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
     ) -> Result<(), LockfileError> {
         let ids: Vec<_> = importers.keys().cloned().collect();
         for id in ids {
-            if !self.share_optional {
+            if self.policy.optional_peer_scope != crate::OptionalPeerScope::Workspace {
                 self.scope_id += 1;
                 let root = (id != "." && workspace_root_peers).then(|| original_roots["."].clone());
                 self.project = installed(
@@ -842,14 +843,15 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
 
     fn provider_allowed(&self, key: &str, optional: bool) -> bool {
         if optional {
-            (if self.share_optional {
+            (if self.policy.optional_peer_scope == crate::OptionalPeerScope::Workspace {
                 self.global
             } else {
                 &self.project
             })
             .contains(key)
         } else {
-            self.auto_install || (self.share_peers && self.global.contains(key))
+            self.policy.lock.auto_install_peers
+                || (self.policy.dedupe_peer_dependents && self.global.contains(key))
         }
     }
 
@@ -866,7 +868,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
                     name == "patch_hash"
                         || self.environments.get(scope, name).is_none_or(|actual| {
                             actual == value
-                                || (self.dedupe
+                                || (self.policy.lock.dedupe_peers
                                     && !actual.starts_with("link:")
                                     && !value.starts_with("link:")
                                     && graph::package_key(actual) == graph::package_key(value)
@@ -911,7 +913,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
             }
         };
         let Some(binding) = binding else {
-            if !evidence.optional && self.auto_install {
+            if !evidence.optional && self.policy.lock.auto_install_peers {
                 return Err(missing(
                     &["snapshots", consumer, name],
                     "new peer has no unique compatible locked provider",
@@ -976,7 +978,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
             }
             selected = Some(reference(name, candidate));
         }
-        if selected.is_none() && !evidence.optional && self.auto_install {
+        if selected.is_none() && !evidence.optional && self.policy.lock.auto_install_peers {
             return Err(missing(
                 &["snapshots", &key],
                 "no locked peer instance satisfies the enclosing context",
@@ -1028,7 +1030,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
     ) -> Result<Option<String>, LockfileError> {
         // A deduplicated ancestor can prove only the provider's version. Its
         // child's existing edge supplies the concrete nested peer context.
-        if self.dedupe && !bound.starts_with("link:") && !bound.contains('(') {
+        if self.policy.lock.dedupe_peers && !bound.starts_with("link:") && !bound.contains('(') {
             let key = graph::snapshot_key(name, &bound, Some(self.snapshots));
             if !self.snapshots.contains_key(&key) && !self.written.contains_key(&key) {
                 if bound == graph::package_key(original) {
@@ -1105,7 +1107,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
                                 .map(|value| format!("{actual}@{value}"))
                         })
                     && bound != value
-                    && !(self.dedupe && bound == graph::package_key(value))
+                    && !(self.policy.lock.dedupe_peers && bound == graph::package_key(value))
                 {
                     return false;
                 }
@@ -1128,6 +1130,222 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
         )
     }
 
+    fn bind_providers(
+        &mut self,
+        key: &str,
+        scope: &Environment,
+        input: &InputSnapshot<'_>,
+        bindings: &mut Scope,
+    ) -> Result<BTreeSet<String>, LockfileError> {
+        // Assembly may already have repaired a provider's version, patch or
+        // peer context. Its current edge supersedes the old identity's binding.
+        for (_, name, value) in references(input.original) {
+            if input.own.is_some_and(|peers| peers.contains_key(name))
+                && let Some(binding) = bindings.get_mut(name)
+                && binding != value
+            {
+                value.clone_into(binding);
+            }
+        }
+        let mut unbound = BTreeSet::new();
+        for name in input.names {
+            if bindings.contains_key(name)
+                && let Some(provider) = self.environments.get(scope, name)
+            {
+                bindings.insert(name.clone(), provider.to_owned());
+            }
+        }
+        for (name, evidence) in self.required.get(key).into_iter().flatten() {
+            if let Some(provider) = self.environments.get(scope, name) {
+                bindings.insert(name.clone(), provider.to_owned());
+                continue;
+            }
+            let concrete = self.packages[graph::package_key(key)]
+                .get("peerDependencies")
+                .is_some_and(|peers| peers.get(name).is_some());
+            if let Some(binding) = self.provider(key, name, evidence, scope, concrete)? {
+                bindings.insert(name.clone(), binding);
+                continue;
+            }
+            bindings.remove(name);
+            unbound.insert(name.clone());
+        }
+        if let Some(retired) = self.retired.get(key) {
+            bindings.retain(|name, _| !retired.contains(name));
+        }
+        Ok(unbound)
+    }
+
+    fn finish_snapshot(&self, key: &str, input: &InputSnapshot<'_>, body: &mut Cow<'a, Value>) {
+        let mut transitive: BTreeSet<&str> = input
+            .original
+            .get("transitivePeerDependencies")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|value| value.as_str().expect("peer name"))
+            .collect();
+        transitive.extend(
+            self.required
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|(name, _)| input.own.is_none_or(|m| !m.contains_key(*name)))
+                .map(|(name, _)| name.as_str()),
+        );
+        if let Some(retired) = self.retired.get(key) {
+            transitive.retain(|name| !retired.contains(*name));
+        }
+        for group in EDGES {
+            if graph::section(body, group).is_some_and(Map::is_empty) {
+                body.to_mut()
+                    .as_object_mut()
+                    .expect("snapshot mapping")
+                    .remove(group);
+            }
+        }
+        if !transitive.is_empty() {
+            if !body["transitivePeerDependencies"]
+                .as_array()
+                .is_some_and(|prev| {
+                    prev.iter()
+                        .filter_map(Value::as_str)
+                        .eq(transitive.iter().copied())
+                })
+            {
+                body.to_mut()["transitivePeerDependencies"] = Value::Array(
+                    transitive
+                        .into_iter()
+                        .map(|n| Value::String(n.into()))
+                        .collect(),
+                );
+            }
+        } else if body.get("transitivePeerDependencies").is_some() {
+            body.to_mut()
+                .as_object_mut()
+                .expect("snapshot mapping")
+                .remove("transitivePeerDependencies");
+        }
+    }
+
+    fn publish_instance(
+        &mut self,
+        side: usize,
+        original_key: &str,
+        original_bindings: Option<&Scope>,
+        desired: String,
+        bindings: Scope,
+        mut body: Cow<'a, Value>,
+    ) -> Result<Symbol, LockfileError> {
+        let original_identity = self.environments.symbol(original_key);
+        let identity = self.environments.symbol(&desired);
+        if let Some(ResolvedInstance { body: existing, .. }) = self.written.get_mut(&desired)
+            && (existing.get("optional").and_then(Value::as_bool) != Some(true)
+                || body.get("optional").and_then(Value::as_bool) != Some(true))
+        {
+            // An instance is optional only when every consumer is optional.
+            for record in [existing, &mut body] {
+                if record.get("optional").is_some() {
+                    record
+                        .to_mut()
+                        .as_object_mut()
+                        .expect("snapshot mapping")
+                        .remove("optional");
+                }
+            }
+        }
+        let name_changes = original_bindings.map(|before| {
+            let added = bindings
+                .keys()
+                .filter(|name| !before.contains_key(*name))
+                .count();
+            let value_changes = bindings
+                .iter()
+                .filter(|(name, value)| {
+                    before.get(*name).is_some_and(|old| {
+                        if self.policy.lock.dedupe_peers {
+                            graph::package_key(old) != graph::package_key(value)
+                                || peer::patch(old) != peer::patch(value)
+                        } else {
+                            old != *value
+                        }
+                    })
+                })
+                .count();
+            (before.len() + 2 * added - bindings.len(), value_changes)
+        });
+        let replace = self
+            .written
+            .get(&desired)
+            .map_or(
+                Some(true),
+                |ResolvedInstance {
+                     side: old_side,
+                     original,
+                     changes: old_name_changes,
+                     body: existing,
+                 }| {
+                    // Preserve an already locked instance when another context
+                    // converges on its identity. Both bodies have been repaired
+                    // under the final configuration; source preference still wins
+                    // when they originate on different branches.
+                    let old_exact = *original == identity;
+                    let new_exact = original_identity == identity;
+                    if *old_side == side && old_exact != new_exact {
+                        return Some(new_exact);
+                    }
+                    if *old_side == side
+                        && let (Some(old_changes), Some(changes)) = (old_name_changes, name_changes)
+                        && *old_changes != changes
+                    {
+                        return Some(changes < *old_changes);
+                    }
+                    self.peers.prefer_record(*old_side, existing, side, &body)
+                },
+            )
+            .ok_or_else(|| {
+                missing(
+                    &["snapshots", &desired],
+                    "new peer contexts produce different dependency records",
+                )
+            })?;
+        if replace {
+            self.written.insert(
+                desired.clone(),
+                ResolvedInstance {
+                    side,
+                    original: original_identity,
+                    changes: name_changes,
+                    body,
+                },
+            );
+            // Keep input provenance stable while other roots still read it.
+            if self.snapshots.contains_key(&desired) {
+                let bindings = bindings
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            self.environments.symbol(name),
+                            self.environments.symbol(value),
+                        )
+                    })
+                    .collect();
+                self.deferred_contexts.insert(
+                    identity,
+                    DeferredContext {
+                        side,
+                        original: original_identity,
+                        bindings,
+                    },
+                );
+            } else {
+                self.peers
+                    .record_context(side, original_key, &desired, bindings);
+            }
+        }
+        Ok(identity)
+    }
+
     fn node(&mut self, key: &str, scope: &Environment) -> Result<Option<Symbol>, LockfileError> {
         // Rebinding can expose a locked provider outside the initially selected
         // graph. Send that reference through the same assembly worklist so its
@@ -1141,7 +1359,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
         let names = input.names;
         let symbol = self.environments.symbol(key);
         let input_state = (symbol, self.scope_id, self.input_context(key, scope));
-        if let Some(resolved) = self.input_cache.get(&input_state) {
+        if let Some(resolved) = self.traversal.input_cache.get(&input_state) {
             return Ok(Some(*resolved));
         }
         let mut state = (
@@ -1169,8 +1387,7 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
             None if self.unchanged_context(key, scope) => {
                 // Existing opaque identities remain valid when no affected
                 // dependency edge or peer requirement changes in their closure.
-                self.cache.insert(state, state.0);
-                self.input_cache.insert(input_state, state.0);
+                self.traversal.remember(state, input_state, state.0);
                 return Ok(None);
             }
             None => self
@@ -1184,45 +1401,9 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
                 })?,
         };
         let original_key = self.peers.origin_key(key).to_owned();
-        let original_identity = self.environments.symbol(&original_key);
         let original_bindings = self.peers.original_context(side, &original_key, &previous);
         let own = input.own;
-        // Assembly may already have repaired a provider's version, patch or
-        // peer context. Its current edge supersedes the old identity's binding.
-        for (_, name, value) in references(original) {
-            if own.is_some_and(|peers| peers.contains_key(name))
-                && let Some(binding) = bindings.get_mut(name)
-                && binding != value
-            {
-                value.clone_into(binding);
-            }
-        }
-        let mut unbound = BTreeSet::new();
-        for name in names {
-            if bindings.contains_key(name)
-                && let Some(provider) = self.environments.get(scope, name)
-            {
-                bindings.insert(name.clone(), provider.to_owned());
-            }
-        }
-        for (name, evidence) in self.required.get(key).into_iter().flatten() {
-            if let Some(provider) = self.environments.get(scope, name) {
-                bindings.insert(name.clone(), provider.to_owned());
-                continue;
-            }
-            let concrete = self.packages[graph::package_key(key)]
-                .get("peerDependencies")
-                .is_some_and(|peers| peers.get(name).is_some());
-            if let Some(binding) = self.provider(key, name, evidence, scope, concrete)? {
-                bindings.insert(name.clone(), binding);
-                continue;
-            }
-            bindings.remove(name);
-            unbound.insert(name.clone());
-        }
-        if let Some(retired) = self.retired.get(key) {
-            bindings.retain(|name, _| !retired.contains(name));
-        }
+        let unbound = self.bind_providers(key, scope, input, &mut bindings)?;
         // Resolve missing providers before memoization: their concrete context
         // can depend on enclosing peers absent from this node's old identity.
         state.2 = self.environments.overlay_context(
@@ -1266,8 +1447,8 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
         indirect.dedup();
         let indirect = self.environments.project(scope, &indirect);
         state.2 = self.environments.combine(state.2, indirect);
-        if let Some(resolved) = self.cache.get(&state) {
-            self.input_cache.insert(input_state, *resolved);
+        if let Some(resolved) = self.traversal.cache.get(&state) {
+            self.traversal.input_cache.insert(input_state, *resolved);
             return Ok(Some(*resolved));
         }
         let encode = |peers: &mut peer::Merger<'_>, bindings: &Scope| {
@@ -1284,18 +1465,16 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
         let instance = (state.0, self.scope_id, self.environments.symbol(&initial));
         // Once a deduplicated instance is complete, enclosing contexts that
         // produce the same identity reuse its selected dependency record.
-        if self.dedupe
-            && let Some(resolved) = self.completed.get(&instance)
+        if self.policy.lock.dedupe_peers
+            && let Some(&resolved) = self.traversal.completed.get(&instance)
         {
-            self.cache.insert(state, *resolved);
-            self.input_cache.insert(input_state, *resolved);
-            return Ok(Some(*resolved));
+            self.traversal.remember(state, input_state, resolved);
+            return Ok(Some(resolved));
         }
-        if !self.active.insert(instance) {
-            self.back_edges.insert(instance);
+        if !self.traversal.active.insert(instance) {
+            self.traversal.back_edges.insert(instance);
             // The owning frame verifies that the identity stays unchanged.
-            self.cache.insert(state, instance.2);
-            self.input_cache.insert(input_state, instance.2);
+            self.traversal.remember(state, input_state, instance.2);
             return Ok(Some(instance.2));
         }
         let edges = &input.edges;
@@ -1418,171 +1597,25 @@ impl<F: Fn(&str) -> Option<usize>> Resolver<'_, '_, '_, F> {
                 break;
             }
         }
-        self.active.remove(&instance);
-        if !settled || (self.back_edges.remove(&instance) && desired != initial) {
+        self.traversal.active.remove(&instance);
+        if !settled || (self.traversal.back_edges.remove(&instance) && desired != initial) {
             return Err(missing(
                 &["snapshots", key],
                 "new peer identities do not reach a stable cycle",
             ));
         }
-        let mut transitive: BTreeSet<&str> = original
-            .get("transitivePeerDependencies")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|value| value.as_str().expect("peer name"))
-            .collect();
-        transitive.extend(
-            self.required
-                .get(key)
-                .into_iter()
-                .flatten()
-                .filter(|(name, _)| own.is_none_or(|m| !m.contains_key(*name)))
-                .map(|(name, _)| name.as_str()),
-        );
-        if let Some(retired) = self.retired.get(key) {
-            transitive.retain(|name| !retired.contains(*name));
-        }
-        for group in EDGES {
-            if graph::section(&body, group).is_some_and(Map::is_empty) {
-                body.to_mut()
-                    .as_object_mut()
-                    .expect("snapshot mapping")
-                    .remove(group);
-            }
-        }
-        if !transitive.is_empty() {
-            if !body["transitivePeerDependencies"]
-                .as_array()
-                .is_some_and(|prev| {
-                    prev.iter()
-                        .filter_map(Value::as_str)
-                        .eq(transitive.iter().copied())
-                })
-            {
-                body.to_mut()["transitivePeerDependencies"] = Value::Array(
-                    transitive
-                        .into_iter()
-                        .map(|n| Value::String(n.into()))
-                        .collect(),
-                );
-            }
-        } else if body.get("transitivePeerDependencies").is_some() {
-            body.to_mut()
-                .as_object_mut()
-                .expect("snapshot mapping")
-                .remove("transitivePeerDependencies");
-        }
-        let identity = self.environments.symbol(&desired);
-        if let Some(ResolvedInstance { body: existing, .. }) = self.written.get_mut(&desired)
-            && (existing.get("optional").and_then(Value::as_bool) != Some(true)
-                || body.get("optional").and_then(Value::as_bool) != Some(true))
-        {
-            // An instance is optional only when every consumer is optional.
-            for record in [existing, &mut body] {
-                if record.get("optional").is_some() {
-                    record
-                        .to_mut()
-                        .as_object_mut()
-                        .expect("snapshot mapping")
-                        .remove("optional");
-                }
-            }
-        }
-        let name_changes = original_bindings.as_ref().map(|before| {
-            let added = bindings
-                .keys()
-                .filter(|name| !before.contains_key(*name))
-                .count();
-            let value_changes = bindings
-                .iter()
-                .filter(|(name, value)| {
-                    before.get(*name).is_some_and(|old| {
-                        if self.dedupe {
-                            graph::package_key(old) != graph::package_key(value)
-                                || peer::patch(old) != peer::patch(value)
-                        } else {
-                            old != *value
-                        }
-                    })
-                })
-                .count();
-            (before.len() + 2 * added - bindings.len(), value_changes)
-        });
-        let replace = self
-            .written
-            .get(&desired)
-            .map_or(
-                Some(true),
-                |ResolvedInstance {
-                     side: old_side,
-                     original,
-                     changes: old_name_changes,
-                     body: existing,
-                 }| {
-                    // Preserve an already locked instance when another context
-                    // converges on its identity. Both bodies have been repaired
-                    // under the final configuration; source preference still wins
-                    // when they originate on different branches.
-                    let old_exact = *original == identity;
-                    let new_exact = original_identity == identity;
-                    if *old_side == side && old_exact != new_exact {
-                        return Some(new_exact);
-                    }
-                    if *old_side == side
-                        && let (Some(old_changes), Some(changes)) = (old_name_changes, name_changes)
-                        && *old_changes != changes
-                    {
-                        return Some(changes < *old_changes);
-                    }
-                    self.peers.prefer_record(*old_side, existing, side, &body)
-                },
-            )
-            .ok_or_else(|| {
-                missing(
-                    &["snapshots", &desired],
-                    "new peer contexts produce different dependency records",
-                )
-            })?;
-        if replace {
-            self.written.insert(
-                desired.clone(),
-                ResolvedInstance {
-                    side,
-                    original: original_identity,
-                    changes: name_changes,
-                    body,
-                },
-            );
-            // Keep input provenance stable while other roots still read it.
-            if self.snapshots.contains_key(&desired) {
-                let bindings = bindings
-                    .iter()
-                    .map(|(name, value)| {
-                        (
-                            self.environments.symbol(name),
-                            self.environments.symbol(value),
-                        )
-                    })
-                    .collect();
-                self.deferred_contexts.insert(
-                    identity,
-                    DeferredContext {
-                        side,
-                        original: original_identity,
-                        bindings,
-                    },
-                );
-            } else {
-                self.peers
-                    .record_context(side, &original_key, &desired, bindings);
-            }
-        }
-        let resolved = self.environments.symbol(&desired);
-        self.cache.insert(state, resolved);
-        self.input_cache.insert(input_state, resolved);
-        if self.dedupe {
-            self.completed.insert(instance, resolved);
+        self.finish_snapshot(key, input, &mut body);
+        let resolved = self.publish_instance(
+            side,
+            &original_key,
+            original_bindings.as_deref(),
+            desired,
+            bindings,
+            body,
+        )?;
+        self.traversal.remember(state, input_state, resolved);
+        if self.policy.lock.dedupe_peers {
+            self.traversal.completed.insert(instance, resolved);
         }
         Ok(Some(resolved))
     }

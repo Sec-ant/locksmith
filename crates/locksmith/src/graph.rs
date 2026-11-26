@@ -303,6 +303,7 @@ fn closure_with_snapshots(
     let mut importers: VecDeque<_> = roots.iter().cloned().collect();
     let mut queued_importers = roots.clone();
     let links = LinkedProjects::new(importer_records);
+    let patches = crate::reconcile::patch_index(document);
     let mut traversal = Traversal {
         snapshots: section(document, "snapshots"),
         ..Traversal::default()
@@ -327,7 +328,7 @@ fn closure_with_snapshots(
             )
         } else if let Some((key, snapshot)) = traversal.pending.pop() {
             reached.packages.insert(package_key(key).to_owned());
-            check_package(document, kind, key, &mut issues);
+            check_snapshot(document, kind, key, &patches, &mut issues);
             ("snapshots", key, snapshot, false, ".")
         } else {
             break;
@@ -477,39 +478,32 @@ fn check_package(
         }
         _ => {}
     }
-    if let Some(tail) = snapshot
-        .strip_prefix(key)
-        .and_then(|suffix| suffix.strip_prefix("(patch_hash="))
-    {
-        let hash = tail
-            .split(')')
-            .next()
-            .expect("split always has a first element");
-        let name = key
-            .char_indices()
-            .skip(1)
-            .find(|(_, character)| *character == '@')
-            .map_or(key, |(at, _)| &key[..at]);
-        let declared = section(document, "patchedDependencies").is_some_and(|patches| {
-            patches.iter().any(|(selector, patch)| {
-                (selector == name
-                    || selector
-                        .strip_prefix(name)
-                        .is_some_and(|suffix| suffix.starts_with('@')))
-                    && patch
-                        .as_str()
-                        .or_else(|| patch.get("hash").and_then(Value::as_str))
-                        == Some(hash)
-            })
-        });
-        if !declared {
-            issues.push(issue(
-                kind,
-                &["snapshots", snapshot],
-                format!("patch hash {hash} is absent from patchedDependencies"),
-            ));
+}
+
+fn check_snapshot(
+    document: &Value,
+    kind: DocumentKind,
+    key: &str,
+    patches: &crate::reconcile::PatchIndex<'_>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    check_package(document, kind, key, issues);
+    let message = match crate::peer::checked_patch(key) {
+        Err(message) => message,
+        Ok(actual)
+            if (actual.is_some() || document.get("patchedDependencies").is_some())
+                && crate::reconcile::desired_patch_with_index(
+                    key,
+                    document,
+                    [document; 4],
+                    Some(patches),
+                ) != Some(actual) =>
+        {
+            "snapshot patch hash differs from the applicable patchedDependencies selector"
         }
-    }
+        Ok(_) => return,
+    };
+    issues.push(issue(kind, &["snapshots", key], message));
 }
 
 fn check_catalogs(
@@ -567,7 +561,9 @@ fn check_catalogs(
                     }
             } else {
                 spec.zip(pin).is_some_and(|(spec, pin)| {
-                    crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)
+                    crate::reconcile::metadata::catalog_consumer_fits(
+                        name, spec, pin, entry, config,
+                    )
                 })
             };
             if !fits {
@@ -603,16 +599,28 @@ fn check_overrides(
     }
 }
 
-pub(crate) fn validate(document: &Value, kind: DocumentKind) -> Vec<ValidationIssue> {
-    validate_with_config(document, kind, None)
-}
-
 pub(crate) fn validate_with_config(
     document: &Value,
     kind: DocumentKind,
     config: Option<&crate::WorkspaceConfig>,
 ) -> Vec<ValidationIssue> {
+    validate_with_unresolved_snapshots(document, kind, config, &[])
+}
+
+pub(crate) fn validate_with_unresolved_snapshots(
+    document: &Value,
+    kind: DocumentKind,
+    config: Option<&crate::WorkspaceConfig>,
+    unresolved: &[String],
+) -> Vec<ValidationIssue> {
+    let patches = crate::reconcile::patch_index(document);
     let mut issues = Vec::new();
+    if let Err(error) = crate::LockSettings::from_document(
+        document,
+        config.and_then(|cfg| cfg.pnpm_version.as_ref()),
+    ) {
+        issues.push(issue(kind, &["settings"], error.to_string()));
+    }
     let overrides = crate::manifest::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
@@ -623,8 +631,10 @@ pub(crate) fn validate_with_config(
     // Validation scans all edges once, including unreachable records. It does
     // not need a reachability walk or a per-edge diagnostic allocation on success.
     for (key, snapshot) in section(document, "snapshots").into_iter().flatten() {
-        check_package(document, kind, key, &mut issues);
-        check_references(document, snapshot, kind, "snapshots", key, &mut issues);
+        check_snapshot(document, kind, key, &patches, &mut issues);
+        if !unresolved.contains(key) {
+            check_references(document, snapshot, kind, "snapshots", key, &mut issues);
+        }
     }
     for name in ["importers", "snapshots", "packages"] {
         if document.get(name).is_some_and(|value| !value.is_object()) {
@@ -818,6 +828,12 @@ fn retain(
         }
     }
     let mut issues = Vec::new();
+    if let Err(error) = crate::LockSettings::from_document(
+        document,
+        config.and_then(|cfg| cfg.pnpm_version.as_ref()),
+    ) {
+        issues.push(issue(kind, &["settings"], error.to_string()));
+    }
     let overrides = crate::manifest::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, error::Error, fs, path::Path, thread};
 
-use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget};
+use locksmith::{Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget};
 use serde_json::Value;
 
 use crate::registry::ProjectRc;
@@ -14,10 +14,13 @@ fn read_source(path: &Path) -> ReadResult<Lockfile> {
 }
 
 pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile; 3]> {
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("merge_input_parsing");
     let paths = files.map(AsRef::as_ref);
+    // The base size approximates each of the three lockfiles from the same workspace.
     if paths[0]
         .metadata()
-        .is_ok_and(|file| crate::parallel_parse(file.len()))
+        .is_ok_and(|file| crate::parallel_parse(file.len().saturating_mul(3)))
     {
         return thread::scope(|scope| {
             let spawn =
@@ -43,46 +46,68 @@ pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile
     ])
 }
 
-pub fn with_context<P: AsRef<Path>>(
-    files: [&P; 3],
+pub(crate) enum Sources {
+    Parsed([Lockfile; 3]),
+    Yaml([String; 3]),
+}
+
+impl Sources {
+    pub fn read<P: AsRef<Path>>(files: [&P; 3]) -> Result<Self> {
+        match read_three(files) {
+            Ok(locks) => Ok(Self::Parsed(locks)),
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<LockfileError>(),
+                    Some(LockfileError::Parse(_))
+                ) =>
+            {
+                let [base, ours, theirs] = files.map(fs::read_to_string);
+                Ok(Self::Yaml([base?, ours?, theirs?]))
+            }
+            Err(e) => Err(e as Box<dyn Error>),
+        }
+    }
+
+    pub(crate) fn inputs(&self) -> [MergeInput<'_>; 3] {
+        match self {
+            Self::Parsed(locks) => locks.each_ref().map(MergeInput::from),
+            Self::Yaml(text) => text.each_ref().map(|s| MergeInput::from(s.as_str())),
+        }
+    }
+}
+
+pub(crate) fn with_context(
+    merge: &locksmith::ContextualMerge<'_>,
     context: &MergeContext<'_>,
-    policy: &Policy,
     raw: &Value,
     network: Option<ProjectRc<'_>>,
 ) -> Result<Lockfile> {
-    let parsed = read_three(files);
-    let parsed = match parsed {
-        Ok(locks) => Ok(locks),
-        Err(e)
-            if matches!(
-                e.downcast_ref::<LockfileError>(),
-                Some(LockfileError::Parse(_))
-            ) =>
-        {
-            let [base, ours, theirs] = files.map(fs::read_to_string);
-            Err([base?, ours?, theirs?])
-        }
-        Err(e) => return Err(e as Box<dyn Error>),
-    };
     let result = crate::registry::resolve(
         crate::registry::Lookup::Merge,
         network,
         raw,
-        &context.manifests["."],
+        context
+            .configuration
+            .pnpm_version
+            .as_ref()
+            .map(|v| v.major()),
         |registry| {
             let context = MergeContext {
                 registry,
                 ..*context
             };
-            match &parsed {
-                Ok([b, o, t]) => locksmith::merge(b, o, t, Some(&context)),
-                Err([b, o, t]) => {
-                    locksmith::merge(b.as_str(), o.as_str(), t.as_str(), Some(&context))
-                }
+            if registry.is_some() {
+                merge.merge_with_requests(&context)
+            } else {
+                merge.merge(&context).map_err(|e| vec![e])
             }
         },
     )?;
-    policy.check_peers(raw, &result, context.manifests)?;
+    Policy::from_configuration(context.configuration).check_peers(
+        raw,
+        &result,
+        context.manifests,
+    )?;
     Ok(result)
 }
 
@@ -98,22 +123,32 @@ pub fn from_file<P: AsRef<Path>>(
         _ => return Err("context.target must be ours or theirs".into()),
     };
     let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
-    let policy = Policy::from_manifest(manifests.get(".").ok_or("missing root manifest")?);
+    let root = manifests.get(".").ok_or("missing root manifest")?;
     let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
-    let [base, ours, theirs] = source.each_ref().map(|s| -> Result<_> {
-        if let Some(manager) = s.get("packageManager") {
-            let version = manager
-                .as_str()
-                .and_then(|s| s.strip_prefix("pnpm@"))
-                .and_then(|v| v.parse().ok())
-                .ok_or("context.configurations[].packageManager must be an exact pnpm@version")?;
-            Ok(locksmith::WorkspaceConfig::from_pnpm_version(s, &version)?)
-        } else {
-            Ok(policy.configuration(s)?)
-        }
+    let inputs = Sources::read(files)?;
+    let locks = inputs.inputs();
+    let [base, ours, theirs] = [0, 1, 2].map(|i| {
+        locksmith::WorkspaceConfig::from_pnpm_source(
+            &source[i],
+            Some(root),
+            locks[i].recorded_pnpm_version(),
+        )
     });
     let configurations = [base?, ours?, theirs?];
-    let config = policy.configuration(&raw["configuration"])?;
+    let settings = &raw["configuration"];
+    let ((), config, merge) =
+        target.workspace_for_candidate(Some(root), locks, |lock| -> Result<_> {
+            let version = lock.and_then(Lockfile::recorded_pnpm_version);
+            let config =
+                locksmith::WorkspaceConfig::from_pnpm_context(settings, Some(root), version)?;
+            let config = crate::workspace::bootstrap_configuration(
+                config,
+                settings,
+                lock.map(Into::into),
+                crate::registry::working_rc,
+            )?;
+            Ok(((), config))
+        })?;
     let patches = serde_json::from_value(raw["patches"].take())?;
     let context = MergeContext {
         registry: None,
@@ -124,9 +159,8 @@ pub fn from_file<P: AsRef<Path>>(
         patches: &patches,
     };
     with_context(
-        files,
+        &merge,
         &context,
-        &policy,
         &raw["configuration"],
         allow_network.then_some(ProjectRc::Working),
     )

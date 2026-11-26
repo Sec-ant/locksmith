@@ -62,6 +62,20 @@ add_root_react() {
 add_root_react ../base.yaml > ../theirs.yaml
 add_root_react ../ours.yaml > ../merged.yaml
 
+# The merge combines the installed editor manifest with the other branch's root dependency.
+python3 - <<'PYTHON'
+from pathlib import Path
+import json
+
+manifests = {str(path.parent): json.loads(path.read_text()) for path in Path("apps").glob("*/package.json")}
+root = json.loads(Path("package.json").read_text())
+root.setdefault("dependencies", {})["react"] = "18.2.0"
+manifests["."] = root
+Path("../context.json").write_text(json.dumps({
+    "target": "ours", "manifests": manifests, "configurations": [{}, {}, {}], "configuration": {}, "patches": {}
+}))
+PYTHON
+
 # Give the installed graph a real peer mismatch across the replicated sites.
 sed "s/immer: '>=9\.0[^']*'/immer: '^11.0.0'/" pnpm-lock.yaml > ../inspect.yaml
 
@@ -79,6 +93,9 @@ LOCKSMITH_BENCH_DIR=$(cd .. && pwd)
 export LOCKSMITH_OUTPUT="$LOCKSMITH_BENCH_DIR/actual.yaml"
 "$bench/cli" merge
 cmp ../merged.yaml ../actual.yaml
+"$bench/cli" merge-context
+cmp ../merged.yaml ../actual.yaml
+"$bench/cli" validate-workspace
 "$bench/cli" converge
 cmp ../ours.yaml ../actual.yaml
 "$bench/cli" repair

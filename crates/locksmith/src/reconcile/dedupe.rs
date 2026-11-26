@@ -182,5 +182,11 @@ fn allows(
     else {
         return Ok(false);
     };
-    Ok(accepts(edge.name, &range, pin, output))
+    Ok(accepts(
+        edge.name,
+        &range,
+        pin,
+        output,
+        Some(sources.configuration),
+    ))
 }

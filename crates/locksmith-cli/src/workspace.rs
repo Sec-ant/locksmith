@@ -1,6 +1,9 @@
+mod patterns;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{self, BufRead, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -25,13 +28,13 @@ pub const CONFIG_FILES: &[&str] = &[
 pub const DEFAULT_HOOK_FILES: [&str; 2] = [".pnpmfile.mjs", ".pnpmfile.cjs"];
 
 pub fn check_conflicts(
-    conflicts: &BTreeSet<String>,
+    conflicts: &BTreeSet<Vec<u8>>,
     relevant: impl Fn(&str) -> bool,
 ) -> Result<()> {
     let paths: Vec<_> = conflicts
         .iter()
+        .filter_map(|p| std::str::from_utf8(p).ok())
         .filter(|p| relevant(p))
-        .map(String::as_str)
         .collect();
     if !paths.is_empty() {
         return Err(format!(
@@ -45,8 +48,34 @@ pub fn check_conflicts(
 
 pub fn read_manifest(
     dir: &str,
-    mut read: impl FnMut(&str) -> Result<Option<String>>,
+    read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<Option<Value>> {
+    Ok(read_named_manifest(dir, read)?.map(|(_, manifest)| manifest))
+}
+
+pub(super) fn read_regular_file(path: &Path) -> io::Result<Option<String>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Opening a FIFO with no writer must not block the manifest reader.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(Some(text))
+}
+
+pub(super) fn read_named_manifest(
+    dir: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<Option<(&'static str, Value)>> {
     for name in MANIFEST_NAMES {
         let path = if dir == "." {
             name.to_owned()
@@ -54,7 +83,7 @@ pub fn read_manifest(
             format!("{dir}/{name}")
         };
         let Some(text) = read(&path)? else { continue };
-        return parse_manifest(&path, &text).map(Some);
+        return Ok(Some((name, parse_manifest(&path, &text)?)));
     }
     Ok(None)
 }
@@ -80,7 +109,41 @@ pub struct Project {
     pub workspace: bool,
     pub pnpm_version: Option<node_semver::Version>,
 }
+
+pub(super) fn apply_manager_policy(config: &mut locksmith::WorkspaceConfig) {
+    if let Ok(policy) =
+        std::env::var("pnpm_config_pm_on_fail").or_else(|_| std::env::var("PNPM_CONFIG_PM_ON_FAIL"))
+    {
+        config.pm_on_fail = Some(policy);
+    }
+}
+
+pub(super) fn bootstrap_configuration(
+    mut config: locksmith::WorkspaceConfig,
+    raw: &Value,
+    lock: Option<locksmith::MergeInput<'_>>,
+    read_rc: impl FnOnce() -> Result<Option<String>>,
+) -> Result<locksmith::WorkspaceConfig> {
+    apply_manager_policy(&mut config);
+    config
+        .config_registries
+        .extend(crate::registry::bootstrap_registries(raw, lock, read_rc)?);
+    Ok(config)
+}
+
 impl Project {
+    pub fn configuration(&self) -> Result<locksmith::WorkspaceConfig> {
+        Ok(crate::policy::Policy::from_project(self).configuration(&self.config)?)
+    }
+
+    pub fn bootstrap_configuration(
+        &self,
+        lock: Option<locksmith::MergeInput<'_>>,
+        read_rc: impl FnOnce() -> Result<Option<String>>,
+    ) -> Result<locksmith::WorkspaceConfig> {
+        bootstrap_configuration(self.configuration()?, &self.config, lock, read_rc)
+    }
+
     pub fn read(
         blobs: &mut Blobs,
         tree: &str,
@@ -97,7 +160,10 @@ impl Project {
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-        let recorded_version = if recorded_version.is_none() && pnpm_version(&root).is_none() {
+        let recorded_version = if recorded_version.is_none()
+            && pnpm_version(&root).is_none_or(|v| {
+                v.major() < 11 && root["devEngines"].get("packageManager").is_some()
+            }) {
             read("pnpm-lock.yaml")?
                 .as_deref()
                 .and_then(locksmith::RepairInput::recorded_pnpm_version)
@@ -112,7 +178,7 @@ impl Project {
         recorded_version: Option<node_semver::Version>,
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
-        let version = pnpm_version(&root).or(recorded_version);
+        let version = locksmith::WorkspaceConfig::project_pnpm_version(&root, recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
@@ -143,10 +209,7 @@ impl Project {
 }
 
 pub fn pnpm_version(root: &Value) -> Option<node_semver::Version> {
-    root["packageManager"]
-        .as_str()
-        .and_then(|v| v.strip_prefix("pnpm@"))
-        .and_then(|v| v.parse::<node_semver::Version>().ok())
+    locksmith::WorkspaceConfig::project_pnpm_version(root, None)
 }
 
 /// Read the package-manager settings shared by workspace operations and inspection.
@@ -224,17 +287,32 @@ pub fn manifests(
     tree: &str,
     prefix: &str,
 ) -> Result<BTreeMap<String, Value>> {
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("committed_manifests");
     let mut manifests = BTreeMap::from([(".".into(), project.root.clone())]);
     if project.workspace {
         let members = Members::new(project)?;
-        let tree_paths = git::workspace_paths(tree, prefix)?;
-        let paths = members.manifest_paths(&tree_paths, prefix);
-        git::prefetch_manifests(tree, prefix, &paths)?;
-        for (id, path) in paths {
+        if members.include.is_empty() {
+            return Ok(manifests);
+        }
+        let mut paths = BTreeMap::new();
+        let root = format!("{tree}:{}", prefix.trim_end_matches('/'));
+        members.committed_paths(&root, "", tree, prefix, &mut paths, blobs)?;
+        git::prefetch_manifests(paths.values().map(|(_, id)| id.as_str()))?;
+        if !blobs.conflicts.is_empty() {
+            blobs.check_linked_conflicts(
+                tree,
+                paths
+                    .iter()
+                    .map(|(id, (name, _))| format!("{prefix}{id}/{name}")),
+            )?;
+        }
+        for (id, (name, oid)) in paths {
             let text = blobs
-                .read(tree, &format!("{prefix}{path}"))?
-                .ok_or_else(|| format!("missing manifest in {tree}:{prefix}{path}"))?;
-            manifests.insert(id.to_owned(), parse_manifest(path, &text)?);
+                .read_object(&oid)?
+                .ok_or_else(|| format!("missing manifest at {tree}:{prefix}{id}/{name}"))?;
+            let manifest = parse_manifest(&format!("{prefix}{id}/{name}"), &text)?;
+            manifests.insert(id, manifest);
         }
     }
     Ok(manifests)
@@ -394,6 +472,7 @@ pub struct Members {
     exclude: Vec<Pattern>,
     descend: BTreeMap<String, Vec<Pattern>>,
     excluded_trees: Vec<Pattern>,
+    component_patterns: BTreeMap<String, Pattern>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
@@ -406,6 +485,7 @@ impl Members {
             exclude: vec![],
             descend: BTreeMap::new(),
             excluded_trees: Vec::new(),
+            component_patterns: BTreeMap::new(),
         };
         if !project.workspace {
             return Ok(this);
@@ -429,30 +509,22 @@ impl Members {
             if pattern.contains(['(', ')', '\\']) || pattern.starts_with(['!', '/']) {
                 return Err(format!("unsupported workspace glob {value:?}").into());
             }
-            // Expand before normalizing: alternatives can have different depths.
-            let expanded = brace_expansion::expand_with_max(pattern, 1025);
-            if expanded.len() > 1024 {
-                return Err(format!("too many alternatives in workspace glob {value:?}").into());
-            }
-            for alternative in expanded {
-                let mut parts = Vec::new();
-                for part in alternative.split('/') {
-                    match part {
-                        "" | "." => (),
-                        ".." if parts.last().is_some_and(|&p| p != "..") => {
-                            parts.pop();
-                        }
-                        ".." if !on_disk => {
-                            return Err(
-                                format!("workspace glob escapes the root: {value:?}").into()
-                            );
-                        }
-                        _ => parts.push(part),
-                    }
-                }
+            for alternative in patterns::expand(
+                pattern,
+                value.starts_with('!'),
+                project.pnpm_version.as_ref(),
+                on_disk,
+            )? {
+                let parts = patterns::components(&alternative);
                 if !parts.is_empty() {
+                    for &part in &parts {
+                        if !this.component_patterns.contains_key(part) {
+                            this.component_patterns
+                                .insert(part.into(), Pattern::new(part)?);
+                        }
+                    }
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
-                    if on_disk && !value.starts_with('!') {
+                    if !value.starts_with('!') {
                         let parents = parts.iter().take_while(|&&p| p == "..").count();
                         let descend = this.descend.entry(parts[..parents].join("/")).or_default();
                         for (index, part) in parts.iter().enumerate().skip(parents) {
@@ -460,7 +532,7 @@ impl Members {
                                 descend.push(Pattern::new(&parts[..=index].join("/"))?);
                             }
                         }
-                    } else if on_disk && let Some(prefix) = parts.strip_suffix(&["**"]) {
+                    } else if let Some(prefix) = parts.strip_suffix(&["**"]) {
                         let tree = if prefix.is_empty() {
                             "**".to_owned()
                         } else {
@@ -475,7 +547,19 @@ impl Members {
     }
 
     pub fn working_directories(&self, prefix: &str) -> Result<BTreeSet<String>> {
-        let mut args = vec!["ls-files", "-zc", "--others", "--exclude-standard"];
+        #[cfg(feature = "bench-profile")]
+        let _span = locksmith::profile::span("worktree_member_discovery");
+        let mut directories = BTreeSet::new();
+        if self.include.is_empty() {
+            return Ok(directories);
+        }
+        let mut args = vec![
+            "ls-files",
+            "-zcv",
+            "--stage",
+            "--others",
+            "--exclude-standard",
+        ];
         let exclude;
         if !self.include.iter().any(|p| p.as_str().contains("**"))
             && let Some(depth) = self
@@ -490,18 +574,87 @@ impl Members {
             exclude = format!("--exclude={}/", "/*".repeat(first_unused_depth));
             args.push(&exclude);
         }
-        args.extend([
-            "--",
-            ":(glob)**/package.json",
-            ":(glob)**/package.json5",
-            ":(glob)**/package.yaml",
-        ]);
-        let paths = git::output(&args)?;
-        Ok(self
-            .manifest_paths(&paths, "")
-            .into_keys()
-            .map(str::to_owned)
-            .collect())
+        let root = std::env::current_dir()?.canonicalize()?;
+        let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
+        git::stream_paths(&args, |paths| {
+            // An indexed regular file may have become a directory symlink in the worktree.
+            let changed = git::output_bytes(&[
+                "diff-files",
+                "--relative",
+                "--name-only",
+                "-z",
+                "--diff-filter=T",
+                "--",
+                ".",
+            ])?;
+            let changed: BTreeSet<_> = changed.split(|&b| b == 0).collect();
+            let mut record = Vec::new();
+            loop {
+                record.clear();
+                if paths.read_until(0, &mut record)? == 0 {
+                    break;
+                }
+                let record = record.strip_suffix(b"\0").unwrap_or(&record);
+                if record.is_empty() {
+                    continue;
+                }
+                let (path, possible_link) = if let Some(path) = record.strip_prefix(b"? ") {
+                    (path, true)
+                } else {
+                    let tab = record
+                        .iter()
+                        .position(|&b| b == b'\t')
+                        .ok_or("invalid git ls-files entry")?;
+                    let path = &record[tab + 1..];
+                    (
+                        path,
+                        record.get(2..8) == Some(b"120000")
+                            || changed.contains(path)
+                            || record[0].is_ascii_lowercase()
+                            || record[0] == b'S',
+                    )
+                };
+                let Ok(path) = std::str::from_utf8(path) else {
+                    continue;
+                };
+                if let Some((id, name)) = path.rsplit_once('/')
+                    && MANIFEST_NAMES.contains(&name)
+                    && self.contains(id)
+                {
+                    directories.insert(id.to_owned());
+                }
+                // Git lists a directory symlink itself, never its member manifests.
+                if !possible_link || !self.may_visit(path, descend) {
+                    continue;
+                }
+                let link = root.join(path);
+                match fs::symlink_metadata(&link) {
+                    Ok(meta) if meta.file_type().is_symlink() => {}
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e.into()),
+                }
+                let Some(target) = linked_directory(&link)? else {
+                    continue;
+                };
+                let mut ancestors: BTreeSet<_> =
+                    link.ancestors().skip(1).map(Path::to_owned).collect();
+                if ancestors.insert(target.clone()) {
+                    self.visit(
+                        &target,
+                        path,
+                        descend,
+                        &mut ancestors,
+                        false,
+                        &mut |id, _| {
+                            directories.insert(id.to_owned());
+                        },
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(directories)
     }
 
     /// Discover manifests from disk, including projects absent from Git or the lockfile.
@@ -509,17 +662,26 @@ impl Members {
         project: &Project,
         root: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
+        #[cfg(feature = "bench-profile")]
+        let _span = locksmith::profile::span("disk_member_discovery");
         let members = Self::from_patterns(project, true)?;
         let mut found = BTreeMap::new();
         for (id, descend) in &members.descend {
             let path = root.join(id).canonicalize()?;
             let mut ancestors = BTreeSet::from([path.clone()]);
-            members.visit(&path, id, descend, &mut ancestors, &mut |id, directory| {
-                let id = importer_id(root, id);
-                if !id.is_empty() {
-                    found.insert(id, directory.to_owned());
-                }
-            })?;
+            members.visit(
+                &path,
+                id,
+                descend,
+                &mut ancestors,
+                true,
+                &mut |id, directory| {
+                    let id = importer_id(root, id);
+                    if !id.is_empty() {
+                        found.insert(id, directory.to_owned());
+                    }
+                },
+            )?;
         }
         Ok(found)
     }
@@ -530,16 +692,88 @@ impl Members {
         id: &str,
         descend: &[Pattern],
         ancestors: &mut BTreeSet<PathBuf>,
-        found: &mut impl FnMut(&str, &Path),
+        split: bool,
+        found: &mut dyn FnMut(&str, &Path),
     ) -> Result<()> {
         let entries =
             fs::read_dir(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        if !split {
+            return self.visit_entries(entries, id, descend, ancestors, split, found);
+        }
+        let mut entries: Vec<_> = entries.collect();
+        if entries.len() < 32 {
+            return self.visit_entries(entries, id, descend, ancestors, split, found);
+        }
+        let readers = if entries.len() >= 128
+            && std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() >= 4)
+        {
+            4
+        } else {
+            2
+        };
+        let range_size = entries.len().div_ceil(readers);
+        let collect = |entries, ancestors: &mut BTreeSet<PathBuf>| -> Result<_> {
+            let mut discovered = Vec::new();
+            self.visit_entries(
+                entries,
+                id,
+                descend,
+                ancestors,
+                false,
+                &mut |id, directory| discovered.push((id.to_owned(), directory.to_owned())),
+            )?;
+            Ok(discovered)
+        };
+        std::thread::scope(|scope| -> Result<()> {
+            let mut workers = Vec::with_capacity(readers - 1);
+            while entries.len() > range_size {
+                let later = entries.split_off(range_size);
+                let range = std::mem::replace(&mut entries, later);
+                let mut path = ancestors.clone();
+                workers.push(
+                    scope.spawn(move || {
+                        collect(range, &mut path).map_err(|error| error.to_string())
+                    }),
+                );
+            }
+            let last = collect(entries, ancestors);
+            let results = workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .expect("workspace directory reader panicked")
+                        .map_err(Into::into)
+                })
+                .chain([last]);
+            // Apply discoveries in directory iteration order.
+            for result in results {
+                for (id, path) in result? {
+                    found(&id, &path);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn visit_entries(
+        &self,
+        entries: impl IntoIterator<Item = std::io::Result<fs::DirEntry>>,
+        id: &str,
+        descend: &[Pattern],
+        ancestors: &mut BTreeSet<PathBuf>,
+        split: bool,
+        found: &mut dyn FnMut(&str, &Path),
+    ) -> Result<()> {
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if MANIFEST_NAMES.contains(&name) && !id.is_empty() && self.contains(id) {
-                found(id, directory);
+                found(
+                    id,
+                    entry.path().parent().expect("directory entry has a parent"),
+                );
             }
             if matches!(name, ".git" | "node_modules" | "bower_components") {
                 continue;
@@ -553,19 +787,14 @@ impl Members {
             if !kind.is_dir() && !kind.is_symlink() {
                 continue;
             }
-            let matches = |p: &Pattern| p.matches_with(&child, GLOB_OPTIONS);
-            if self.excluded_trees.iter().any(matches)
-                || !(self.contains(&child) || descend.iter().any(matches))
-            {
+            if !self.may_visit(&child, descend) {
                 continue;
             }
             let path = if kind.is_symlink() {
-                match entry.path().canonicalize() {
-                    Ok(target) if fs::metadata(&target)?.is_dir() => target,
-                    Ok(_) => continue,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(format!("{}: {e}", entry.path().display()).into()),
-                }
+                let Some(target) = linked_directory(&entry.path())? else {
+                    continue;
+                };
+                target
             } else if kind.is_dir() {
                 entry.path()
             } else {
@@ -573,43 +802,147 @@ impl Members {
             };
             // Detect cycles on this branch; two aliases may both be genuine importer IDs.
             if ancestors.insert(path.clone()) {
-                self.visit(&path, &child, descend, ancestors, found)?;
+                self.visit(&path, &child, descend, ancestors, split, found)?;
                 ancestors.remove(&path);
             }
         }
         Ok(())
     }
 
-    fn manifest_paths<'a>(&self, paths: &'a str, prefix: &str) -> BTreeMap<&'a str, &'a str> {
-        let mut manifests = BTreeMap::new();
-        for path in paths
-            .split_terminator('\0')
-            .filter_map(|p| p.strip_prefix(prefix))
-        {
-            let Some((dir, name)) = path.rsplit_once('/') else {
+    fn committed_paths(
+        &self,
+        object: &str,
+        alias: &str,
+        tree: &str,
+        prefix: &str,
+        found: &mut BTreeMap<String, (String, String)>,
+        blobs: &mut Blobs,
+    ) -> Result<()> {
+        let listing = git::output_bytes(&["ls-tree", "-rz", "--full-tree", object])?;
+        let mut empty_links = BTreeSet::new();
+        for entry in git::entries(&listing) {
+            let (kind, oid, path) = entry?;
+            if !matches!(kind, git::ObjectKind::Blob | git::ObjectKind::Symlink) {
+                continue;
+            }
+            let Ok(path) = std::str::from_utf8(path) else {
                 continue;
             };
-            if MANIFEST_NAMES.contains(&name) && self.contains(dir) {
-                // package.json < package.json5 < package.yaml in pnpm's search order.
-                let selected = manifests.entry(dir).or_insert(path);
-                if path < *selected {
-                    *selected = path;
+            if kind != git::ObjectKind::Symlink
+                && !MANIFEST_NAMES.contains(&path.rsplit('/').next().expect("path component"))
+            {
+                continue;
+            }
+            let logical = if alias.is_empty() {
+                path.to_owned()
+            } else {
+                format!("{alias}/{path}")
+            };
+            let manifest = logical
+                .rsplit_once('/')
+                .filter(|(id, name)| MANIFEST_NAMES.contains(name) && self.contains(id));
+            let manifest = manifest.filter(|(id, name)| {
+                found
+                    .get(*id)
+                    .is_none_or(|(preferred, _)| *name < preferred.as_str())
+            });
+            if kind == git::ObjectKind::Symlink {
+                let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
+                let directory = self.may_visit(&logical, descend);
+                if manifest.is_none() && !directory {
+                    continue;
                 }
+                let Some(target) = blobs.linked_object(tree, prefix, &logical)? else {
+                    continue;
+                };
+                if target.kind == git::ObjectKind::Tree && directory {
+                    // Sibling aliases with equivalent glob matches have identical descendants.
+                    // Reuse only empty matches: nonempty aliases each have their own importer IDs.
+                    let (parent, name) = logical.rsplit_once('/').unwrap_or(("", &logical));
+                    let pattern_matches: Vec<_> = self
+                        .component_patterns
+                        .values()
+                        .map(|pattern| pattern.matches_with(name, GLOB_OPTIONS))
+                        .collect();
+                    let cache_key = (
+                        parent.to_owned(),
+                        target.physical_path,
+                        target.links,
+                        name.starts_with('.'),
+                        pattern_matches,
+                    );
+                    if empty_links.contains(&cache_key) {
+                        continue;
+                    }
+                    let start = found.len();
+                    self.committed_paths(&target.id, &logical, tree, prefix, found, blobs)?;
+                    if found.len() == start && blobs.conflicts.is_empty() {
+                        empty_links.insert(cache_key);
+                    }
+                } else if target.kind == git::ObjectKind::Blob
+                    && let Some((id, name)) = manifest
+                {
+                    Self::record_manifest(found, id, name, &target.id);
+                }
+            } else if let Some((id, name)) = manifest {
+                Self::record_manifest(found, id, name, oid);
             }
         }
-        manifests
+        Ok(())
+    }
+
+    fn record_manifest(
+        found: &mut BTreeMap<String, (String, String)>,
+        id: &str,
+        name: &str,
+        oid: &str,
+    ) {
+        let record = found
+            .entry(id.to_owned())
+            .or_insert_with(|| (name.to_owned(), oid.to_owned()));
+        if name < record.0.as_str() {
+            *record = (name.to_owned(), oid.to_owned());
+        }
+    }
+
+    fn may_visit(&self, path: &str, descend: &[Pattern]) -> bool {
+        let matches = |p: &Pattern| p.matches_with(path, GLOB_OPTIONS);
+        !excluded_directory(path)
+            && !self.excluded_trees.iter().any(matches)
+            && (descend.iter().any(matches) || self.contains(path))
     }
 
     pub fn contains(&self, dir: &str) -> bool {
-        if dir
-            .split('/')
-            .any(|p| matches!(p, "node_modules" | "bower_components"))
-        {
+        if excluded_directory(dir) {
             return false;
         }
         let path = format!("{dir}/package.json");
         let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
+    }
+}
+
+fn excluded_directory(path: &str) -> bool {
+    path.split('/')
+        .any(|p| matches!(p, ".git" | "node_modules" | "bower_components"))
+}
+
+fn linked_directory(path: &Path) -> Result<Option<PathBuf>> {
+    match path.canonicalize() {
+        Ok(target) => Ok(fs::metadata(&target)?.is_dir().then_some(target)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(1921) => Ok(None), // ERROR_CANT_RESOLVE_FILENAME
+        Err(e) => Err(format!("{}: {e}", path.display()).into()),
     }
 }
 

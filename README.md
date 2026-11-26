@@ -78,7 +78,7 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 
 ## Reduce changes after an install
 
-After editing dependencies or upgrading pnpm, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
+After editing dependencies or changing the pinned pnpm version, including a minor or patch upgrade, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
 
 ```sh
 pnpm locksmith converge origin/main > converged.yaml
@@ -122,7 +122,7 @@ pnpm locksmith inspect --json
 
 For each peer finding, the JSON report includes the requester's declared range, locked bindings, matching versions already in the lock, direct and reachable workspaces, and a shortest example path. The report also lists packages with multiple releases or instances and links outside the recorded graph.
 
-Inspection reads the lockfile and adjacent workspace settings offline. The CLI reads linked provider manifests inside the selected workspace. In-memory callers can also supply manifests for external links. For a standalone lock, `--pnpm-version 10.33.2` selects the resolver policy explicitly. Unknown findings identify the missing evidence. Exemptions name the matching project rule. Paths follow edges recorded in the lock, including optional dependencies and each starting workspace's dev dependencies.
+Inspection reads the lockfile and adjacent workspace settings offline. The CLI reads linked provider manifests inside the selected workspace, including linked directories that are not workspace members. In-memory callers can also supply manifests for external links. For a standalone lock, `--pnpm-version 10.33.2` selects the resolver policy explicitly. Unknown findings identify the missing evidence. Exemptions name the matching project rule. Paths follow edges recorded in the lock, including optional dependencies and each starting workspace's dev dependencies.
 
 ## Scripting contract
 
@@ -134,7 +134,7 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 ## Optional registry access
 
-With a complete Git clone, Locksmith works offline by default. In a partial clone, Git may fetch missing objects from its remote. A contextual merge, `converge`, and `repair` can query the configured registry for package metadata with `--allow-network`. The CLI uses the project's registry settings and credentials, respects release-age and version-selection settings, and caches metadata for the command. Package installation remains pnpm's job.
+With a complete Git clone, Locksmith works offline by default. In a partial clone, Git may fetch missing objects from its remote. A contextual merge, `converge`, and `repair` can query the configured registry for package metadata with `--allow-network`. A contextual merge collects independent missing workspace and transitive dependency versions before retrying resolution. The CLI uses the project's registry settings and credentials, respects release-age and version-selection settings, and caches metadata for the command. Package installation remains pnpm's job.
 
 ## Node.js API
 
@@ -150,7 +150,7 @@ const yaml = await convergeWorkspace('origin/main', { cwd: process.cwd() })
 
 For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual merge or repair to allow duplicate-key recovery.
 
-Use `await inspect(lock)` for YAML or a parsed lockfile, or `await inspectWorkspace({ cwd })` for a workspace on disk. Both return an `Inspection` report. The optional second argument to `inspect` supplies workspace configuration and manifests.
+Use `await inspect(lock)` for YAML or a parsed lockfile, or `await inspectWorkspace({ cwd })` for a workspace on disk. Both return an `Inspection` report. The optional second argument to `inspect` supplies workspace configuration and manifests. Both `inspect` and `inspectPeers` compare the supported pnpm policies when the pnpm version is unknown.
 
 Use `parse(yaml)` to reuse a parsed lockfile across calls. `validate`, `dependencyClosure`, and `inspectPeers` check references, trace an importer, and report peer issues. In-memory errors expose a `code` and `details`, including conflict paths and requests for missing registry metadata. Both ESM and CommonJS are supported. [TypeScript API](npm/index.d.ts)
 
@@ -176,7 +176,7 @@ Run `cargo doc -p es-locksmith --no-deps --open` from a checkout for the full AP
 
 ## Performance
 
-Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times. Two further inspection workloads have 1,000 and 4,000 projects linking to an external directory. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory on the same inputs. To time the commands locally, install hyperfine and run `just bench`.
+Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project workspace derived from the convergence fixture. The fixture repeats one site's dependency graph 300 times and also exercises merging with the final workspace manifests and validating workspace settings. Separate loopback registry workloads resolve 64 and 512 missing dependency versions. Two further inspection workloads have 1,000 and 4,000 projects linking to an external directory. The base and PR builds take turns on the same GitHub runner. The benchmark job summary shows the median times and flags consistent slowdowns above the measured noise. [CodSpeed](https://app.codspeed.io/Sec-ant/locksmith) tracks simulated CPU work and memory for the file-based workloads. To time the commands locally, install hyperfine and run `just bench`.
 
 ## Compatibility and limits
 

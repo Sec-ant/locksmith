@@ -564,6 +564,7 @@ dependencies = [
  "glob",
  "jiff",
  "json5",
+ "libc",
  "mimalloc",
  "nodejs-semver",
  "percent-encoding",

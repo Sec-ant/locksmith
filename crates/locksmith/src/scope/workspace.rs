@@ -293,9 +293,9 @@ pub(super) fn apply(
                                 .iter()
                                 .any(|m| m.importer == id && m.before != m.after))
                     {
-                        let fits = current["specifier"]
-                            .as_str()
-                            .is_some_and(|s| reconcile::accepts(name, s, pin, &output));
+                        let fits = current["specifier"].as_str().is_some_and(|s| {
+                            reconcile::accepts(name, s, pin, &output, Some(after))
+                        });
                         if !fits {
                             continue;
                         }
@@ -660,7 +660,13 @@ impl Projector<'_> {
                     && installed_edge.is_some_and(|(_, pin)| {
                         (spec.parse::<node_semver::Range>().is_ok()
                             || manifest::alias(spec).is_some())
-                            && !reconcile::accepts(name, spec, pin, donor)
+                            && !reconcile::accepts(
+                                name,
+                                spec,
+                                pin,
+                                donor,
+                                Some(self.overrides.configuration()),
+                            )
                     });
                 if required_missing || wrong_pin {
                     if old_edge.is_none()
@@ -694,7 +700,13 @@ impl Projector<'_> {
             let new_edge = match (old_edge, installed_edge, constraint.as_deref()) {
                 (Some((_, old_pin)), Some((group, _)), Some(spec))
                     if !peer_names.contains(name)
-                        && reconcile::accepts(name, spec, old_pin, base) =>
+                        && reconcile::accepts(
+                            name,
+                            spec,
+                            old_pin,
+                            base,
+                            Some(self.overrides.configuration()),
+                        ) =>
                 {
                     Some((group, old_pin))
                 }

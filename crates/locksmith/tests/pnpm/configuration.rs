@@ -1296,3 +1296,63 @@ fn catalog_range_overrides_and_publish_directory_match_a_fresh_install() {
         install(&dir, &store, true);
     }
 }
+
+#[test]
+#[ignore = "requires PNPM_BIN and registry access"]
+fn merged_bootstrap_config_dependencies_pass_a_clean_frozen_install() {
+    use locksmith::{MergeContext, MergeTarget, merge};
+    use std::collections::BTreeMap;
+
+    if super::pnpm_version().major() < 11 {
+        return; // Earlier formats do not store config packages in a bootstrap document.
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    let prepare = |id: &str, version: &str, local: bool| {
+        let dir = root.path().join(id);
+        fs::create_dir_all(dir.join("local")).unwrap();
+        fs::write(
+            dir.join("local/package.json"),
+            r#"{"name":"local","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let raw = json!({"packages":[],"configDependencies":{"is-number":version}});
+        let manifest = if local {
+            json!({"dependencies":{"local":"link:./local"}})
+        } else {
+            json!({})
+        };
+        fs::write(dir.join("pnpm-workspace.yaml"), raw.to_string()).unwrap();
+        fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+        (dir, cfg(&raw), manifest)
+    };
+    let load = |id, version, local| {
+        let (dir, config, _) = prepare(id, version, local);
+        install(&dir, &store, false);
+        let lock =
+            Lockfile::parse(&fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap()).unwrap();
+        (lock, config)
+    };
+    let (base, before) = load("base", "6.0.0", false);
+    let (ours, _) = load("ours", "6.0.0", true);
+    let (theirs, after) = load("theirs", "7.0.0", false);
+    let (final_dir, _, manifest) = prepare("merged", "7.0.0", true);
+    let manifests = BTreeMap::from([(".".into(), manifest)]);
+    let patches = BTreeMap::new();
+    let ctx = MergeContext {
+        target: MergeTarget::Ours,
+        registry: None,
+        manifests: &manifests,
+        configuration: &after,
+        configurations: [&before, &before, &after],
+        patches: &patches,
+    };
+    let merged = merge(&base, &ours, &theirs, Some(&ctx)).unwrap();
+    merged
+        .validate_workspace(&manifests, &Default::default(), &after, &patches, |_| {
+            Ok(None)
+        })
+        .unwrap();
+    fs::write(final_dir.join("pnpm-lock.yaml"), merged.to_yaml().unwrap()).unwrap();
+    install(&final_dir, &store, true);
+}

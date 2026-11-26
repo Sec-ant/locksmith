@@ -206,6 +206,208 @@ fn merge_resolves_partial_upper_bounds_with_boolean_deprecation_metadata() {
 }
 
 #[test]
+fn existing_catalog_entries_follow_the_active_runners_npm_range_semantics() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}},
+        "catalogs":{"default":{"pkg":{"specifier":"npm:1","version":"3.0.0"}}},
+        "packages":{"1@3.0.0":{"resolution":{}},"pkg@1.2.0":{"resolution":{}}},
+        "snapshots":{"1@3.0.0":{},"pkg@1.2.0":{}}}),
+    );
+    let config = json!({"catalog":{"pkg":"npm:1"},"pmOnFail":"ignore"});
+    for (runner, version, pin) in [
+        ("11.0.9", "3.0.0", "1@3.0.0"),
+        ("12.21.0", "1.2.0", "1.2.0"),
+    ] {
+        write(
+            root,
+            "ctx",
+            &json!({"target":"ours","manifests":{".":{"packageManager":format!("pnpm@{runner}"),"dependencies":{"pkg":"catalog:"}}},"configuration":config,"configurations":[config,config,config],"patches":{}}),
+        );
+        let graph = output(run(
+            root,
+            CLI,
+            &["merge", "lock", "lock", "lock", "--context", "ctx"],
+        ));
+        assert_eq!(
+            graph["catalogs"]["default"]["pkg"],
+            json!({"specifier":"npm:1","version":version}),
+            "{runner}"
+        );
+        assert_eq!(
+            graph["importers"]["."]["dependencies"]["pkg"]["version"], pin,
+            "{runner}"
+        );
+    }
+}
+
+#[test]
+fn npm_ranges_select_the_package_named_by_the_runner_and_keep_the_written_specifier() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([
+        ("pkg", json!({"name":"pkg","versions":{"1.2.0":{}}})),
+        ("1", json!({"name":"1","versions":{"3.0.0":{}}})),
+    ]));
+    let config = json!({"registry":registry.base,"minimumReleaseAge":0,"pmOnFail":"ignore"});
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}}}),
+    );
+    for (runner, specifier, pin) in [
+        ("12.0.0", "npm:^1", "1.2.0"),
+        ("11.1.0", "npm:1", "1.2.0"),
+        ("11.0.9", "npm:1", "1@3.0.0"),
+        ("12.0.0", "catalog:", "1.2.0"),
+    ] {
+        let mut config = config.clone();
+        if specifier == "catalog:" {
+            config["catalog"] = json!({"pkg":"npm:^1"});
+        }
+        write(
+            root,
+            "ctx",
+            &json!({"target":"ours",
+            "manifests":{".":{"packageManager":format!("pnpm@{runner}"),"dependencies":{"pkg":specifier}}},
+            "configuration":config,"configurations":[config,config,config],"patches":{}}),
+        );
+        let graph = output(run(
+            root,
+            CLI,
+            &[
+                "merge",
+                "lock",
+                "lock",
+                "lock",
+                "--context",
+                "ctx",
+                "--allow-network",
+            ],
+        ));
+        assert_eq!(
+            graph["importers"]["."]["dependencies"]["pkg"],
+            json!({"specifier":specifier,"version":pin}),
+            "{runner}"
+        );
+        write(root, "populated", &graph);
+        let offline = output(run(
+            root,
+            CLI,
+            &[
+                "merge",
+                "populated",
+                "populated",
+                "populated",
+                "--context",
+                "ctx",
+            ],
+        ));
+        assert_eq!(offline, graph, "{runner}");
+    }
+    let paths: Vec<_> = registry.finish().into_iter().map(|r| r.path).collect();
+    assert_eq!(paths, ["/pkg", "/pkg", "/1", "/pkg"]);
+}
+
+#[test]
+fn a_missing_package_is_requested_once_for_multiple_selectors() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::new());
+    let config = json!({"registry":registry.base});
+    write(
+        root,
+        "ctx",
+        &json!({"target":"ours", "manifests":{".":{"dependencies":{"missing":"1","alias":"npm:missing@2"}}},
+        "configuration":config,"configurations":[config,config,config],"patches":{}}),
+    );
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}}}),
+    );
+    let out = run(
+        root,
+        CLI,
+        &[
+            "merge",
+            "lock",
+            "lock",
+            "lock",
+            "--context",
+            "ctx",
+            "--allow-network",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("404"));
+    assert_eq!(registry.finish().len(), 1);
+}
+
+#[test]
+fn a_published_alias_can_supply_its_parents_auto_installed_peer() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([
+        (
+            "parent",
+            json!({"name":"parent","versions":{"1.0.0":{
+                "dependencies":{"alias":"npm:p@1.0.0"}, "peerDependencies":{"p":"^1.0.0"}
+            }}}),
+        ),
+        (
+            "p",
+            json!({"name":"p","dist-tags":{"latest":"1.1.0"},"versions":{"1.0.0":{},"1.1.0":{}}}),
+        ),
+    ]));
+    let config = json!({"registry":registry.base, "minimumReleaseAge":0,
+        "trustPolicy":"no-downgrade", "trustPolicyExclude":["parent@1.0.0","p@1.0.0"]});
+    let mut context = json!({"target":"ours","manifests":{".":{"dependencies":{"parent":"1.0.0"}}},
+        "configuration":config,"configurations":[config,config,config],"patches":{}});
+    write(root, "ctx", &context);
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}}}),
+    );
+    let merge = || {
+        run(
+            root,
+            CLI,
+            &[
+                "merge",
+                "lock",
+                "lock",
+                "lock",
+                "--context",
+                "ctx",
+                "--allow-network",
+            ],
+        )
+    };
+    let graph = output(merge());
+    let pin = graph["importers"]["."]["dependencies"]["parent"]["version"]
+        .as_str()
+        .unwrap();
+    let deps = &graph["snapshots"][format!("parent@{pin}")]["dependencies"];
+    assert_eq!(deps["alias"], "p@1.0.0");
+    assert_eq!(deps["p"], "1.0.0");
+    assert!(graph["packages"].get("p@1.1.0").is_none());
+    context["configuration"]["trustPolicyExclude"] = json!(["parent@1.0.0"]);
+    write(root, "ctx", &context);
+    let rejected = merge();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("p@1.0.0 requires publication trust evidence")
+    );
+    assert_eq!(registry.finish().len(), 4);
+}
+
+#[test]
 fn convergence_recovers_an_original_range_only_when_it_can_reuse_a_baseline_pin() {
     let dir = tempdir().unwrap();
     let root = dir.path();

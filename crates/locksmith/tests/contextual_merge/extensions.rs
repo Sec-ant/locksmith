@@ -342,6 +342,69 @@ fn added_extensions_preserve_existing_dependencies_and_apply_qualified_overrides
 }
 
 #[test]
+fn reconstruction_finds_locked_packages_for_modern_npm_shorthand() {
+    let version = "12.21.0".parse().unwrap();
+    let before = WorkspaceConfig::from_pnpm_version(&json!({}), &version).unwrap();
+    let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"parent":"1.0.0"}}))]);
+    // pnpm 12.21.0 checksums for these packageExtensions declarations.
+    for (specifier, checksum) in [
+        (
+            "npm:^1",
+            "sha256-nj+E74TFYwn3LlIHbt/Ps2Cih0ch1ktJrzwPwO3B3P8=",
+        ),
+        (
+            "npm:pkg@^1",
+            "sha256-LyOvNhhrV9HJ24HJ0ew/39MdxjWwsa9tFCMkzePDXXs=",
+        ),
+    ] {
+        for override_rule in [false, true] {
+            let mut source = json!({"lockfileVersion":"9.0",
+                "importers":{".":{"dependencies":{"parent":{"specifier":"1.0.0","version":"1.0.0"}}}},
+                "packages":{"parent@1.0.0":{"resolution":{"integrity":"sha512-parent"}}},
+                "snapshots":{"parent@1.0.0":{}}
+            });
+            let mut donor = json!({"lockfileVersion":"9.0",
+                "importers":{".":{"dependencies":{"pkg":{"specifier":"1.2.3","version":"1.2.3"}}}},
+                "packages":{"pkg@1.2.3":{"resolution":{"integrity":"sha512-pkg"}}},
+                "snapshots":{"pkg@1.2.3":{}}
+            });
+            let settings = if override_rule {
+                source["packages"]["other@2.0.0"] =
+                    json!({"resolution":{"integrity":"sha512-other"}});
+                source["snapshots"]["other@2.0.0"] = json!({});
+                source["snapshots"]["parent@1.0.0"]["dependencies"]["pkg"] = json!("other@2.0.0");
+                donor["overrides"] = json!({"parent>pkg":specifier});
+                json!({"overrides":donor["overrides"]})
+            } else {
+                donor["packageExtensionsChecksum"] = json!(checksum);
+                json!({"packageExtensions":{"parent@1":{"dependencies":{"pkg":specifier}}}})
+            };
+            let after = WorkspaceConfig::from_pnpm_version(&settings, &version).unwrap();
+            let source = Lockfile::parse(&source.to_string()).unwrap();
+            let donor = Lockfile::parse(&donor.to_string()).unwrap();
+            let output = merge(
+                &source,
+                &source,
+                &donor,
+                Some(&MergeContext {
+                    registry: None,
+                    target: MergeTarget::Ours,
+                    manifests: &manifests,
+                    configurations: [&before, &before, &after],
+                    configuration: &after,
+                    patches: &BTreeMap::new(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(
+                output.project().unwrap()["snapshots"]["parent@1.0.0"]["dependencies"]["pkg"],
+                "1.2.3"
+            );
+        }
+    }
+}
+
+#[test]
 fn added_extensions_prefer_existing_configured_graphs_before_rebuilding_sources() {
     let before = WorkspaceConfig::default();
     let after = cfg(&json!({"packageExtensions":{"lib@1":{"dependencies":{"extra":"1.0.0"}}}}));

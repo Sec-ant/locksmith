@@ -117,6 +117,7 @@ pub(super) fn repair<'a>(
                     v,
                     prior.and_then(|d| d["specifier"].as_str()) == Some(spec.as_ref()),
                     doc,
+                    context.configuration,
                 )
             });
             if let Some(catalog) = catalog {
@@ -137,11 +138,11 @@ pub(super) fn repair<'a>(
                         entry.clone()
                     } else if let Some(pin) = retained {
                         let base = graph::package_key(pin);
-                        let version = manifest::alias(range).map_or(base, |(pkg, _)| {
-                            base.strip_prefix(pkg)
-                                .and_then(|v| v.strip_prefix('@'))
-                                .unwrap_or(base)
-                        });
+                        let effective =
+                            manifest::pinned_specifier(range, pin, Some(context.configuration));
+                        let target = manifest::alias(effective).map_or(name, |(target, _)| target);
+                        let version =
+                            reconcile::version_from_pin(name, target, base).unwrap_or(base);
                         json!({"specifier":range,"version":version})
                     } else {
                         return Err(reconcile::published::need_version(
@@ -269,19 +270,26 @@ fn catalog_fits(spec: &str, entry: &Value) -> bool {
     reconcile::metadata::catalog_entry_version(spec, entry).is_some()
 }
 
-fn fits(name: &str, range: &str, version: &str, same_spec: bool, doc: &Value) -> bool {
+fn fits(
+    name: &str,
+    range: &str,
+    version: &str,
+    same_spec: bool,
+    doc: &Value,
+    config: &crate::WorkspaceConfig,
+) -> bool {
     if version.starts_with("link:") {
         return same_spec;
     }
+    let range = manifest::pinned_specifier(range, version, Some(config));
     if range == "*"
-        && graph::package_key(version)
-            .parse::<node_semver::Version>()
-            .is_ok()
+        && reconcile::version_from_pin(name, name, graph::package_key(version))
+            .is_some_and(|release| release.parse::<node_semver::Version>().is_ok())
     {
         return true;
     }
     if range.starts_with("npm:") || range.parse::<node_semver::Range>().is_ok() {
-        return reconcile::accepts(name, range, version, doc);
+        return reconcile::accepts(name, range, version, doc, Some(config));
     }
     same_spec
 }

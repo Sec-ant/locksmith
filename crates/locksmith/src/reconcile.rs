@@ -1,5 +1,6 @@
 //! Resolve the final workspace against locked graphs and supplied release metadata.
 mod assembly;
+mod bootstrap;
 mod dedupe;
 mod expand;
 mod importers;
@@ -8,7 +9,7 @@ mod preference;
 pub(crate) mod published;
 mod repair;
 
-use crate::{DocumentKind, Lockfile, LockfileError, Value, graph, manifest, peer};
+use crate::{DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -108,12 +109,102 @@ pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileErro
 /// rebound to the selected providers. Missing versions or configuration metadata
 /// are reported explicitly, without registry access or package-manager calls.
 pub(crate) fn resolve(
-    base: &Lockfile,
-    ours: &Lockfile,
-    theirs: &Lockfile,
+    locks: [&Lockfile; 3],
+    context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
+) -> Result<Lockfile, LockfileError> {
+    resolve_sources(locks, context, Bootstrap::Select(bootstrap), false, None)
+}
+
+pub(crate) fn resolve_project(
+    locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
 ) -> Result<Lockfile, LockfileError> {
-    resolve_sources([base, ours, theirs], context, false)
+    resolve_sources(locks, context, Bootstrap::ProjectOnly, false, None)
+}
+
+struct MissingRequests<'a> {
+    first: Option<LockfileError>,
+    additional: Option<&'a mut Vec<LockfileError>>,
+}
+
+impl<'a> MissingRequests<'a> {
+    fn new(additional: Option<&'a mut Vec<LockfileError>>) -> Self {
+        Self {
+            first: None,
+            additional,
+        }
+    }
+
+    fn record(&mut self, error: LockfileError) -> Result<(), LockfileError> {
+        let Some(additional) = self.additional.as_deref_mut() else {
+            return Err(error);
+        };
+        if !matches!(
+            error,
+            LockfileError::ResolutionRequired {
+                request: Some(_),
+                ..
+            }
+        ) {
+            return Err(error);
+        }
+        if self.first.is_some() {
+            additional.push(error);
+        } else {
+            self.first = Some(error);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), LockfileError> {
+        self.first.map_or(Ok(()), Err)
+    }
+}
+
+impl MergeContext<'_> {
+    /// Merge parsed locks and report independent registry requests from the same resolution phase together.
+    /// The caller can supply the requested registry metadata in one pass. A workspace loaded
+    /// by [`MergeTarget`] can reuse its bootstrap selection through [`crate::ContextualMerge::merge_with_requests`].
+    ///
+    /// # Errors
+    /// Returns the errors of [`crate::merge`]. A failure unrelated to missing
+    /// registry metadata is reported on its own.
+    pub fn merge_with_requests(
+        &self,
+        locks: [&Lockfile; 3],
+    ) -> Result<Lockfile, Vec<LockfileError>> {
+        resolve_with_requests(locks, self, None)
+    }
+}
+
+pub(crate) fn resolve_with_requests(
+    locks: [&Lockfile; 3],
+    context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
+) -> Result<Lockfile, Vec<LockfileError>> {
+    let mut additional = Vec::new();
+    resolve_sources(
+        locks,
+        context,
+        Bootstrap::Select(bootstrap),
+        false,
+        Some(&mut additional),
+    )
+    .map_err(|first| {
+        let collect = matches!(
+            first,
+            LockfileError::ResolutionRequired {
+                request: Some(_),
+                ..
+            }
+        );
+        let mut errors = vec![first];
+        if collect {
+            errors.append(&mut additional);
+        }
+        errors
+    })
 }
 
 pub(crate) fn converge_upgrade(
@@ -125,7 +216,13 @@ pub(crate) fn converge_upgrade(
     let mut current = std::borrow::Cow::Borrowed(installed);
     let mut seen = BTreeSet::new();
     loop {
-        let next = resolve_sources([baseline, baseline, &current], context, true)?;
+        let next = resolve_sources(
+            [baseline, baseline, &current],
+            context,
+            Bootstrap::Select(Some(Source::Theirs as usize)),
+            true,
+            None,
+        )?;
         if next.documents == current.documents {
             return Ok(next);
         }
@@ -143,10 +240,17 @@ pub(crate) fn converge_upgrade(
     }
 }
 
+enum Bootstrap {
+    Select(Option<usize>),
+    ProjectOnly,
+}
+
 fn resolve_sources(
     locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
+    bootstrap: Bootstrap,
     prefer_baseline: bool,
+    mut additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Lockfile, LockfileError> {
     if !context.manifests.contains_key(".") {
         return Err(missing(
@@ -185,7 +289,21 @@ fn resolve_sources(
     if prefer_baseline {
         crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
     }
-    let evidence = published::records(context, &metadata, docs, order)?;
+    let environment = match bootstrap {
+        Bootstrap::Select(selected) => Some(bootstrap::environment_source(
+            locks.map(Some),
+            context.target,
+            context.manifests.get("."),
+            |side| {
+                selected
+                    .is_none_or(|selected| selected == side)
+                    .then_some(context.configuration)
+            },
+            [&[]; 3],
+        )?),
+        Bootstrap::ProjectOnly => None,
+    };
+    let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;
     // Migration convergence keeps admissible baseline pins. Headers and the
     // bootstrap graph still come from the final package manager.
@@ -254,7 +372,8 @@ fn resolve_sources(
             .documents()
             .map(|doc| (!doc.is_null()).then_some(doc)),
     );
-    let attempt = |preferences: &preference::Preferences| {
+    let attempt = |preferences: &preference::Preferences,
+                   additional: Option<&mut Vec<LockfileError>>| {
         let mut output = metadata.clone();
         let mut peers = peer::Merger::with_index(peer_index.clone());
         peers.configure_context(
@@ -262,7 +381,14 @@ fn resolve_sources(
             context.configuration.resolution.lock.dedupe_peers,
             context.configuration.linked_peer_encoding,
         );
-        let selected = importers::select(context, &output, &sources, &mut peers, preferences)?;
+        let selected = importers::select(
+            context,
+            &output,
+            &sources,
+            &mut peers,
+            preferences,
+            additional,
+        )?;
         output["importers"] = Value::Object(selected.records);
         let extended = assembly::assemble(
             &mut output,
@@ -301,9 +427,10 @@ fn resolve_sources(
         for (id, value) in context.manifests {
             manifest::check(&overrides, id, Some(value), "merged")?;
         }
-        let environment = environment_source(locks, branch_order, &context.manifests["."])?;
         let mut documents = BTreeMap::new();
-        if let Some(env) = locks[environment].documents.get(&DocumentKind::Environment) {
+        if let Some(env) =
+            environment.and_then(|side| locks[side].documents.get(&DocumentKind::Environment))
+        {
             documents.insert(DocumentKind::Environment, Arc::clone(env));
         }
         documents.insert(DocumentKind::Project, Arc::new(output));
@@ -312,60 +439,20 @@ fn resolve_sources(
             &[locks[target], locks[context.target.other_index()], locks[0]],
         );
         result.preserve_baseline = prefer_baseline;
-        result.validate()?;
+        result.validate_with_config(Some(context.configuration))?;
         Ok(result)
     };
     let mut preferences = preference::Preferences::default();
     let branches = docs;
     loop {
-        match attempt(&preferences) {
+        if let Some(errors) = additional.as_deref_mut() {
+            errors.clear();
+        }
+        match attempt(&preferences, additional.as_deref_mut()) {
             Err(error) if preferences.extend(&error, branches, context) => continue,
             result => return result,
         }
     }
-}
-
-// Package-manager dependencies and their transitive platform binaries form a
-// separate lock document. Reuse the complete graph for the declared manager.
-fn environment_source(
-    locks: [&Lockfile; 3],
-    order: [usize; 3],
-    manifest: &Value,
-) -> Result<usize, LockfileError> {
-    let managers = locks.map(|l| {
-        l.environment()?
-            .get("importers")?
-            .get(".")?
-            .get("packageManagerDependencies")
-    });
-    let Some(version) = manifest
-        .get("packageManager")
-        .and_then(Value::as_str)
-        .and_then(|v| v.strip_prefix("pnpm@"))
-    else {
-        return Ok(order[0]);
-    };
-    if managers.iter().all(|m| m.is_none()) {
-        return Ok(order[0]);
-    }
-    let version = version.split_once("+sha").map_or(version, |(v, _)| v);
-    for side in order {
-        if managers[side].is_some_and(|deps| deps["pnpm"]["specifier"] == version) {
-            return Ok(side);
-        }
-    }
-    // Older pnpm versions can lack a bootstrap document entirely.
-    if version
-        .parse::<node_semver::Version>()
-        .is_ok_and(|v| v.major() < 11)
-        && let Some(side) = order.into_iter().find(|i| managers[*i].is_none())
-    {
-        return Ok(side);
-    }
-    Err(missing(
-        &["importers", ".", "packageManagerDependencies", "pnpm"],
-        format!("no locked bootstrap graph for pnpm@{version}"),
-    ))
 }
 
 fn opaque(specifier: &str) -> bool {
@@ -379,7 +466,13 @@ pub(crate) fn reference(name: &str, key: &str) -> String {
         .unwrap_or(key)
         .into()
 }
-pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &Value) -> bool {
+pub(crate) fn accepts(
+    name: &str,
+    specifier: &str,
+    reference: &str,
+    metadata: &Value,
+    configuration: Option<&WorkspaceConfig>,
+) -> bool {
     if let Some(catalog) = specifier.strip_prefix("catalog:") {
         let catalog = if catalog.is_empty() {
             "default"
@@ -396,9 +489,16 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
         let Some(version) = entry.get("version").and_then(Value::as_str) else {
             return false;
         };
-        return catalog_pin_matches(name, entry["specifier"].as_str(), version, reference);
+        let spec = entry["specifier"]
+            .as_str()
+            .map(|s| manifest::pinned_specifier(s, reference, configuration));
+        return catalog_pin_matches(name, spec, version, reference);
     }
-    range_accepts(name, specifier, reference)
+    range_accepts(
+        name,
+        manifest::pinned_specifier(specifier, reference, configuration),
+        reference,
+    )
 }
 
 fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
@@ -412,29 +512,56 @@ fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference:
                     || package == crate::workspace_links::workspace_request(name, request).0)
         });
     }
-    if let Some((target, _)) = spec.and_then(manifest::alias) {
-        return (target == name && pin == version)
-            || pin.strip_prefix(target).and_then(|s| s.strip_prefix('@')) == Some(version);
-    }
-    pin == version
+    let target = spec
+        .and_then(manifest::alias)
+        .map_or(name, |(target, _)| target);
+    version_from_pin(name, target, pin) == Some(version)
 }
 
 fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
-    let (range, version) = if let Some((target, range)) = manifest::alias(specifier) {
-        let Some(version) = reference
-            .strip_prefix(&format!("{target}@"))
-            .or_else(|| (name == target).then_some(reference))
-        else {
-            return false;
-        };
-        (range, graph::package_key(version))
-    } else {
-        (specifier, graph::package_key(reference))
-    };
-    manifest::matches_version(range, Some(version))
+    let (target, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+    manifest::matches_version(
+        range,
+        version_from_pin(name, target, graph::package_key(reference)),
+    )
+}
+
+pub(crate) fn version_from_pin<'a>(name: &str, target: &str, pin: &'a str) -> Option<&'a str> {
+    pin.strip_prefix(target)
+        .and_then(|suffix| suffix.strip_prefix('@'))
+        .or_else(|| (name == target).then_some(pin))
 }
 // The outer None denotes competing selectors without a unique applicable patch.
-fn desired_patch<'a>(key: &str, metadata: &'a Value, docs: [&Value; 4]) -> Option<Option<&'a str>> {
+pub(crate) fn desired_patch<'a>(
+    key: &str,
+    metadata: &'a Value,
+    docs: [&Value; 4],
+) -> Option<Option<&'a str>> {
+    desired_patch_with_index(key, metadata, docs, None)
+}
+
+pub(crate) type PatchIndex<'a> = HashMap<&'a str, Vec<(&'a str, &'a Value)>>;
+
+pub(crate) fn patch_index(document: &Value) -> PatchIndex<'_> {
+    let mut index = PatchIndex::new();
+    for (selector, patch) in graph::section(document, "patchedDependencies")
+        .into_iter()
+        .flatten()
+    {
+        let (name, range) = manifest::selector(selector);
+        if let Some(range) = range {
+            index.entry(name).or_default().push((range, patch));
+        }
+    }
+    index
+}
+
+pub(crate) fn desired_patch_with_index<'a>(
+    key: &str,
+    metadata: &'a Value,
+    docs: [&Value; 4],
+    index: Option<&PatchIndex<'a>>,
+) -> Option<Option<&'a str>> {
     let package = graph::package_key(key);
     let Some(patches) = metadata
         .get("patchedDependencies")
@@ -468,20 +595,29 @@ fn desired_patch<'a>(key: &str, metadata: &'a Value, docs: [&Value; 4]) -> Optio
         && let Some((name, version)) = package.rsplit_once('@')
     {
         let version = version.parse::<node_semver::Version>().ok();
-        let matching: Vec<_> = patches
-            .iter()
-            .filter_map(|(selector, patch)| {
-                let range = selector
-                    .strip_prefix(name)?
-                    .strip_prefix('@')?
-                    .parse::<node_semver::Range>()
-                    .ok()?;
-                version
-                    .as_ref()
-                    .is_some_and(|v| v.satisfies(&range))
-                    .then_some((range, patch))
-            })
-            .collect();
+        let matches = |(range, patch): (&str, &'a Value)| {
+            let range = range.parse::<node_semver::Range>().ok()?;
+            version
+                .as_ref()
+                .is_some_and(|v| v.satisfies(&range))
+                .then_some((range, patch))
+        };
+        let matching: Vec<_> = match index {
+            Some(index) => index
+                .get(name)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter_map(matches)
+                .collect(),
+            None => patches
+                .iter()
+                .filter_map(|(selector, patch)| {
+                    let range = selector.strip_prefix(name)?.strip_prefix('@')?;
+                    matches((range, patch))
+                })
+                .collect(),
+        };
         if matching.is_empty() {
             declared = patches.get(name);
         } else {

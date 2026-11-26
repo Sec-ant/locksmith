@@ -214,15 +214,20 @@ fn extend_dependencies(
         {
             continue;
         }
-        let actual_name = manifest::alias(&desired).map_or(name, |(name, _)| name);
+        let (actual_name, _) = sources.configuration.registry_request(name, &desired);
         let mut selected = None;
         for existing_patch in [true, false] {
             for (candidate_side, candidate) in
                 sources.candidates().get(actual_name).into_iter().flatten()
             {
                 let candidate_ref = reference(name, candidate);
-                if !accepts(name, &desired, &candidate_ref, metadata)
-                    || sources.authorized_patch(candidate, metadata) != existing_patch
+                if !accepts(
+                    name,
+                    &desired,
+                    &candidate_ref,
+                    metadata,
+                    Some(sources.configuration),
+                ) || sources.authorized_patch(candidate, metadata) != existing_patch
                 {
                     continue;
                 }
@@ -501,7 +506,13 @@ pub(super) fn repair_snapshot(
             }
             let mut needs_override = expected.as_ref().is_none_or(|range| {
                 range.as_ref() != graph::package_key(reference)
-                    && !accepts(name, range, reference, metadata)
+                    && !accepts(
+                        name,
+                        range,
+                        reference,
+                        metadata,
+                        Some(sources.configuration),
+                    )
             });
             let needs_patch =
                 !reference.starts_with("link:") && !sources.authorized_patch(&old_key, metadata);
@@ -532,7 +543,13 @@ pub(super) fn repair_snapshot(
                         )
                     })
                 && let Some(declaration) = package["peerDependencies"][name].as_str()
-                && !accepts(name, declaration, reference, metadata)
+                && !accepts(
+                    name,
+                    declaration,
+                    reference,
+                    metadata,
+                    Some(sources.configuration),
+                )
             {
                 expected = Some(Cow::Borrowed(declaration));
                 needs_override = true;
@@ -554,7 +571,8 @@ pub(super) fn repair_snapshot(
             } else {
                 old_version
             };
-            let actual_name = manifest::alias(desired).map_or(old_name, |(n, _)| n);
+            let dependency = if needs_override { name } else { old_name };
+            let (actual_name, _) = sources.configuration.registry_request(dependency, desired);
             let previous = previous.resolve(peers);
             let mut providers = previous.clone();
             if let Some(bindings) = peers.binding_context(side, &old_key, previous) {
@@ -601,7 +619,13 @@ pub(super) fn repair_snapshot(
                         }
                         let candidate_ref = crate::reconcile::reference(name, candidate);
                         let matches = if needs_override {
-                            accepts(name, desired, &candidate_ref, metadata)
+                            accepts(
+                                name,
+                                desired,
+                                &candidate_ref,
+                                metadata,
+                                Some(sources.configuration),
+                            )
                         } else {
                             graph::package_key(candidate) == graph::package_key(&old_key)
                         };

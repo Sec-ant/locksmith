@@ -4,14 +4,14 @@ use std::{collections::BTreeSet, ffi::OsString, io::Write, path::Path, process::
 use locksmith::MergeContext;
 use tempfile::NamedTempFile;
 
-use crate::{Result, git, policy, workspace};
+use crate::{Result, git, workspace};
 use workspace::{Members, Project};
 
 fn project_conflicts(
-    conflicts: &BTreeSet<String>,
+    conflicts: &BTreeSet<Vec<u8>>,
     prefix: &str,
     projects: &[&Project],
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
     let mut inputs = BTreeSet::new();
     for name in workspace::CONFIG_FILES {
         inputs.insert(name.to_string());
@@ -20,9 +20,6 @@ fn project_conflicts(
     for project in projects {
         workspaces
             .push(Members::new(project).map_err(|e| format!("{prefix}pnpm-workspace.yaml: {e}"))?);
-        if project.config["ignorePnpmfile"] != true {
-            inputs.extend(workspace::DEFAULT_HOOK_FILES.into_iter().map(str::to_owned));
-        }
         inputs.extend(workspace::file_inputs(&project.config)?);
     }
     workspace::check_conflicts(conflicts, |path| {
@@ -34,7 +31,8 @@ fn project_conflicts(
                 workspace::MANIFEST_NAMES.contains(&name)
                     && workspaces.iter().any(|w| w.contains(dir))
             })
-    })
+    })?;
+    Ok(inputs)
 }
 
 pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()> {
@@ -98,21 +96,44 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let sources = [base?, ours?, theirs?];
     let root_conflict = workspace::CONFIG_FILES
         .iter()
-        .any(|p| conflicts.contains(&format!("{prefix}{p}")));
+        .any(|p| conflicts.contains(format!("{prefix}{p}").as_bytes()));
     if root_conflict {
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
-    let project = Project::read(&mut blobs, &tree, prefix, None)?;
-    project_conflicts(&conflicts, prefix, &[&project])?;
+    blobs.conflicts = conflicts
+        .iter()
+        .filter(|p| p.as_slice() != path.as_bytes())
+        .cloned()
+        .collect();
+    let locks = crate::merge::Sources::read(files)?;
+    let target = git::preferred_target(&inputs)?;
+    let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
+    let (root_name, root) =
+        workspace::read_named_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
+    let (project, config, merge) =
+        target.workspace_for_candidate(Some(&root), locks.inputs(), |lock| -> Result<_> {
+            let version = lock.and_then(locksmith::Lockfile::recorded_pnpm_version);
+            let project = Project::from_manifest(root.clone(), version, &mut read)?;
+            let config =
+                project.bootstrap_configuration(lock.map(Into::into), || read(".npmrc"))?;
+            Ok((project, config))
+        })?;
+    let dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
-    let policy = policy::Policy::from_project(&project);
-    let config = policy.configuration(&project.config)?;
-    let [base, ours, theirs] = sources
-        .each_ref()
-        .map(|p| policy::Policy::from_project(p).configuration(&p.config));
+    if !blobs.conflicts.is_empty() {
+        blobs.check_linked_conflicts(
+            &tree,
+            dependency_inputs
+                .iter()
+                .filter(|p| {
+                    p.as_str() == root_name || !workspace::MANIFEST_NAMES.contains(&p.as_str())
+                })
+                .map(|p| format!("{prefix}{p}")),
+        )?;
+    }
+    let [base, ours, theirs] = sources.each_ref().map(|p| p.configuration());
     let configurations = [base?, ours?, theirs?];
     let patches = workspace::patches(&config, prefix, |file| blobs.read(&tree, file))?;
-    let target = git::preferred_target(&inputs)?;
     let mut settings = None;
     let mut credentials = None;
     if allow_network {
@@ -122,6 +143,8 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
             locksmith::MergeTarget::Ours => 1,
             locksmith::MergeTarget::Theirs => 2,
         };
+        // Credentials come from the preferred commit, whose paths have no preview conflicts.
+        blobs.conflicts.clear();
         credentials = blobs.read(&revisions[side], &path)?;
     }
     drop(blobs);
@@ -137,6 +160,6 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = crate::merge::with_context(files, &context, &policy, &project.config, network)?;
+    let result = crate::merge::with_context(&merge, &context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

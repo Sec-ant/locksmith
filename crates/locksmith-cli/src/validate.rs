@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use locksmith::{Lockfile, LockfileError};
@@ -31,7 +31,16 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
             Err(e) => Err(format!("{}: {e}", path.display()).into()),
         }
     };
-    let manifest = workspace::read_manifest(".", read)?;
+    let read_manifest = |relative: &str| {
+        let path = root.join(relative);
+        match workspace::read_regular_file(&path) {
+            Ok(Some(text)) => Ok(Some(text)),
+            Ok(None) => Err(format!("{}: expected a regular manifest file", path.display()).into()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display()).into()),
+        }
+    };
+    let manifest = workspace::read_manifest(".", read_manifest)?;
     let has_root_manifest = manifest.is_some();
     let project = Project::from_manifest(
         manifest.unwrap_or_else(|| serde_json::json!({})),
@@ -49,22 +58,69 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let config = crate::policy::Policy::from_project(&project).configuration(&project.config)?;
+    let config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
     let patches = workspace::patches(&config, "", read)?;
-    let mut manifests = BTreeMap::new();
     let canonical_root = root.canonicalize()?;
-    let mut external_members = BTreeSet::new();
-    for (id, directory) in Members::directories_on_disk(&project, &canonical_root)? {
-        if let Some(manifest) = workspace::read_manifest(&id, read)? {
-            if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
-                external_members.insert(id.clone());
+    let mut directories = Members::directories_on_disk(&project, &canonical_root)?;
+    #[cfg(feature = "bench-profile")]
+    let manifests_span = locksmith::profile::span("validate_manifest_reads");
+    let collect = |directories: BTreeMap<String, PathBuf>| -> Result<_> {
+        let mut manifests = BTreeMap::new();
+        let mut external_members = BTreeSet::new();
+        for (id, directory) in directories {
+            if let Some(manifest) = workspace::read_manifest(&id, read_manifest)? {
+                if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
+                    external_members.insert(id.clone());
+                }
+                manifests.insert(id, manifest);
             }
-            manifests.insert(id, manifest);
         }
-    }
+        Ok((manifests, external_members))
+    };
+    let (mut manifests, external_members) = if directories.len() >= 32 {
+        let cpus = std::thread::available_parallelism().map_or(2, |cpus| cpus.get());
+        let readers = [8, 4]
+            .into_iter()
+            .find(|&readers| readers <= cpus && readers * 32 <= directories.len())
+            .unwrap_or(2);
+        let range_size = directories.len().div_ceil(readers);
+        // Join adjacent ranges in order so the first manifest error is stable.
+        std::thread::scope(|scope| -> Result<_> {
+            let mut workers = Vec::with_capacity(readers - 1);
+            while directories.len() > range_size {
+                let boundary = directories.keys().nth(range_size).unwrap().clone();
+                let later = directories.split_off(&boundary);
+                let range = std::mem::replace(&mut directories, later);
+                workers
+                    .push(scope.spawn(move || collect(range).map_err(|error| error.to_string())));
+            }
+            let last = collect(directories);
+            let results = workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .expect("manifest reader panicked")
+                        .map_err(Into::into)
+                })
+                .chain([last]);
+            let mut manifests = BTreeMap::new();
+            let mut external = BTreeSet::new();
+            for result in results {
+                let (mut more, mut links) = result?;
+                manifests.append(&mut more);
+                external.append(&mut links);
+            }
+            Ok((manifests, external))
+        })?
+    } else {
+        collect(directories)?
+    };
     if has_root_manifest {
         manifests.insert(".".into(), project.root);
     }
+    #[cfg(feature = "bench-profile")]
+    drop(manifests_span);
     let read_linked = |id: &str| {
         let directory = canonical_root.join(id);
         let io = |e| LockfileError::WorkspaceInput(format!("{}: {e}", directory.display()));
@@ -91,14 +147,15 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         {
             return Err(invalid());
         }
-        if !fs::metadata(&file).map_err(io)?.is_file() {
-            return Err(invalid());
-        }
-        let contents = fs::read_to_string(&file).map_err(io)?;
+        let contents = workspace::read_regular_file(&file)
+            .map_err(io)?
+            .ok_or_else(invalid)?;
         workspace::parse_manifest("package.json", &contents)
             .map(Some)
             .map_err(|_| invalid())
     };
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("validate_workspace_graph");
     Ok(lock.validate_workspace(
         &manifests,
         &external_members,

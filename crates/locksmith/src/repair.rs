@@ -13,7 +13,7 @@ use std::{
 use crate::{
     DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig, graph,
     manifest,
-    reconcile::{self, missing},
+    reconcile::{self, MergeContext, missing},
     source::edit,
 };
 
@@ -53,14 +53,23 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
+        Self::bootstrap_lockfile(text)?.0.recorded_pnpm_version()
+    }
+
+    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
+        // Ordinary project-only lockfiles need no preliminary parse. Quoted
+        // keys can also spell a bootstrap field using escapes.
+        if !text.contains("\n---")
+            && !text.contains("configDependencies")
+            && !text.contains("packageManagerDependencies")
+            && !text.contains('\\')
+        {
+            return None;
+        }
         let text = text.trim_start_matches('\u{feff}');
         let ranges = crate::source::document_ranges(text);
-        let [bootstrap, _, ..] = ranges.as_slice() else {
-            return None;
-        };
-        Lockfile::parse(&text[bootstrap.clone()])
-            .ok()?
-            .recorded_pnpm_version()
+        let bootstrap = ranges.first()?;
+        crate::recovery::bootstrap_candidate(&text[bootstrap.clone()])
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].
@@ -83,6 +92,52 @@ impl RepairInput {
         edit::parse_for_repair(text, reference.project()).map(Self)
     }
 
+    /// Reconcile the source projects to select existing copies of conflicting snapshots.
+    /// The repaired lock retains its own bootstrap document for validation by [`Self::apply`].
+    ///
+    /// # Errors
+    /// Returns a reconciliation error or an error for invalid input or unmatched duplicate snapshots.
+    pub fn parse_with_merge_witness(
+        text: &str,
+        locks: [&Lockfile; 3],
+        context: &MergeContext<'_>,
+    ) -> Result<Self, LockfileError> {
+        let witness = reconcile::resolve_project(locks, context)?;
+        Self::parse_with_snapshot_reference(text, &witness)
+    }
+
+    /// Check the source's bootstrap against the current workspace.
+    ///
+    /// # Errors
+    /// Returns an error if the root manifest is missing or the bootstrap is invalid.
+    pub fn validate_bootstrap(&self, context: &RepairContext<'_>) -> Result<(), LockfileError> {
+        let lock = &self.0;
+        let root = context
+            .manifests
+            .get(".")
+            .ok_or_else(|| missing(&["manifests", "."], "the root manifest is required"))?;
+        if !context
+            .configuration
+            .matches_config_dependencies(lock.environment())
+        {
+            return Err(missing(
+                &["importers", ".", "configDependencies"],
+                "bootstrap graph does not match the configuration dependencies",
+            ));
+        }
+        if let Some(env) = lock.environment() {
+            let issues = graph::validate_with_config(
+                env,
+                DocumentKind::Environment,
+                Some(context.configuration),
+            );
+            if !issues.is_empty() {
+                return Err(LockfileError::InvalidGraph(issues));
+            }
+        }
+        lock.check_package_manager(root, Some(context.configuration))
+    }
+
     /// Repair the original source against this context.
     ///
     /// # Errors
@@ -92,28 +147,7 @@ impl RepairInput {
         let doc = lock
             .project()
             .ok_or_else(|| missing(&[], "missing project document"))?;
-        let root = context
-            .manifests
-            .get(".")
-            .ok_or_else(|| missing(&["manifests", "."], "the root manifest is required"))?;
-        if let Some(env) = lock.environment() {
-            let issues = graph::validate(env, DocumentKind::Environment);
-            if !issues.is_empty() {
-                return Err(LockfileError::InvalidGraph(issues));
-            }
-            if let (Some(pin), Some(manager)) = (
-                env["importers"]["."]["packageManagerDependencies"]["pnpm"]["specifier"].as_str(),
-                root["packageManager"]
-                    .as_str()
-                    .and_then(|v| v.strip_prefix("pnpm@")),
-            ) && manager.split('+').next() != Some(pin)
-            {
-                return Err(missing(
-                    &["packageManagerDependencies", "pnpm"],
-                    "bootstrap graph does not match the declared package manager",
-                ));
-            }
-        }
+        self.validate_bootstrap(context)?;
         let mut evidence = Evidence::new(lock, context);
         let current = (lock, context.configuration);
         let sources = [
@@ -134,19 +168,19 @@ impl RepairInput {
         check_configuration(doc, &metadata, context.configuration)?;
         let mut result = importers::repair(doc, &metadata, &mut evidence)?;
         let roots = context.manifests.keys().cloned().collect();
-        let mut checked_extensions = false;
         loop {
-            if graph::closure(&result, DocumentKind::Project, &roots).is_err() {
-                fill_missing(&mut result, &mut evidence)?;
-                graph::closure(&result, DocumentKind::Project, &roots)?;
-            }
-            if !checked_extensions {
-                checked_extensions = true;
-                let plan = crate::extensions::plan(&result, context.configuration, None)?;
-                if !plan.is_empty() {
-                    plan.apply(result.to_mut());
-                    continue;
+            let closure = match graph::closure(&result, DocumentKind::Project, &roots) {
+                Ok(closure) => closure,
+                Err(_) => {
+                    fill_missing(&mut result, &mut evidence)?;
+                    graph::closure(&result, DocumentKind::Project, &roots)?
                 }
+            };
+            let plan =
+                crate::extensions::plan(&result, context.configuration, None, Some(&closure))?;
+            if !plan.is_empty() {
+                plan.apply(result.to_mut());
+                continue;
             }
             if matches!(result, Cow::Borrowed(_)) {
                 break;
@@ -219,7 +253,7 @@ pub(crate) fn check_configuration(
             "workspace configuration differs from the lock; its effects extend beyond a broken record",
         )
     };
-    if cfg.read_lock_settings(doc) != cfg.read_lock_settings(metadata) {
+    if cfg.read_lock_settings(doc)? != cfg.read_lock_settings(metadata)? {
         return Err(mismatch("settings"));
     }
     check_recorded_settings(doc, cfg)?;

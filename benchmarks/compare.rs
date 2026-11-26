@@ -11,11 +11,20 @@ const REQUIRED_SLOW_BLOCKS: usize = 10;
 const MIN_SLOWDOWN_PCT: f64 = 5.0;
 
 fn elapsed_ms(command: &str, binary: &OsStr) -> io::Result<f64> {
+    let mut runner = Command::new("benchmarks/cli");
+    runner.arg(command).env("LOCKSMITH_BIN", binary);
+    if command.starts_with("registry-") {
+        let output = runner.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(String::from_utf8_lossy(&output.stderr)));
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .map_err(io::Error::other);
+    }
     let start = Instant::now();
-    let status = Command::new("benchmarks/cli")
-        .arg(command)
-        .env("LOCKSMITH_BIN", binary)
-        .status()?;
+    let status = runner.status()?;
     let elapsed = start.elapsed();
     if !status.success() {
         return Err(io::Error::other(format!(
@@ -95,7 +104,15 @@ fn main() -> io::Result<ExitCode> {
     println!("| Command | Base | PR | Paired change | Threshold | Blocks above | Result |");
     println!("| --- | ---: | ---: | ---: | ---: | ---: | --- |");
     let mut regressed = false;
-    for command in ["merge", "converge", "repair"] {
+    for command in [
+        "merge",
+        "merge-context",
+        "validate-workspace",
+        "registry-64",
+        "registry-512",
+        "converge",
+        "repair",
+    ] {
         regressed |= compare(command, [base, head])?;
     }
     if Command::new(base)

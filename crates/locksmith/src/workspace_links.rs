@@ -98,7 +98,7 @@ impl<'a> FrozenWorkspace<'a> {
                 && self.links.links_workspace_packages()
                 && self.links.config.since((11, 28, 0), (12, 19, 0))
             {
-                let (package, range) = manifest::registry_request(name, effective);
+                let (package, range) = self.links.config.registry_request(name, effective);
                 if range.parse::<node_semver::Range>().is_ok() {
                     let target = self.projects.resolve(importer, path);
                     if !self.range_link_matches(&target, package, range)? {
@@ -256,7 +256,7 @@ impl<'a> WorkspaceLinks<'a> {
         if specifier.starts_with("workspace:") {
             return false;
         }
-        let (package, selector) = manifest::registry_request(name, specifier);
+        let (package, selector) = self.config.registry_request(name, specifier);
         self.by_name
             .get(package)
             .into_iter()
@@ -289,7 +289,7 @@ impl<'a> WorkspaceLinks<'a> {
             let (package, range) = if let Some(request) = workspace {
                 workspace_request(name, request)
             } else {
-                let (name, range) = manifest::registry_request(name, specifier);
+                let (name, range) = self.config.registry_request(name, specifier);
                 if range.parse::<node_semver::Range>().is_err() {
                     return Ok(None);
                 }

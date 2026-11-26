@@ -1,6 +1,10 @@
 benchmarks:
   - name: Merge independent dependency edits
     exec: benchmarks/cli merge
+  - name: Merge using final workspace manifests
+    exec: benchmarks/cli merge-context
+  - name: Validate workspace settings and member declarations
+    exec: benchmarks/cli validate-workspace
   - name: Converge optional peer drift after an install
     exec: benchmarks/cli converge
   - name: Repair a missing snapshot from Git history

@@ -1,4 +1,4 @@
-/** Effective pnpm settings. Set packageManager to an exact pnpm@version for version-specific rules. */
+/** Effective pnpm settings. Set packageManager to an exact pnpm@version to override the version inferred from the manifest and bootstrap lock. */
 export type Configuration = Record<string, unknown> & { packageManager?: string }
 export type Manifest = Record<string, unknown>
 export type Manifests = Record<string, Manifest>
@@ -107,9 +107,11 @@ export interface Inspection {
   externalLinks: Array<{ sourceKind: 'importer' | 'snapshot'; from: string; dependency: string; target: string }>
 }
 export function inspect(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<Inspection>
+/** Uses the same pnpm version matching policy as inspect, including when the version is unknown. */
 export function inspectPeers(lock: LockInput, options?: { configuration?: Configuration; manifests?: Manifests }): Promise<PeerIssue[]>
 /** Merge the branches against their ancestor. A conflict or unresolved selection rejects with a LockfileError. */
 export function merge(base: LockInput, ours: LockInput, theirs: LockInput, context?: MergeContext): Promise<string>
+/** For a pnpm version migration, include every final workspace manifest in changes. */
 export function converge(baseline: LockInput, candidate: LockInput, changes: ManifestChange[], options?: ConvergeOptions): Promise<string>
 /** Repair the dependencies reachable from the supplied projects. Use validate() to check all recorded references. */
 export function repair(yaml: string, context: RepairContext): Promise<string>

@@ -75,7 +75,7 @@ pub fn converge(
 }
 
 /// Converge with the final workspace's patch contents, keyed by relative path.
-/// A cross-major migration uses all final manifests and verifies patch identities.
+/// A pnpm version migration uses all final manifests and verifies patch identities.
 ///
 /// # Errors
 /// Returns the errors of [`converge`] and rejects unavailable or inconsistent patch data.
@@ -137,11 +137,24 @@ pub fn converge_with_recorded_baselines(
         manifests: changes,
         recorded: recorded_baselines,
     };
+    let root = changes
+        .iter()
+        .find(|c| c.importer == ".")
+        .and_then(|c| c.after);
+    if let Some(root) = root {
+        candidate.check_package_manager(root, options.configuration)?;
+    }
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
+        if !config.matches_config_dependencies(candidate.environment()) {
+            return Err(crate::reconcile::missing(
+                &["importers", ".", "configDependencies"],
+                "installed bootstrap graph differs from the configuration dependencies",
+            ));
+        }
         crate::repair::check_recorded_settings(project, config)?;
     }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
-        && before.changes_pnpm_major(after)
+        && before.requires_bootstrap_reconciliation(after, baseline, candidate)
     {
         let installed = candidate.project().ok_or_else(|| {
             crate::reconcile::missing(&["importers"], "missing candidate project")
@@ -185,11 +198,43 @@ pub fn converge_with_recorded_baselines(
             },
         );
     }
+    let stale_bootstrap = options
+        .configuration
+        .is_some_and(|config| !config.matches_config_dependencies(baseline.environment()))
+        || root.is_some_and(|root| {
+            baseline
+                .check_package_manager(root, options.configuration)
+                .is_err()
+        });
+    // Reuse the installed bootstrap independently of the project graph.
+    let reconciled;
+    let baseline = if stale_bootstrap {
+        let kind = crate::DocumentKind::Environment;
+        let mut documents = baseline.documents.clone();
+        if let Some(environment) = candidate.documents.get(&kind) {
+            let inferred = crate::WorkspaceConfig {
+                pnpm_version: candidate.recorded_pnpm_version(),
+                ..Default::default()
+            };
+            let config = options.configuration.unwrap_or(&inferred);
+            let issues = graph::validate_with_config(environment, kind, Some(config));
+            if !issues.is_empty() {
+                return Err(LockfileError::InvalidGraph(issues));
+            }
+            documents.insert(kind, std::sync::Arc::clone(environment));
+        } else {
+            documents.remove(&kind);
+        }
+        reconciled = Lockfile::with_documents(documents, &[baseline, candidate]);
+        &reconciled
+    } else {
+        baseline
+    };
     let mut result = select(baseline, candidate, inputs, options)?;
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
         crate::repair::check_recorded_settings(project, config)?;
-        let mut plan = crate::extensions::plan(project, config, candidate.project())?;
+        let mut plan = crate::extensions::plan(project, config, candidate.project(), None)?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(
                 result
@@ -204,7 +249,7 @@ pub fn converge_with_recorded_baselines(
                 .and_then(|change| change.after);
             workspace::checked_overrides(project, config, root)?;
             while plan.apply(project) {
-                plan = crate::extensions::plan(project, config, candidate.project())?;
+                plan = crate::extensions::plan(project, config, candidate.project(), None)?;
             }
             graph::prune_scoped(
                 project,
@@ -483,7 +528,13 @@ fn manifest_edits<'a>(
                 && let (Some((old_group, previous)), Some((new_group, next))) = (old, new)
                 && let (Some(pin), Some(declaration)) =
                     (previous["version"].as_str(), next["specifier"].as_str())
-                && crate::reconcile::accepts(name, declaration, pin, base)
+                && crate::reconcile::accepts(
+                    name,
+                    declaration,
+                    pin,
+                    base,
+                    Some(candidate_rules.configuration()),
+                )
                 && graphs[0].target(change.importer, name, previous).is_none()
                 && graphs[1].target(change.importer, name, next).is_none()
             {

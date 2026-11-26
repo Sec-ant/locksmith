@@ -23,17 +23,23 @@ pub fn run(file: &Path, override_version: Option<node_semver::Version>, json: bo
         let resolved = match path.canonicalize() {
             Ok(resolved) if resolved.starts_with(&dir) => resolved,
             Ok(_) => return Ok(None),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(e) => return Err(format!("{}: {e}", path.display()).into()),
         };
-        Ok(Some(
-            fs::read_to_string(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?,
-        ))
+        workspace::read_regular_file(&resolved)
+            .map_err(|e| format!("{}: {e}", resolved.display()).into())
     };
     let root = workspace::read_manifest(".", read)?.unwrap_or_default();
-    let version = override_version
-        .or_else(|| workspace::pnpm_version(&root))
-        .or_else(|| lock.recorded_pnpm_version());
+    let version = override_version.or_else(|| {
+        locksmith::WorkspaceConfig::project_pnpm_version(&root, lock.recorded_pnpm_version())
+    });
     let (config, _) = workspace::settings(&root, version.as_ref(), read)?;
     let rules = PeerRules::from_pnpm(&config, PeerVersionMatching::for_pnpm(version.as_ref()))?;
     let mut manifests = BTreeMap::new();

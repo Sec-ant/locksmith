@@ -5,6 +5,88 @@ use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
 pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
+pub(crate) struct PnpmManager<'a> {
+    pub specifier: &'a str,
+    pub requires_pin: bool,
+    on_fail: Option<&'a str>,
+}
+
+pub(crate) enum ManagerPolicy<'a> {
+    Ignored,
+    Unspecified,
+    Declared(PnpmManager<'a>),
+}
+
+impl<'a> ManagerPolicy<'a> {
+    pub fn for_workspace(
+        manifest: Option<&'a Value>,
+        config: Option<&WorkspaceConfig>,
+        recorded: Option<&node_semver::Version>,
+    ) -> Self {
+        let runner = config
+            .and_then(|c| c.pnpm_version.as_ref())
+            .or_else(|| recorded.filter(|v| v.major() >= 11));
+        let manager = manifest.and_then(|root| PnpmManager::declared(root, runner));
+        let policy = config
+            .and_then(|c| c.pm_on_fail.as_deref())
+            .or_else(|| manager.as_ref()?.on_fail);
+        if policy == Some("ignore") {
+            Self::Ignored
+        } else {
+            manager.map_or(Self::Unspecified, Self::Declared)
+        }
+    }
+}
+
+impl<'a> PnpmManager<'a> {
+    pub fn declared(manifest: &'a Value, runner: Option<&node_semver::Version>) -> Option<Self> {
+        let legacy = legacy_pnpm(manifest);
+        // pnpm 9 and 10 ignore devEngines, including npm's own engine declaration.
+        let runner = runner.or_else(|| legacy.as_ref().map(|(_, version)| version));
+        let engines = &manifest["devEngines"]["packageManager"];
+        let (engine, default_policy) = match engines.as_array() {
+            Some(engines) => {
+                let index = engines
+                    .iter()
+                    .position(|e| e["name"] == "pnpm")
+                    .unwrap_or(0);
+                (
+                    engines.get(index),
+                    (index + 1 < engines.len()).then_some("ignore"),
+                )
+            }
+            None => (Some(engines), None),
+        };
+        if runner.is_none_or(|v| v.major() >= 11)
+            && let Some(engine) =
+                engine.filter(|e| e["name"].as_str().is_some_and(|s| !s.is_empty()))
+        {
+            let specifier = engine["version"].as_str()?;
+            if engine["name"] != "pnpm" || specifier.parse::<node_semver::Range>().is_err() {
+                return None;
+            }
+            return Some(Self {
+                specifier,
+                requires_pin: true,
+                on_fail: engine["onFail"].as_str().or(default_policy),
+            });
+        }
+        let (specifier, version) = legacy?;
+        Some(Self {
+            specifier,
+            requires_pin: version.major() >= 12,
+            on_fail: None,
+        })
+    }
+}
+
+fn legacy_pnpm(manifest: &Value) -> Option<(&str, node_semver::Version)> {
+    let declared = manifest["packageManager"].as_str()?.strip_prefix("pnpm@")?;
+    let specifier = declared.split('+').next()?;
+    let version = specifier.parse::<node_semver::Version>().ok()?;
+    (version.to_string() == specifier).then_some((specifier, version))
+}
+
 pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     let alias = specifier.strip_prefix("npm:")?;
     Some(
@@ -15,13 +97,50 @@ pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     )
 }
 
-/// A bare npm: range keeps the dependency key as its target package.
-pub(crate) fn registry_request<'a>(name: &'a str, specifier: &'a str) -> (&'a str, &'a str) {
+/// Use the runner's alias rules when known. With no version, a plain pin
+/// indicates shorthand and a qualified pin can identify a legacy numeric alias.
+pub(crate) fn pinned_specifier<'a>(
+    specifier: &'a str,
+    pin: &str,
+    configuration: Option<&WorkspaceConfig>,
+) -> &'a str {
+    if let Some(config) = configuration.filter(|config| config.pnpm_version.is_some()) {
+        return config.registry_specifier(specifier);
+    }
     if let Some(range) = specifier.strip_prefix("npm:")
         && range.parse::<node_semver::Range>().is_ok()
+        && graph::package_key(pin)
+            .parse::<node_semver::Version>()
+            .is_ok()
     {
-        (name, range)
+        range
     } else {
+        specifier
+    }
+}
+
+impl WorkspaceConfig {
+    /// pnpm 11.1 added npm:<range> as shorthand for a range on the dependency's own name.
+    pub(crate) fn registry_specifier<'a>(&self, specifier: &'a str) -> &'a str {
+        if let Some(range) = specifier.strip_prefix("npm:")
+            && self
+                .pnpm_version
+                .as_ref()
+                .is_none_or(|v| v >= &node_semver::Version::from((11, 1, 0)))
+            && range.parse::<node_semver::Range>().is_ok()
+        {
+            range
+        } else {
+            specifier
+        }
+    }
+
+    pub(crate) fn registry_request<'a>(
+        &self,
+        name: &'a str,
+        specifier: &'a str,
+    ) -> (&'a str, &'a str) {
+        let specifier = self.registry_specifier(specifier);
         alias(specifier).unwrap_or((name, specifier))
     }
 }
@@ -66,7 +185,10 @@ pub(crate) fn declarations<'a>(
         .as_ref()
         .is_some_and(|v| v.major() >= 12);
     let mut result = BTreeMap::new();
-    let settings = crate::LockSettings::from_document(overrides.document);
+    let settings = crate::LockSettings::from_document(
+        overrides.document,
+        overrides.configuration().pnpm_version.as_ref(),
+    )?;
     for (field, group) in [
         ("devDependencies", "devDependencies"),
         ("dependencies", "dependencies"),
@@ -309,7 +431,7 @@ pub(crate) fn check_manifest(
                 }
                 let resolved_key;
                 let (range, version) = if specifier.starts_with("npm:") {
-                    let (target, range) = registry_request(name, specifier);
+                    let (target, range) = overrides.config.registry_request(name, specifier);
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));

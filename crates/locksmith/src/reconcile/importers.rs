@@ -27,6 +27,7 @@ pub(super) fn select(
     sources: &GraphSources<'_>,
     peers: &mut peer::Merger<'_>,
     preferences: &super::preference::Preferences,
+    additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<SelectedImporters, LockfileError> {
     let docs = sources.documents();
     let mut importers = Map::new();
@@ -39,6 +40,7 @@ pub(super) fn select(
     let mut configured_roots = BTreeMap::new();
     let mut configured_sources = BTreeMap::new();
     let overrides = manifest::Overrides::new(output, context.configuration);
+    let mut missing_requests = super::MissingRequests::new(additional);
     for (id, package) in context.manifests {
         let mut record = sources
             .order
@@ -74,15 +76,23 @@ pub(super) fn select(
         let declarations = manifest::declarations(package, &overrides, id)?;
         let mut roots = BTreeMap::new();
         for (name, (group, specifier)) in &declarations {
-            let pin = selector.select(
+            let selected = selector.select(
                 name,
                 group,
                 specifier,
                 id,
                 package,
                 preferences.contains(id, name),
-            )?;
-            roots.insert((*name).to_owned(), pin);
+            );
+            match selected {
+                Ok(pin) => {
+                    roots.insert((*name).to_owned(), pin);
+                }
+                Err(error) => missing_requests.record(error)?,
+            }
+        }
+        if missing_requests.first.is_some() {
+            continue;
         }
         let previous_scopes: [BTreeMap<String, String>; 4] = std::array::from_fn(|side| {
             let global = context
@@ -381,6 +391,7 @@ pub(super) fn select(
         }
         importers.insert(id.clone(), record);
     }
+    missing_requests.finish()?;
     Ok(SelectedImporters {
         records: importers,
         configured_sources,
@@ -417,6 +428,8 @@ impl PinSelector<'_, '_> {
             workspace_packages,
         } = self;
         let docs = sources.documents();
+        let configuration = context.configuration;
+        let specifier = configuration.registry_specifier(specifier);
         let resolved = workspace_packages.resolve(name, specifier, id, package)?;
         let local = resolved.as_ref().map(|(link, _)| link);
         if specifier.starts_with("workspace:") && !injected(name, package, context.configuration) {
@@ -463,7 +476,7 @@ impl PinSelector<'_, '_> {
             && !sources.inputs[target].matches_configuration
             && sources.inputs[target].unchanged_rules
             && let Some(pin) = super::preference::dependency(docs[target], id, name)
-            && accepts(name, specifier, pin, output)
+            && accepts(name, specifier, pin, output, Some(configuration))
         {
             let key = graph::snapshot_key(name, pin, graph::section(docs[target], "snapshots"));
             if sources.inputs[target].compatibility.unchanged(&key)
@@ -513,7 +526,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     };
                     if local.map(String::as_str) == Some(reference)
-                        || accepts(name, specifier, reference, output)
+                        || accepts(name, specifier, reference, output, Some(configuration))
                         || (dep.get("specifier").and_then(Value::as_str) == Some(specifier)
                             && opaque(specifier))
                     {
@@ -580,7 +593,7 @@ impl PinSelector<'_, '_> {
                                 continue;
                             }
                             let version = reference(name, key);
-                            if accepts(name, specifier, &version, output) {
+                            if accepts(name, specifier, &version, output, Some(configuration)) {
                                 selected = Some((side, version, key.to_owned()));
                                 borrowed = true;
                                 break;
@@ -610,8 +623,9 @@ impl PinSelector<'_, '_> {
                         .get("specifier")?
                         .as_str()
                 });
-                let actual_name = manifest::alias(catalog_specifier.unwrap_or(specifier))
-                    .map_or(name, |(name, _)| name);
+                let (actual_name, _) = context
+                    .configuration
+                    .registry_request(name, catalog_specifier.unwrap_or(specifier));
                 for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
                     if *side == super::PUBLISHED
                         || (!sources.prefer_baseline
@@ -623,7 +637,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     }
                     let reference = reference(name, key);
-                    if accepts(name, specifier, &reference, output)
+                    if accepts(name, specifier, &reference, output, Some(configuration))
                         && sources.desired_patch(key, output).is_some()
                     {
                         if sources.authorized_patch(key, output) {
@@ -659,7 +673,7 @@ impl PinSelector<'_, '_> {
                 })
                 .map(String::as_str)
                 .unwrap_or(specifier);
-            let (actual, selector) = manifest::alias(effective).unwrap_or((name, effective));
+            let (actual, selector) = context.configuration.registry_request(name, effective);
             if let Some(choice) = registry.selected(actual, selector) {
                 selected = sources
                     .candidates()

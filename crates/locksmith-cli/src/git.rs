@@ -3,14 +3,34 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
 };
 
 use super::Result;
 
+mod tree;
+use tree::TreeEntry;
+pub(crate) use tree::{ObjectKind, entries};
+
 pub fn output(args: &[&str]) -> Result<String> {
     checked(Command::new("git").args(args))
+}
+
+pub fn revision_and_prefix(reference: &str) -> Result<(String, String)> {
+    let resolved = output(&[
+        "rev-parse",
+        "--show-prefix",
+        "--verify",
+        "--end-of-options",
+        &format!("{reference}^{{commit}}"),
+    ])?;
+    // The prefix may itself contain newlines, so split at the verified OID.
+    let (prefix, revision) = resolved
+        .trim_end_matches('\n')
+        .rsplit_once('\n')
+        .ok_or("invalid Git revision and prefix output")?;
+    Ok((revision.to_owned(), prefix.to_owned()))
 }
 
 fn checked(command: &mut Command) -> Result<String> {
@@ -191,7 +211,7 @@ pub fn preferred_target(inputs: &DriverInputs) -> Result<locksmith::MergeTarget>
     )
 }
 
-pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<String>)> {
+pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<Vec<u8>>)> {
     let [base, ours, theirs] = &inputs.revisions;
     // Git 2.38 can preview a merge but cannot specify its base explicitly.
     // Give HEAD's tree the original parent for this preview only. No ref moves.
@@ -243,38 +263,75 @@ pub fn merged_tree(inputs: &DriverInputs) -> Result<(String, BTreeSet<String>)> 
     if !matches!(output.status.code(), Some(0 | 1)) {
         return Err(failure(&output).into());
     }
-    let mut records = std::str::from_utf8(&output.stdout)?.split_terminator('\0');
+    let mut records = output.stdout.split(|&b| b == 0);
     let tree = records
         .next()
+        .and_then(|field| std::str::from_utf8(field).ok())
         .filter(|s| oid(s))
         .ok_or("invalid git merge-tree result")?;
     Ok((
         tree.into(),
         records
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+            .filter(|field| !field.is_empty())
+            .map(<[u8]>::to_vec)
             .collect(),
     ))
 }
 
-pub fn workspace_paths(tree: &str, prefix: &str) -> Result<String> {
-    let scope = if prefix.is_empty() { "." } else { prefix };
-    output(&[
-        "ls-tree",
-        "--full-tree",
-        "-rz",
-        "--name-only",
-        tree,
-        "--",
-        scope,
-    ])
+/// Keep NUL-delimited Git path lists as bytes until the caller selects its inputs.
+pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git").args(args).output()?;
+    if !output.status.success() {
+        return Err(failure(&output).into());
+    }
+    Ok(output.stdout)
 }
 
-/// In a blobless clone, cat-file lazily fetches one missing object per request.
-/// Fetch just the selected manifests together, leaving Git's usual promisor
-/// selection in charge when multiple remotes are configured.
-pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>) -> Result<()> {
-    if paths.is_empty() || env::var_os("GIT_NO_LAZY_FETCH").is_some() {
+pub fn stream_paths(
+    args: &[&str],
+    visit: impl FnOnce(&mut BufReader<ChildStdout>) -> Result<()>,
+) -> Result<()> {
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut paths = BufReader::new(child.stdout.take().expect("piped Git stdout"));
+    std::thread::scope(|scope| {
+        // Drain stderr while the caller consumes stdout.
+        let child = scope.spawn(move || child.wait_with_output());
+        let visited = visit(&mut paths);
+        if visited.is_err() {
+            // Keep Git's exit status meaningful if the caller stops reading early.
+            let _ = io::copy(&mut paths, &mut io::sink());
+        }
+        drop(paths);
+        let output = child.join().expect("Git output reader panicked")?;
+        if !output.status.success() {
+            return Err(failure(&output).into());
+        }
+        visited
+    })
+}
+
+fn lazy_fetch_disabled() -> Result<bool> {
+    if env::var_os("GIT_NO_LAZY_FETCH").is_none() {
+        return Ok(false);
+    }
+    let value = output(&[
+        "--config-env=locksmith.noLazyFetch=GIT_NO_LAZY_FETCH",
+        "config",
+        "--type=bool",
+        "--get",
+        "locksmith.noLazyFetch",
+    ])?;
+    Ok(value.trim() == "true")
+}
+
+/// Fetch missing selected blobs together on a blobless clone, including link targets.
+pub fn prefetch_manifests<'a>(objects: impl ExactSizeIterator<Item = &'a str>) -> Result<()> {
+    if objects.len() == 0 || lazy_fetch_disabled()? {
         return Ok(());
     }
     let remotes = Command::new("git")
@@ -306,35 +363,28 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
         return Ok(());
     }
 
-    let mut query = format!("{tree}^{{tree}}\n--\n");
-    for path in paths.values() {
-        if path.contains(['\r', '\n']) || prefix.contains(['\r', '\n']) {
-            return Err(format!("unsupported configuration path {prefix}{path:?}").into());
-        }
-        query.push_str(&format!(":(top,literal){prefix}{path}\n"));
-    }
-    let listing = with_input(
+    let mut missing: BTreeSet<_> = objects.collect();
+    let query = missing.iter().copied().collect::<Vec<_>>().join("\n");
+    // On Git 2.38, --missing disables lazy fetches and --ignore-missing skips
+    // absent input tips. All tips are selected blob IDs, so the walk ends at each one.
+    let available = checked_output(with_input(
         &[
             "rev-list",
             "--objects",
             "--no-object-names",
-            "--missing=print",
+            "--missing=allow-any",
+            "--ignore-missing",
             "--stdin",
         ],
         query.as_bytes(),
-    )?;
-    let objects = checked_output(listing)?;
-    let mut missing = String::new();
-    for id in objects.lines().filter_map(|line| line.strip_prefix('?')) {
-        if !oid(id) {
-            return Err("invalid missing Git object ID".into());
-        }
-        missing.push_str(id);
-        missing.push('\n');
+    )?)?;
+    for id in available.lines() {
+        missing.remove(id);
     }
     if !missing.is_empty() {
-        // A batch can miss objects served by another promisor. cat-file reads
-        // each required manifest next, using Git's native remote selection.
+        let missing = missing.into_iter().collect::<Vec<_>>().join("\n");
+        // If the batch is incomplete, the following cat-file read retries each
+        // required blob and reports any manifest that remains unavailable.
         with_input(
             &[
                 "-c",
@@ -358,26 +408,34 @@ pub fn prefetch_manifests(tree: &str, prefix: &str, paths: &BTreeMap<&str, &str>
 }
 
 fn with_input(args: &[&str], input: &[u8]) -> Result<Output> {
-    let mut child = Command::new("git")
-        .args(args)
+    let mut command = Command::new("git");
+    command.args(args);
+    command_with_input(command, input)
+}
+
+fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let written = child
-        .stdin
-        .take()
-        .expect("piped Git stdin")
-        .write_all(input);
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        written?;
-    }
-    Ok(output)
+    let mut stdin = child.stdin.take().expect("piped Git stdin");
+    std::thread::scope(|scope| {
+        let written = scope.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output()?;
+        let written = written.join().expect("Git input writer panicked");
+        if output.status.success() {
+            written?;
+        }
+        Ok(output)
+    })
 }
 
 /// The single cat-file process reads just the configuration blobs requested.
 pub struct Blobs {
+    pub conflicts: BTreeSet<Vec<u8>>,
+    directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
+    config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -385,34 +443,40 @@ pub struct Blobs {
 impl Blobs {
     pub fn open() -> Result<Self> {
         let mut child = Command::new("git")
-            .args(["cat-file", "--batch", "--follow-symlinks"])
+            .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
         let input = child.stdin.take().expect("piped git stdin");
         let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
         Ok(Self {
+            conflicts: BTreeSet::new(),
+            directories: BTreeMap::new(),
+            config_entries: BTreeMap::new(),
             child,
             input,
             output,
         })
     }
 
-    pub fn read(&mut self, tree: &str, path: &str) -> Result<Option<String>> {
-        if path.contains(['\n', '\r', '\0']) {
-            return Err(format!("unsupported configuration path {path:?}").into());
-        }
+    pub fn read_object(&mut self, object: &str) -> Result<Option<String>> {
+        self.bytes(object)?
+            .map(|bytes| String::from_utf8(bytes).map_err(|e| format!("{object}: {e}").into()))
+            .transpose()
+    }
+
+    fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
         let input = &mut self.input;
-        writeln!(input, "{tree}:{path}")?;
+        writeln!(input, "{object}")?;
         input.flush()?;
         let mut header = String::new();
         self.output.read_line(&mut header)?;
-        if header.trim_end() == format!("{tree}:{path} missing") {
+        if header.trim_end() == format!("{object} missing") {
             return Ok(None);
         }
         let mut fields = header.split_whitespace();
         if !fields.next().is_some_and(oid) || fields.next() != Some("blob") {
-            return Err(format!("expected a Git blob at {tree}:{path}").into());
+            return Err(format!("expected a Git blob at {object}").into());
         }
         let length = fields
             .next()
@@ -425,9 +489,7 @@ impl Blobs {
         if delimiter[0] != b'\n' {
             return Err("invalid git cat-file response".into());
         }
-        Ok(Some(
-            String::from_utf8(bytes).map_err(|e| format!("{path}: {e}"))?,
-        ))
+        Ok(Some(bytes))
     }
 }
 impl Drop for Blobs {

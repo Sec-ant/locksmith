@@ -30,6 +30,7 @@ const MAX_COMBINATIONS: usize = 16;
 pub(crate) fn resolve(
     inputs: [MergeInput<'_>; 3],
     context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
 ) -> Result<Lockfile, LockfileError> {
     let mut choices = Vec::new();
     let mut locks = Vec::with_capacity(3);
@@ -44,47 +45,21 @@ pub(crate) fn resolve(
         match Lockfile::parse(text) {
             Ok(lock) => locks.push(lock),
             Err(LockfileError::Parse(_)) => {
-                let mut options = crate::source::options(text.len());
-                options.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::PassThrough;
-                options.merge_keys = serde_saphyr::MergeKeyPolicy::Error;
-                let normalized = if text.contains("\r\n") || text.starts_with('\u{feff}') {
-                    std::borrow::Cow::Owned(
-                        text.trim_start_matches('\u{feff}').replace("\r\n", "\n"),
-                    )
-                } else {
-                    std::borrow::Cow::Borrowed(text)
-                };
-                let mut documents = BTreeMap::new();
-                for range in crate::source::document_ranges(&normalized) {
-                    let mut parsed: RecoveredDocument =
-                        serde_saphyr::from_str_with_options(&normalized[range], options.clone())?;
-                    let kind = crate::source::document_kind(&mut parsed.value, &documents)?;
-                    for (key, values) in parsed.alternatives {
-                        choices.push(Choice {
-                            side,
-                            kind,
-                            key,
-                            values,
-                            index: 0,
-                        });
-                    }
-                    documents.insert(kind, Arc::new(Value::Object(parsed.value)));
-                }
-                if documents.is_empty() {
-                    return Err(LockfileError::InvalidDocument("empty lockfile".into()));
-                }
-                // Invalid source text must never be reused by the serializer.
-                locks.push(Lockfile {
-                    preserve_baseline: false,
-                    documents,
-                    sources: Vec::new(),
-                });
+                locks.push(parse_with_alternatives(text, |kind, key, values| {
+                    choices.push(Choice {
+                        side,
+                        kind,
+                        key,
+                        values,
+                        index: 0,
+                    });
+                })?);
             }
             Err(error) => return Err(error),
         }
     }
     if choices.is_empty() {
-        return crate::reconcile::resolve(&locks[0], &locks[1], &locks[2], context);
+        return crate::reconcile::resolve([&locks[0], &locks[1], &locks[2]], context, bootstrap);
     }
     let mut combinations = 1usize;
     for choice in &choices {
@@ -100,25 +75,25 @@ pub(crate) fn resolve(
     }
     let mut reference = BTreeMap::<DocumentKind, String>::new();
     loop {
-        let result = crate::reconcile::resolve(&locks[0], &locks[1], &locks[2], context).map_err(
-            |error| {
-                if context.registry.is_some()
-                    && matches!(
-                        error,
-                        LockfileError::ResolutionRequired {
-                            request: Some(_),
-                            ..
-                        }
+        let result =
+            crate::reconcile::resolve([&locks[0], &locks[1], &locks[2]], context, bootstrap)
+                .map_err(|error| {
+                    if context.registry.is_some()
+                        && matches!(
+                            error,
+                            LockfileError::ResolutionRequired {
+                                request: Some(_),
+                                ..
+                            }
+                        )
+                    {
+                        return error;
+                    }
+                    ambiguity(
+                        &choices,
+                        format!("a duplicate snapshot interpretation failed: {error}"),
                     )
-                {
-                    return error;
-                }
-                ambiguity(
-                    &choices,
-                    format!("a duplicate snapshot interpretation failed: {error}"),
-                )
-            },
-        )?;
+                })?;
         if reference.is_empty() {
             for (&kind, document) in &result.documents {
                 let mut text = String::new();
@@ -157,6 +132,59 @@ pub(crate) fn resolve(
         output.push_str(&text);
     }
     Lockfile::parse(&output)
+}
+
+/// Read the bootstrap importer and package resolutions even when snapshot keys repeat.
+pub(crate) fn bootstrap_candidate(text: &str) -> Option<(Lockfile, Vec<String>)> {
+    let (lock, alternatives) = candidate(text).ok()?;
+    lock.environment().is_some().then_some((lock, alternatives))
+}
+
+// Snapshot alternatives are resolved during the merge. Other input errors are final.
+pub(crate) fn candidate(text: &str) -> Result<(Lockfile, Vec<String>), LockfileError> {
+    let mut alternatives = Vec::new();
+    let lock = match Lockfile::parse(text) {
+        Err(LockfileError::Parse(_)) => parse_with_alternatives(text, |kind, key, _| {
+            if kind == DocumentKind::Environment {
+                alternatives.push(key);
+            }
+        }),
+        result => result,
+    }?;
+    Ok((lock, alternatives))
+}
+
+fn parse_with_alternatives(
+    text: &str,
+    mut alternative: impl FnMut(DocumentKind, String, Vec<Value>),
+) -> Result<Lockfile, LockfileError> {
+    let mut options = crate::source::options(text.len());
+    options.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::PassThrough;
+    options.merge_keys = serde_saphyr::MergeKeyPolicy::Error;
+    let normalized = if text.contains("\r\n") || text.starts_with('\u{feff}') {
+        std::borrow::Cow::Owned(text.trim_start_matches('\u{feff}').replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    let mut documents = BTreeMap::new();
+    for range in crate::source::document_ranges(&normalized) {
+        let mut parsed: RecoveredDocument =
+            serde_saphyr::from_str_with_options(&normalized[range], options.clone())?;
+        let kind = crate::source::document_kind(&mut parsed.value, &documents)?;
+        for (key, values) in parsed.alternatives {
+            alternative(kind, key, values);
+        }
+        documents.insert(kind, Arc::new(Value::Object(parsed.value)));
+    }
+    if documents.is_empty() {
+        return Err(LockfileError::InvalidDocument("empty lockfile".into()));
+    }
+    // The serializer must not reuse source text that contains duplicate keys.
+    Ok(Lockfile {
+        preserve_baseline: false,
+        documents,
+        sources: Vec::new(),
+    })
 }
 
 struct Choice {

@@ -1,8 +1,16 @@
 #!/bin/sh
 set -eu
+case "$1" in
+  registry-64|registry-512)
+    size=${1#registry-}
+    shift
+    exec python3 "$(dirname "$0")/registry.py" "${LOCKSMITH_BIN:-locksmith}" "$size" "$@" ;;
+esac
 cd "$LOCKSMITH_BENCH_DIR/worktree"
 case "$1" in
   merge) set -- merge ../base.yaml ../ours.yaml ../theirs.yaml ;;
+  merge-context) set -- merge ../base.yaml ../ours.yaml ../theirs.yaml --context ../context.json ;;
+  validate-workspace) set -- validate --workspace ;;
   converge) set -- converge HEAD ;;
   repair) set -- repair missing-snapshot ;;
   inspect) set -- inspect --json ../inspect.yaml ;;

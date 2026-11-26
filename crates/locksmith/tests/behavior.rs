@@ -277,6 +277,25 @@ fn patch_hashes_must_be_declared() {
 }
 
 #[test]
+fn a_snapshot_patch_marker_needs_a_hash_and_closing_parenthesis() {
+    for reference in [
+        "1.0.0(patch_hash=abc",
+        "1.0.0(patch_hash=)",
+        "1.0.0(patch_hash=abc)(patch_hash=def)",
+        "1.0.0(host@1.0.0)(patch_hash=abc)",
+    ] {
+        let key = format!("pkg@{reference}");
+        let mut document = graph(
+            json!({".":{"dependencies":{"pkg":dep(reference)}}}),
+            json!({key:{}}),
+        );
+        assert!(lock(document.clone()).validate().is_err(), "{reference}");
+        document["patchedDependencies"] = json!({"pkg@1.0.0":"abc"});
+        assert!(lock(document).validate().is_err(), "{reference}");
+    }
+}
+
+#[test]
 fn missing_snapshot_package_or_version_is_an_error() {
     let baseline = graph(
         json!({"app":{"dependencies":{"pkg":dep("1.0.0")}}}),
@@ -822,4 +841,21 @@ fn contextual_output_renders_unsorted_importers_and_expanded_resolutions_in_pnpm
     .unwrap();
     assert!(out.contains("    resolution: {integrity: sha512-z}\n"));
     assert!(out.find("      a:\n").unwrap() < out.find("      z:\n").unwrap());
+}
+
+#[test]
+fn each_snapshot_must_use_the_patch_for_its_own_release() {
+    let mut doc = json!({"lockfileVersion":"9.0","importers":{".":{}},
+        "patchedDependencies":{"pkg@^1":"one","pkg@2.0.0":"two"},
+        "packages":{"pkg@1.0.0":{"resolution":{}},"pkg@2.0.0":{"resolution":{}}},
+        "snapshots":{"pkg@1.0.0(patch_hash=one)":{},"pkg@2.0.0(patch_hash=two)":{}}});
+    lock(doc.clone()).validate().unwrap();
+    for wrong in [
+        "pkg@1.0.0(patch_hash=two)",
+        "pkg@2.0.0(patch_hash=one)",
+        "pkg@2.0.0",
+    ] {
+        doc["snapshots"] = json!({wrong:{}});
+        assert!(lock(doc.clone()).validate().is_err(), "{wrong}");
+    }
 }

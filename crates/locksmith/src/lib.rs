@@ -35,6 +35,9 @@ mod lockfile;
 mod manifest;
 mod merge;
 mod peer;
+#[cfg(feature = "bench-profile")]
+#[doc(hidden)]
+pub mod profile;
 mod reconcile;
 mod recovery;
 mod registry;
@@ -59,7 +62,7 @@ pub use inspect::{
     PeerBinding, PeerGroup, PeerRequirement, inspect,
 };
 pub use lockfile::{DocumentKind, Lockfile};
-pub use merge::{MergeInput, merge};
+pub use merge::{ContextualMerge, MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
 pub use repair::{RepairContext, RepairInput, repair};

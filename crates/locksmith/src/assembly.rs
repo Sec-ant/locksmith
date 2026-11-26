@@ -302,6 +302,7 @@ fn retain_children(
                                 &range,
                                 super::reconcile::reference(name, k).as_str(),
                                 base,
+                                options.configuration,
                             )
                     };
                     previous

@@ -5,9 +5,38 @@ use sha2::Digest;
 use std::collections::BTreeMap;
 
 pub(crate) fn patch(key: &str) -> Option<&str> {
-    key[graph::package_key(key).len()..]
-        .strip_prefix("(patch_hash=")
-        .and_then(|s| s.split_once(')').map(|(hash, _)| hash))
+    checked_patch(key).ok().flatten()
+}
+
+pub(crate) fn checked_patch(key: &str) -> Result<Option<&str>, &'static str> {
+    let suffix = &key[graph::package_key(key).len()..];
+    if !suffix.contains("(patch_hash=") {
+        return Ok(None);
+    }
+    let mut depth = 0_usize;
+    let mut hash = None;
+    for (offset, byte) in suffix.bytes().enumerate() {
+        match byte {
+            b'(' => {
+                if depth == 0
+                    && let Some(rest) = suffix[offset..].strip_prefix("(patch_hash=")
+                {
+                    if offset != 0 {
+                        return Err("snapshot patch hash must occur once before peer suffixes");
+                    }
+                    let (value, _) = rest
+                        .split_once(')')
+                        .filter(|(v, _)| !v.is_empty() && !v.contains('('))
+                        .ok_or("expected a nonempty patch hash followed by ')'")?;
+                    hash = Some(value);
+                }
+                depth += 1;
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(hash)
 }
 
 /// Parse balanced suffixes without splitting nested peer identities. Hash-only

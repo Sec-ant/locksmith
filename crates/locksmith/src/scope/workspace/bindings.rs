@@ -417,7 +417,7 @@ impl super::Projection {
                         doc["packages"][graph::package_key(&instance.key)]["peerDependencies"]
                             [&peer]
                             .as_str()
-                    && crate::reconcile::accepts(&peer, range, target, doc)
+                    && crate::reconcile::accepts(&peer, range, target, doc, Some(config))
                 {
                     return Err(missing(
                         &["importers", &id, group, &name, &peer],

@@ -7,8 +7,8 @@ use serde_json::Value;
 pub struct Policy(Option<node_semver::Version>);
 
 impl Policy {
-    pub fn from_manifest(manifest: &Value) -> Self {
-        Self(crate::workspace::pnpm_version(manifest))
+    pub fn from_configuration(config: &WorkspaceConfig) -> Self {
+        Self(config.pnpm_version.clone())
     }
 
     pub fn from_project(project: &crate::workspace::Project) -> Self {

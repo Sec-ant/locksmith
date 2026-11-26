@@ -186,7 +186,7 @@ fn lookup(name: &str, spec: &str, config: &WorkspaceConfig) -> Option<RegistryRe
     } else {
         spec
     };
-    RegistryRequest::version(name, spec)
+    RegistryRequest::version(name, config.registry_specifier(spec))
 }
 
 pub(crate) fn need_version(
@@ -313,11 +313,12 @@ pub(crate) fn declaration(
 }
 
 pub(super) fn catalog_version<'a>(
+    config: &WorkspaceConfig,
     registry: Option<&'a RegistryMetadata>,
     name: &str,
     specifier: &str,
 ) -> Option<&'a str> {
-    let (actual, range) = manifest::alias(specifier).unwrap_or((name, specifier));
+    let (actual, range) = config.registry_request(name, specifier);
     registry?
         .selected(actual, range)?
         .rsplit_once('@')
@@ -329,6 +330,7 @@ pub(crate) fn records(
     metadata: &Value,
     docs: [&Value; 3],
     order: [usize; 3],
+    additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Value, LockfileError> {
     let Some(registry) = context.registry.filter(|r| !r.selections.is_empty()) else {
         return Ok(Value::Null);
@@ -378,7 +380,7 @@ pub(crate) fn records(
     let locked = |name: &str, spec: &str, request: &RegistryRequest| -> Option<String> {
         index.get(request.name())?.iter().find_map(|key| {
             let value = reference(name, key);
-            (accepts(name, spec, &value, metadata)
+            (accepts(name, spec, &value, metadata, Some(config))
                 && desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
                     == Some(crate::peer::patch(key)))
             .then_some(value)
@@ -391,6 +393,8 @@ pub(crate) fn records(
     if let Some(patches) = metadata.get("patchedDependencies") {
         output["patchedDependencies"] = patches.clone();
     }
+    let mut missing_requests = super::MissingRequests::new(additional);
+    let mut missing_peers = Vec::new();
     for (key, publication, raw, declarations) in releases {
         if docs
             .iter()
@@ -428,16 +432,15 @@ pub(crate) fn records(
                 (name, field, spec, Some(*optional))
             }))
         {
+            let spec = config.registry_specifier(spec);
             let published = |req: &RegistryRequest| {
                 let locator = registry.selected(req.name(), req.selector()).or_else(|| {
                     peer?;
                     // Another importer may supply this peer under a different
                     // selector. The workspace resolver applies its actual scope.
-                    registry
-                        .selections
-                        .get(req.name())?
-                        .values()
-                        .find(|key| accepts(name, spec, &reference(name, key), metadata))
+                    registry.selections.get(req.name())?.values().find(|key| {
+                        accepts(name, spec, &reference(name, key), metadata, Some(config))
+                    })
                 })?;
                 let hash =
                     desired_patch(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
@@ -458,15 +461,30 @@ pub(crate) fn records(
             {
                 continue;
             }
-            let value = value.ok_or_else(|| {
-                need_version(
+            let Some(value) = value else {
+                let error = need_version(
                     &["snapshots", key, name],
                     name,
                     spec,
                     config,
                     format!("no locked resolution satisfies {spec}"),
-                )
-            })?;
+                );
+                if peer.is_some()
+                    && matches!(
+                        error,
+                        LockfileError::ResolutionRequired {
+                            request: Some(_),
+                            ..
+                        }
+                    )
+                {
+                    // Ordinary dependencies, including aliases, can supply this peer on the next pass.
+                    missing_peers.push(error);
+                } else {
+                    missing_requests.record(error)?;
+                }
+                continue;
+            };
             body[field][name] = value.into();
         }
         let hash = desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
@@ -475,6 +493,12 @@ pub(crate) fn records(
         output["packages"][key] = package;
         output["snapshots"][instance] = body;
     }
+    if missing_requests.first.is_none() {
+        for error in missing_peers {
+            missing_requests.record(error)?;
+        }
+    }
+    missing_requests.finish()?;
     Ok(output)
 }
 

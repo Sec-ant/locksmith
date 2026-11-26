@@ -24,22 +24,27 @@ fn working_file(path: &str) -> Result<Option<String>> {
 }
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
-    let revision = git::output(&[
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        &format!("{reference}^{{commit}}"),
-    ])?;
-    let tree = revision.trim_end();
-    let prefix = git::output(&["rev-parse", "--show-prefix"])?;
-    let prefix = prefix.trim_end_matches('\n');
+    #[cfg(feature = "bench-profile")]
+    let revision_span = locksmith::profile::span("git_revision");
+    let (tree, prefix) = git::revision_and_prefix(reference)?;
+    let (tree, prefix) = (tree.as_str(), prefix.as_str());
+    #[cfg(feature = "bench-profile")]
+    drop(revision_span);
     let mut blobs = Blobs::open()?;
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_project(&working);
-    let base_config = Policy::from_project(&project).configuration(&project.config)?;
-    let config = policy.configuration(&working.config)?;
-    let upgrade = base_config.changes_pnpm_major(&config);
+    let path = format!("{prefix}pnpm-lock.yaml");
+    let baseline_text = blobs
+        .read(tree, &path)?
+        .ok_or_else(|| format!("missing {reference}:{path}"))?;
+    let working_text = fs::read_to_string("pnpm-lock.yaml")?;
+    let mut base_config = project.configuration()?;
+    workspace::apply_manager_policy(&mut base_config);
+    let config = working.bootstrap_configuration(Some(working_text.as_str().into()), || {
+        working_file(".npmrc")
+    })?;
+    let upgrade = base_config.changes_pnpm_version(&config);
     for key in project
         .config
         .as_object()
@@ -50,7 +55,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         let a = project.config.get(key);
         let b = working.config.get(key);
         let supported = match key.as_str() {
-            "catalog" | "catalogs" | "overrides" | "packageExtensions" => true,
+            "catalog" | "catalogs" | "overrides" | "packageExtensions" | "configDependencies" => {
+                true
+            }
             "patchedDependencies"
             | "onlyBuiltDependencies"
             | "allowBuilds"
@@ -58,7 +65,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             | "trustLockfile"
             | "verifyDepsBeforeRun"
             | "pmOnFail"
-            | "minimumReleaseAgeExclude" => upgrade,
+            | "ignorePnpmfile"
+            | "minimumReleaseAgeExclude"
+            | "pnpmfileChecksum" => upgrade,
             _ => false,
         };
         if a != b && !supported {
@@ -69,7 +78,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         return Err("workspace membership changed in pnpm-workspace.yaml".into());
     }
     let mut files = if upgrade {
-        workspace::hook_paths(&project.config)?
+        let mut hooks = workspace::hook_paths(&project.config)?;
+        hooks.extend(workspace::hook_paths(&working.config)?);
+        hooks.sort_unstable();
+        hooks.dedup();
+        hooks
     } else {
         workspace::file_inputs(&project.config)?
     };
@@ -81,18 +94,15 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             );
         }
     }
-    let patches = if upgrade {
-        workspace::patches(&config, "", working_file)?
-    } else {
-        BTreeMap::new()
-    };
-    let path = format!("{prefix}pnpm-lock.yaml");
-    let baseline_text = blobs
-        .read(tree, &path)?
-        .ok_or_else(|| format!("missing {reference}:{path}"))?;
-    let working_text = fs::read_to_string("pnpm-lock.yaml")?;
+    // Both sides share the registry settings checked above. The resolved routes
+    // are evidence for checking omitted bootstrap tarball URLs.
+    base_config
+        .config_registries
+        .clone_from(&config.config_registries);
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
+    #[cfg(feature = "bench-profile")]
+    let inputs_span = locksmith::profile::span("converge_input_collection");
     let (baseline, candidate, [mut before, mut after]) =
         std::thread::scope(|scope| -> Result<_> {
             let parallel = candidate_text
@@ -114,6 +124,13 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             let candidate = candidate?.unwrap_or_else(|| baseline.clone());
             Ok((baseline, candidate, manifests))
         })?;
+    #[cfg(feature = "bench-profile")]
+    drop(inputs_span);
+    let patches = if base_config.requires_bootstrap_reconciliation(&config, &baseline, &candidate) {
+        workspace::patches(&config, "", working_file)?
+    } else {
+        BTreeMap::new()
+    };
     let recorded =
         include_generated_members(&working, &baseline, &candidate, &mut before, &mut after)?;
     let importers: BTreeSet<_> = before.keys().chain(after.keys()).collect();
@@ -129,7 +146,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         crate::registry::Lookup::Converge,
         allow_network.then_some(crate::registry::ProjectRc::Working),
         &working.config,
-        &after["."],
+        working.pnpm_version.as_ref().map(|v| v.major()),
         |registry| {
             locksmith::converge_with_recorded_baselines(
                 &baseline,
@@ -143,6 +160,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 &patches,
                 &recorded,
             )
+            .map_err(|e| vec![e])
         },
     )?;
     policy.check_peers(&working.config, &result, &after)?;
@@ -156,16 +174,36 @@ fn workspace_manifests(
     tree: &str,
     prefix: &str,
 ) -> Result<[BTreeMap<String, Value>; 2]> {
-    let before = workspace::manifests(project, &mut blobs, tree, prefix)?;
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("converge_manifest_collection");
     let mut after = BTreeMap::from([(".".into(), working.root.clone())]);
-    if working.workspace {
-        for id in Members::new(working)?.working_directories(prefix)? {
-            if let Some(manifest) = workspace::read_manifest(&id, working_file)? {
-                after.insert(id, manifest);
-            }
-        }
+    if !working.workspace {
+        return Ok([
+            workspace::manifests(project, &mut blobs, tree, prefix)?,
+            after,
+        ]);
     }
-    Ok([before, after])
+    let (before, after) = std::thread::scope(|scope| {
+        let before = scope.spawn(move || {
+            workspace::manifests(project, &mut blobs, tree, prefix)
+                .map_err(|error| error.to_string())
+        });
+        let after = (|| -> Result<_> {
+            #[cfg(feature = "bench-profile")]
+            let _span = locksmith::profile::span("worktree_manifests");
+            for id in Members::new(working)?.working_directories(prefix)? {
+                if let Some(manifest) = workspace::read_manifest(&id, working_file)? {
+                    after.insert(id, manifest);
+                }
+            }
+            Ok(after)
+        })();
+        (
+            before.join().expect("committed manifest reader panicked"),
+            after,
+        )
+    });
+    Ok([before?, after?])
 }
 
 /// Installed importers can name generated projects whose manifests Git ignores.

@@ -63,6 +63,111 @@ fn run(text: &str, range: &str, parent: Option<&Lockfile>) -> Result<String, Loc
 }
 
 #[test]
+fn parent_projects_can_restore_a_pin_without_selecting_a_bootstrap_from_them() {
+    let environment = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":"12.20.0","version":"12.20.0"}}}},
+        "packages":{"pnpm@12.20.0":{"resolution":{}}},"snapshots":{"pnpm@12.20.0":{}}});
+    let input =
+        format!("---\n{environment}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n");
+    let parent = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"dependencies":{"tool":{"specifier":"^1","version":"1.2.0"}}}},
+        "packages":{"tool@1.2.0":{"resolution":{"integrity":"sha512-tool"}}},"snapshots":{"tool@1.2.0":{}}});
+    let mut parent_environment = environment.clone();
+    parent_environment["packages"]["pnpm@12.20.0"]["resolution"]["integrity"] =
+        json!("sha512-parent-bootstrap");
+    let parent = Lockfile::parse(&format!("---\n{parent_environment}\n---\n{parent}\n")).unwrap();
+    let configuration =
+        WorkspaceConfig::from_pnpm_version(&json!({}), &"12.21.0".parse().unwrap()).unwrap();
+    let previous =
+        WorkspaceConfig::from_pnpm_version(&json!({}), &"12.20.0".parse().unwrap()).unwrap();
+    let restored = repair(
+        &input,
+        &RepairContext {
+            manifests: &BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"^1"}}))]),
+            configuration: &configuration,
+            parents: &[(&parent, &previous)],
+            patches: &BTreeMap::new(),
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(restored.environment(), Some(&environment));
+    assert_eq!(
+        restored.project().unwrap()["importers"]["."]["dependencies"]["tool"]["version"],
+        "1.2.0"
+    );
+}
+
+#[test]
+fn repair_retains_a_prerelease_resolved_under_modern_npm_wildcard_shorthand() {
+    let version = "1.0.0-beta.1";
+    for (runner, specifier, pin, valid) in [
+        ("11.28.11", "*", version, true),
+        ("11.28.11", "npm:*", version, true),
+        ("12.21.0", "npm:*", "tool@1.0.0-beta.1", true),
+        ("12.21.0", "npm:*", "other@1.0.0-beta.1", false),
+        ("10.34.9", "npm:*", version, false),
+    ] {
+        let name = if pin.starts_with("other@") {
+            "other"
+        } else {
+            "tool"
+        };
+        let key = format!("{name}@{version}");
+        let project = json!({"lockfileVersion":"9.0",
+            "importers":{".":{"dependencies":{"tool":{"specifier":specifier,"version":pin}}}},
+            "packages":{&key:{"resolution":{}}},"snapshots":{&key:{}}
+        });
+        let input = format!("{project}\n");
+        let config =
+            WorkspaceConfig::from_pnpm_version(&json!({}), &runner.parse().unwrap()).unwrap();
+        let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"tool":specifier}}))]);
+        let result = repair(
+            &input,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        );
+        if valid {
+            let result = result.unwrap();
+            assert_eq!(result.to_yaml().unwrap(), input);
+            result
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &config,
+                    &BTreeMap::new(),
+                    |_| Ok(None),
+                )
+                .unwrap();
+        } else {
+            assert!(result.is_err(), "{runner}: {specifier} resolved to {pin}");
+        }
+    }
+}
+
+#[test]
+fn repair_keeps_a_qualified_numeric_alias_without_a_recorded_runner() {
+    let input = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      tool: {specifier: 'npm:1', version: '1@2.0.0'}\npackages:\n  1@2.0.0: {resolution: {}}\nsnapshots:\n  1@2.0.0: {}\n";
+    let result = repair(
+        input,
+        &RepairContext {
+            manifests: &BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"npm:1"}}))]),
+            configuration: &WorkspaceConfig::default(),
+            patches: &BTreeMap::new(),
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.to_yaml().unwrap(), input);
+}
+
+#[test]
 fn repair_accepts_equivalent_pnpm_settings_and_rejects_changed_rules() {
     let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
     let ignored = lock.replace(
@@ -129,6 +234,56 @@ fn a_valid_catalog_range_can_have_two_different_locked_versions() {
         )
         .replace('\n', "\r\n");
     assert_eq!(run(&source, "^1.0.0", None).unwrap(), source);
+}
+
+#[test]
+fn repair_rebuilds_a_wildcard_catalog_from_a_retained_prerelease_pin() {
+    let release = "1.0.0-beta.1";
+    let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"catalog:"}}))]);
+    for range in ["*", "npm:*"] {
+        let config = WorkspaceConfig::from_pnpm_version(
+            &json!({"catalog":{"tool":range}}),
+            &"12.21.0".parse().unwrap(),
+        )
+        .unwrap();
+        for pin in ["tool@1.0.0-beta.1", release] {
+            let input = json!({"lockfileVersion":"9.0",
+                "catalogs":{"default":{"tool":{"specifier":"npm:old-tool@^1","version":"1.0.0"}}},
+                "importers":{".":{"dependencies":{"tool":{"specifier":"catalog:","version":pin}}}},
+                "packages":{"tool@1.0.0-beta.1":{"resolution":{}}},
+                "snapshots":{"tool@1.0.0-beta.1":{}}
+            });
+            let output = repair(
+                &input.to_string(),
+                &RepairContext {
+                    manifests: &manifests,
+                    configuration: &config,
+                    patches: &BTreeMap::new(),
+                    parents: &[],
+                    registry: None,
+                },
+            )
+            .unwrap();
+            let project = output.project().unwrap();
+            assert_eq!(
+                project["catalogs"]["default"]["tool"],
+                json!({"specifier":range,"version":release})
+            );
+            assert_eq!(
+                project["importers"]["."]["dependencies"]["tool"]["version"],
+                pin
+            );
+            output
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &config,
+                    &BTreeMap::new(),
+                    |_| Ok(None),
+                )
+                .unwrap();
+        }
+    }
 }
 
 #[test]
@@ -548,5 +703,38 @@ fn frozen_settings_follow_the_package_manager_version_and_defaults() {
                 assert_eq!(result.unwrap().to_yaml().unwrap(), source);
             }
         }
+    }
+}
+
+#[test]
+fn unreachable_extension_dependencies_are_preserved_with_or_without_a_donor() {
+    use md5::{Digest, Md5};
+    let extensions = json!({"host@1.0.0":{"dependencies":{"addon":"1.0.0"}}});
+    let overrides = json!({"host@1>addon":"2.0.0"});
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"overrides":overrides,"packageExtensions":extensions}))
+            .unwrap();
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    let mut doc = json!({"lockfileVersion":"9.0","overrides":overrides,"packageExtensionsChecksum":format!("{:x}",Md5::digest(extensions.to_string())),
+        "importers":{".":{}},"packages":{"host@1.0.0":{"resolution":{}},"addon@1.0.0":{"resolution":{}}},
+        "snapshots":{"host@1.0.0":{"dependencies":{"addon":"1.0.0"}},"addon@1.0.0":{}}});
+    for donor in [false, true] {
+        if donor {
+            doc["packages"]["addon@2.0.0"] = json!({"resolution":{}});
+            doc["snapshots"]["addon@2.0.0"] = json!({});
+        }
+        let source = doc.to_string();
+        let result = repair(
+            &source,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.to_yaml().unwrap(), source);
     }
 }

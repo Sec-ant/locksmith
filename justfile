@@ -41,8 +41,11 @@ bench:
     export LOCKSMITH_BENCH_DIR
     trap 'rm -r "$LOCKSMITH_BENCH_DIR"' EXIT
     sh benchmarks/prepare.sh "$LOCKSMITH_BENCH_DIR"
-    for command in merge converge repair inspect inspect-external-1000 inspect-external-4000; do
+    for command in merge merge-context validate-workspace converge repair inspect inspect-external-1000 inspect-external-4000; do
         hyperfine --shell=none --warmup 2 --runs 11 "benchmarks/cli $command"
+    done
+    for command in registry-64 registry-512; do
+        benchmarks/cli "$command" --hyperfine
     done
 
 # Describe a user-facing change and select its release level.
