@@ -1,9 +1,10 @@
 //! Index the graph once. Process up to 64 workspace roots per pass over the
 //! condensed DAG so temporary memory stays linear even on very wide workspaces.
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use super::{ExternalLink, LinkSource, PeerGroup};
 use crate::{DocumentKind, LockfileError, Value, graph};
+use indexmap::IndexMap;
 use petgraph::{
     algo::kosaraju_scc,
     graph::{DiGraph, NodeIndex},
@@ -13,7 +14,7 @@ pub(super) struct Impact<'a> {
     graph: DiGraph<&'a str, ()>,
     roots: Vec<NodeIndex>,
     direct: Vec<Vec<NodeIndex>>,
-    snapshots: BTreeMap<&'a str, NodeIndex>,
+    snapshots: IndexMap<&'a str, NodeIndex>,
     pub external_links: BTreeSet<ExternalLink>,
 }
 
@@ -22,12 +23,13 @@ impl<'a> Impact<'a> {
         #[cfg(feature = "bench-profile")]
         let _span = crate::profile::span("inspect_graph");
         let mut graph = DiGraph::new();
-        let mut nodes = |section| -> BTreeMap<&'a str, NodeIndex> {
-            let keys: BTreeSet<_> = graph::section(doc, section)
+        let mut nodes = |section| -> IndexMap<&'a str, NodeIndex> {
+            let mut keys: Vec<_> = graph::section(doc, section)
                 .into_iter()
                 .flatten()
                 .map(|(key, _)| key.as_str())
                 .collect();
+            keys.sort_unstable();
             keys.into_iter()
                 .map(|key| (key, graph.add_node(key)))
                 .collect()
