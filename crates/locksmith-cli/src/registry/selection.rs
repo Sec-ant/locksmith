@@ -45,12 +45,16 @@ fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
 impl Registry {
     fn old_enough(&self, doc: &Packument, version: &str) -> Result<bool> {
         if self.min_age == 0
-            || excluded(&self.config["minimumReleaseAgeExclude"], &doc.name, version)?
+            || excluded(
+                &self.settings.config["minimumReleaseAgeExclude"],
+                &doc.name,
+                version,
+            )?
         {
             return Ok(true);
         }
         let Some(date) = doc.time.get(version).and_then(Value::as_str) else {
-            if self.config["minimumReleaseAgeIgnoreMissingTime"] == true {
+            if self.settings.config["minimumReleaseAgeIgnoreMissingTime"] == true {
                 return Ok(true);
             }
             return Err(format!("missing publish time for {}@{version}", doc.name).into());
@@ -65,7 +69,9 @@ impl Registry {
         specifier: &str,
         direct: bool,
     ) -> Result<&'p str> {
-        let mode = self.config["resolutionMode"].as_str().unwrap_or("highest");
+        let mode = self.settings.config["resolutionMode"]
+            .as_str()
+            .unwrap_or("highest");
         if !matches!(mode, "highest" | "lowest-direct") {
             return Err(format!(
                 "registry resolutionMode {mode} requires additional resolution context"
@@ -127,9 +133,9 @@ impl Registry {
             Ok(chosen)
         };
         let mut selected = pick(self.min_age > 0)?;
-        let strict = self.config["minimumReleaseAgeStrict"]
+        let strict = self.settings.config["minimumReleaseAgeStrict"]
             .as_bool()
-            .unwrap_or(self.config.get("minimumReleaseAge").is_some());
+            .unwrap_or(self.settings.config.get("minimumReleaseAge").is_some());
         if selected.is_none() && self.min_age > 0 && !strict {
             selected = pick(false)?;
         }
@@ -139,9 +145,13 @@ impl Registry {
                 doc.name
             )
         })?;
-        if let Some(policy) = self.config["trustPolicy"].as_str()
+        if let Some(policy) = self.settings.config["trustPolicy"].as_str()
             && policy != "off"
-            && !excluded(&self.config["trustPolicyExclude"], &doc.name, selected)?
+            && !excluded(
+                &self.settings.config["trustPolicyExclude"],
+                &doc.name,
+                selected,
+            )?
         {
             return Err(format!(
                 "{}@{selected} requires publication trust evidence for trustPolicy {policy}",

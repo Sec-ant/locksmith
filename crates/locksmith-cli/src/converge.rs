@@ -37,16 +37,14 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_project(&working);
-    let base_config = Policy::from_project(&project).configuration(&project.config)?;
-    let config = policy.configuration(&working.config)?;
+    let base_config = project.configuration()?;
+    let config = working.configuration()?;
     let path = format!("{prefix}pnpm-lock.yaml");
     let baseline_text = blobs
         .read(tree, &path)?
         .ok_or_else(|| format!("missing {reference}:{path}"))?;
     let working_text = fs::read_to_string("pnpm-lock.yaml")?;
     let upgrade = base_config.changes_pnpm_version(&config);
-    let reconcile_bootstrap =
-        upgrade || base_config.config_dependencies != config.config_dependencies;
     for key in project
         .config
         .as_object()
@@ -68,11 +66,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             | "verifyDepsBeforeRun"
             | "pmOnFail"
             | "ignorePnpmfile"
-            | "minimumReleaseAgeExclude" => upgrade,
-            "pnpmfileChecksum" => {
-                upgrade
-                    && project.config.get("ignorePnpmfile") != working.config.get("ignorePnpmfile")
-            }
+            | "minimumReleaseAgeExclude"
+            | "pnpmfileChecksum" => upgrade,
             _ => false,
         };
         if a != b && !supported {
@@ -83,7 +78,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         return Err("workspace membership changed in pnpm-workspace.yaml".into());
     }
     let mut files = if upgrade {
-        workspace::hook_paths(&project.config)?
+        let mut hooks = workspace::hook_paths(&project.config)?;
+        hooks.extend(workspace::hook_paths(&working.config)?);
+        hooks.sort_unstable();
+        hooks.dedup();
+        hooks
     } else {
         workspace::file_inputs(&project.config)?
     };
@@ -95,11 +94,6 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             );
         }
     }
-    let patches = if reconcile_bootstrap {
-        workspace::patches(&config, "", working_file)?
-    } else {
-        BTreeMap::new()
-    };
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
     let (baseline, candidate, [mut before, mut after]) =
@@ -123,6 +117,11 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             let candidate = candidate?.unwrap_or_else(|| baseline.clone());
             Ok((baseline, candidate, manifests))
         })?;
+    let patches = if base_config.requires_bootstrap_reconciliation(&config, &baseline, &candidate) {
+        workspace::patches(&config, "", working_file)?
+    } else {
+        BTreeMap::new()
+    };
     let recorded =
         include_generated_members(&working, &baseline, &candidate, &mut before, &mut after)?;
     let importers: BTreeSet<_> = before.keys().chain(after.keys()).collect();

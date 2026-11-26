@@ -866,6 +866,25 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
             )
             .is_err()
     );
+    let tagged = config("latest");
+    for (pin, valid) in [("2.0.0", true), ("link:./local", false)] {
+        let mut env = new.environment().unwrap().clone();
+        env["importers"]["."]["configDependencies"]["config"] =
+            json!({"specifier":"latest","version":pin});
+        let lock = Lockfile::parse(&format!("---\n{env}\n---\n{project}\n")).unwrap();
+        assert_eq!(
+            lock.validate_workspace(
+                &manifests,
+                &Default::default(),
+                &tagged,
+                ctx.patches,
+                |_| Ok(None)
+            )
+            .is_ok(),
+            valid,
+            "{pin}"
+        );
+    }
     for (url, valid) in [
         ("https://registry.test/config/-/config-2.0.0.tgz", true),
         ("https://registry.test/artifacts/custom.tgz", false),

@@ -206,6 +206,45 @@ fn merge_resolves_partial_upper_bounds_with_boolean_deprecation_metadata() {
 }
 
 #[test]
+fn existing_catalog_entries_follow_the_active_runners_npm_range_semantics() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion":"9.0","importers":{".":{}},
+        "catalogs":{"default":{"pkg":{"specifier":"npm:1","version":"3.0.0"}}},
+        "packages":{"1@3.0.0":{"resolution":{}},"pkg@1.2.0":{"resolution":{}}},
+        "snapshots":{"1@3.0.0":{},"pkg@1.2.0":{}}}),
+    );
+    let config = json!({"catalog":{"pkg":"npm:1"},"pmOnFail":"ignore"});
+    for (runner, version, pin) in [
+        ("11.0.9", "3.0.0", "1@3.0.0"),
+        ("12.21.0", "1.2.0", "1.2.0"),
+    ] {
+        write(
+            root,
+            "ctx",
+            &json!({"target":"ours","manifests":{".":{"packageManager":format!("pnpm@{runner}"),"dependencies":{"pkg":"catalog:"}}},"configuration":config,"configurations":[config,config,config],"patches":{}}),
+        );
+        let graph = output(run(
+            root,
+            CLI,
+            &["merge", "lock", "lock", "lock", "--context", "ctx"],
+        ));
+        assert_eq!(
+            graph["catalogs"]["default"]["pkg"],
+            json!({"specifier":"npm:1","version":version}),
+            "{runner}"
+        );
+        assert_eq!(
+            graph["importers"]["."]["dependencies"]["pkg"]["version"], pin,
+            "{runner}"
+        );
+    }
+}
+
+#[test]
 fn npm_ranges_select_the_package_named_by_the_runner_and_keep_the_written_specifier() {
     let dir = tempdir().unwrap();
     let root = dir.path();

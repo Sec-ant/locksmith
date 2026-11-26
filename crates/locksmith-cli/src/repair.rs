@@ -24,7 +24,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let version = RepairInput::recorded_pnpm_version(&text);
     let project = Project::read(&mut blobs, commit, prefix, version)?;
     let policy = Policy::from_project(&project);
-    let config = policy.configuration(&project.config)?;
+    let config = project.configuration()?;
     let patches = workspace::patches(&config, prefix, |file| blobs.read(commit, file))?;
     let manifests = workspace::manifests(&project, &mut blobs, commit, prefix)?;
     // Release Git's mapped packfiles before allocating the lockfile graph.
@@ -63,10 +63,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                     };
                     let previous =
                         Project::read(&mut blobs, parent, prefix, lock.recorded_pnpm_version())?;
-                    evidence.push((
-                        lock,
-                        Policy::from_project(&previous).configuration(&previous.config)?,
-                    ));
+                    evidence.push((lock, previous.configuration()?));
                 }
             }
             let parents: Vec<_> = evidence.iter().map(|(l, c)| (l, c)).collect();
@@ -124,7 +121,7 @@ fn recover_merge_snapshots(
             .ok_or_else(|| format!("missing {revision}:{file}"))?;
         let lock = Lockfile::try_from(text)?;
         let project = Project::read(&mut blobs, revision, prefix, lock.recorded_pnpm_version())?;
-        let config = Policy::from_project(&project).configuration(&project.config)?;
+        let config = project.configuration()?;
         Ok((lock, config))
     });
     let ((base, base_cfg), (ours, ours_cfg), (theirs, theirs_cfg)) = (base?, ours?, theirs?);

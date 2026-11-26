@@ -75,12 +75,21 @@ pub(crate) fn parse_manifest(path: &str, text: &str) -> Result<Value> {
 }
 
 pub struct Project {
+    bootstrap_registries: BTreeMap<String, String>,
     pub root: Value,
     pub config: Value,
     pub workspace: bool,
     pub pnpm_version: Option<node_semver::Version>,
 }
 impl Project {
+    pub fn configuration(&self) -> Result<locksmith::WorkspaceConfig> {
+        let mut config = crate::policy::Policy::from_project(self).configuration(&self.config)?;
+        config
+            .config_registries
+            .extend(self.bootstrap_registries.clone());
+        Ok(config)
+    }
+
     pub fn read(
         blobs: &mut Blobs,
         tree: &str,
@@ -117,7 +126,8 @@ impl Project {
     ) -> Result<Self> {
         let version = locksmith::WorkspaceConfig::project_pnpm_version(&root, recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
-        crate::registry::apply_bootstrap_registry(&mut config);
+        let bootstrap_registries =
+            crate::registry::bootstrap_registries(&config, || read(".npmrc"))?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
@@ -138,6 +148,7 @@ impl Project {
             config["pnpmfileChecksum"] = Value::Object(hooks);
         }
         Ok(Self {
+            bootstrap_registries,
             root,
             config,
             workspace,
@@ -405,7 +416,7 @@ pub struct Members {
     exclude: Vec<Pattern>,
     descend: BTreeMap<String, Vec<Pattern>>,
     excluded_trees: Vec<Pattern>,
-    component_patterns: Option<BTreeMap<String, Pattern>>,
+    component_patterns: BTreeMap<String, Pattern>,
 }
 impl Members {
     pub fn new(project: &Project) -> Result<Self> {
@@ -418,7 +429,7 @@ impl Members {
             exclude: vec![],
             descend: BTreeMap::new(),
             excluded_trees: Vec::new(),
-            component_patterns: Some(BTreeMap::new()),
+            component_patterns: BTreeMap::new(),
         };
         if !project.workspace {
             return Ok(this);
@@ -449,7 +460,7 @@ impl Members {
             }
             for alternative in expanded {
                 let mut parts = Vec::new();
-                for part in alternative.split('/') {
+                for part in glob_components(&alternative) {
                     match part {
                         "" | "." => (),
                         ".." if parts.last().is_some_and(|&p| p != "..") => {
@@ -464,16 +475,10 @@ impl Members {
                     }
                 }
                 if !parts.is_empty() {
-                    if let Some(components) = &mut this.component_patterns {
-                        for &part in &parts {
-                            // A character class can contain a slash. Only the full glob is authoritative.
-                            if !components.contains_key(part) {
-                                let Ok(pattern) = Pattern::new(part) else {
-                                    this.component_patterns = None;
-                                    break;
-                                };
-                                components.insert(part.into(), pattern);
-                            }
+                    for &part in &parts {
+                        if !this.component_patterns.contains_key(part) {
+                            this.component_patterns
+                                .insert(part.into(), Pattern::new(part)?);
                         }
                     }
                     patterns.push(Pattern::new(&format!("{}/package.json", parts.join("/")))?);
@@ -712,8 +717,7 @@ impl Members {
                     let (parent, name) = logical.rsplit_once('/').unwrap_or(("", &logical));
                     let pattern_matches: Vec<_> = self
                         .component_patterns
-                        .iter()
-                        .flat_map(|patterns| patterns.values())
+                        .values()
                         .map(|pattern| pattern.matches_with(name, GLOB_OPTIONS))
                         .collect();
                     let cache_key = (
@@ -728,10 +732,7 @@ impl Members {
                     }
                     let start = found.len();
                     self.committed_paths(&target.id, &logical, tree, prefix, found, blobs)?;
-                    if found.len() == start
-                        && self.component_patterns.is_some()
-                        && blobs.conflicts.is_empty()
-                    {
+                    if found.len() == start && blobs.conflicts.is_empty() {
                         empty_links.insert(cache_key);
                     }
                 } else if target.kind == git::ObjectKind::Blob
@@ -775,6 +776,30 @@ impl Members {
         let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
     }
+}
+
+/// Split path components without treating a slash inside a glob character class as a separator.
+fn glob_components(pattern: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut chars = pattern.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '[' => {
+                chars.next_if(|(_, c)| *c == '!');
+                // The first character in a class can be a literal closing bracket.
+                chars.next();
+                chars.by_ref().find(|(_, c)| *c == ']');
+            }
+            '/' => {
+                parts.push(&pattern[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&pattern[start..]);
+    parts
 }
 
 fn excluded_directory(path: &str) -> bool {

@@ -459,6 +459,60 @@ fn converge_across_a_pnpm_upgrade_keeps_baseline_pins_and_applies_final_override
 }
 
 #[test]
+fn a_runner_upgrade_can_select_another_unchanged_default_hook() {
+    let repo = Repo::new();
+    repo.write(".pnpmfile.cjs", "module.exports = {};\n");
+    repo.write(
+        ".pnpmfile.mjs",
+        "export const hooks = { readPackage(pkg) {return pkg} }\n",
+    );
+    let mut lock = graph(repo.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes());
+    // pnpm 10 uses the CJS file; pnpm 12 selects the ES module.
+    lock["pnpmfileChecksum"] = json!("sha256-giK4Fp7obyXNzNhNNANABgrj8M/1Xi6p00TXwzJzO3E=");
+    repo.write("pnpm-lock.yaml", &lock.to_string());
+    repo.commit("track both default hooks");
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    lock["pnpmfileChecksum"] = json!("sha256-hcrgxuD4yzd6wArCpuECMwsXbpMreZHhRY4a0MX/XXA=");
+    repo.write("pnpm-lock.yaml", &lock.to_string());
+    let out = repo.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(
+        graph(&out.stdout)["pnpmfileChecksum"],
+        lock["pnpmfileChecksum"]
+    );
+    repo.write(".pnpmfile.mjs", "export const hooks = {};\n");
+    let out = repo.cmd(CLI, &["converge", "HEAD"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn a_newly_recorded_runner_uses_the_installed_patch_contents() {
+    let r = Repo::new();
+    let manager = |policy| {
+        json!({"devEngines":{"packageManager":{"name":"pnpm","version":"12.21.0","onFail":policy}}})
+            .to_string()
+    };
+    r.write("package.json", &manager("ignore"));
+    r.write(
+        "pnpm-workspace.yaml",
+        "packages: []\nallowUnusedPatches: true\npatchedDependencies: {unused: unused.patch}\n",
+    );
+    r.write("unused.patch", "old\n");
+    let project = json!({"lockfileVersion":"9.0","importers":{".":{}},"patchedDependencies":{"unused":"01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"}});
+    r.write("pnpm-lock.yaml", &project.to_string());
+    r.commit("use a patch without managing pnpm");
+    r.write("package.json", &manager("download"));
+    let boot = json!({"lockfileVersion":"9.0","importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":"12.21.0","version":"12.21.0"}}}},"packages":{"pnpm@12.21.0":{"resolution":{}}},"snapshots":{"pnpm@12.21.0":{}}});
+    r.write("pnpm-lock.yaml", &format!("---\n{boot}\n---\n{project}\n"));
+    let out = r.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(
+        graph(&out.stdout)["patchedDependencies"],
+        project["patchedDependencies"]
+    );
+}
+
+#[test]
 fn converge_accepts_changes_to_an_ignored_explicit_hook_across_pnpm_versions() {
     let repo = Repo::new();
     repo.write(
@@ -1071,6 +1125,20 @@ fn repair_and_converge_honor_ignored_pnpmfiles_and_legacy_resolutions() {
     repo.write("pnpm-lock.yaml", &text);
     repo.commit("use legacy resolutions with an explicit override");
     check(&text);
+}
+
+#[test]
+fn workspace_globs_can_contain_a_slash_in_a_character_class() {
+    let repo = Repo::new();
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/[v/w]eb']\n");
+    repo.commit("select web through a character class");
+    for args in [["repair", "HEAD"], ["validate", "--workspace"]] {
+        let out = repo.cmd(CLI, &args);
+        assert!(out.status.success(), "{}", report(&out));
+        if args[0] == "repair" {
+            assert!(graph(&out.stdout)["importers"].get("apps/web").is_some());
+        }
+    }
 }
 
 #[test]
@@ -3200,6 +3268,50 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
             .unwrap();
         assert_eq!(out.status.success(), valid, "{}", report(&out));
     }
+    write_input(
+        root,
+        "pnpm/config.yaml",
+        "registry: https://private.example\n",
+    );
+    let out = Command::new(CLI)
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root)
+        .env_remove("pnpm_config_registry")
+        .env_remove("PNPM_CONFIG_REGISTRY")
+        .env_remove("npm_config_registry")
+        .env_remove("NPM_CONFIG_REGISTRY")
+        .args(["validate", "--workspace"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+
+    let repo = Repo::new();
+    repo.write("package.json", "{}");
+    repo.write("pnpm-workspace.yaml", "packages: []\n");
+    repo.write(
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
+    );
+    repo.commit("no config dependencies");
+    for file in ["pnpm-workspace.yaml", "pnpm-lock.yaml"] {
+        repo.write(file, &fs::read_to_string(root.join(file)).unwrap());
+    }
+    let converge = || {
+        Command::new(CLI)
+            .current_dir(repo.0.path())
+            .env("pnpm_config_registry", "https://private.example")
+            .args(["converge", "HEAD"])
+            .output()
+            .unwrap()
+    };
+    let out = converge();
+    assert!(out.status.success(), "{}", report(&out));
+    let cfg = fs::read_to_string(root.join("pnpm-workspace.yaml")).unwrap();
+    repo.write(
+        "pnpm-workspace.yaml",
+        &format!("{cfg}\nregistries: {{default: 'https://other.example'}}\n"),
+    );
+    assert!(!converge().status.success());
 }
 
 #[test]

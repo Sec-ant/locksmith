@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, ffi::OsString, io::Write, path::Path, process::
 use locksmith::MergeContext;
 use tempfile::NamedTempFile;
 
-use crate::{Result, git, policy, workspace};
+use crate::{Result, git, workspace};
 use workspace::{Members, Project};
 
 fn project_conflicts(
@@ -115,7 +115,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let (project, config, merge) =
         target.workspace_for_bootstrap(Some(&root), locks.inputs(), |version| -> Result<_> {
             let project = Project::from_manifest(root.clone(), version, &mut read)?;
-            let config = policy::Policy::from_project(&project).configuration(&project.config)?;
+            let config = project.configuration()?;
             Ok((project, config))
         })?;
     let dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
@@ -126,9 +126,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
             dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
         )?;
     }
-    let [base, ours, theirs] = sources
-        .each_ref()
-        .map(|p| policy::Policy::from_project(p).configuration(&p.config));
+    let [base, ours, theirs] = sources.each_ref().map(|p| p.configuration());
     let configurations = [base?, ours?, theirs?];
     let patches = workspace::patches(&config, prefix, |file| blobs.read(&tree, file))?;
     let mut settings = None;

@@ -334,12 +334,14 @@ impl WorkspaceConfig {
                     })
             } else {
                 pin["specifier"] == spec
-                    && spec.parse::<node_semver::Range>().map_or(true, |range| {
-                        pin["version"]
-                            .as_str()
-                            .and_then(|v| v.parse::<node_semver::Version>().ok())
-                            .is_some_and(|version| version.satisfies_with_prerelease(&range, true))
-                    })
+                    && pin["version"]
+                        .as_str()
+                        .and_then(|v| v.parse::<node_semver::Version>().ok())
+                        .is_some_and(|version| {
+                            spec.parse::<node_semver::Range>().map_or(true, |range| {
+                                version.satisfies_with_prerelease(&range, true)
+                            })
+                        })
             }
         })
     }
@@ -425,6 +427,18 @@ impl WorkspaceConfig {
     /// Whether convergence must reconcile a changed, newly specified, or removed runner version.
     pub fn changes_pnpm_version(&self, other: &Self) -> bool {
         self.pnpm_version != other.pnpm_version
+    }
+
+    /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
+    pub fn requires_bootstrap_reconciliation(
+        &self,
+        after: &Self,
+        baseline: &crate::Lockfile,
+        candidate: &crate::Lockfile,
+    ) -> bool {
+        self.changes_pnpm_version(after)
+            || self.config_dependencies != after.config_dependencies
+            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
     }
 
     pub(crate) fn matches_pnpm(&self, target: &Self) -> bool {

@@ -186,16 +186,15 @@ pub(crate) fn resolve(
                 .find_map(|side| {
                     let entry = docs[*side].get("catalogs")?.get(catalog)?.get(name)?;
                     let version = entry.get("version")?.as_str()?;
-                    if entry
-                        .get("specifier")
-                        .and_then(Value::as_str)
-                        .and_then(manifest::alias)
-                        .map(|(n, _)| n)
-                        != manifest::alias(specifier).map(|(n, _)| n)
+                    let recorded = context.configurations[*side]
+                        .registry_specifier(entry["specifier"].as_str()?);
+                    let effective = config.registry_specifier(specifier);
+                    if manifest::alias(recorded).map(|(n, _)| n)
+                        != manifest::alias(effective).map(|(n, _)| n)
                     {
                         return None;
                     }
-                    catalog_version_fits(specifier, version, entry["specifier"].as_str())
+                    catalog_version_fits(effective, version, Some(recorded))
                         .then(|| json!({"specifier":specifier,"version":version}))
                 })
                 .or_else(|| {
