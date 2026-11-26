@@ -657,26 +657,53 @@ impl Members {
         if entries.len() < 32 {
             return self.visit_entries(entries, id, descend, ancestors, split, found);
         }
-        let later = entries.split_off(entries.len() / 2);
-        let mut later_ancestors = ancestors.clone();
+        let readers = if entries.len() >= 128
+            && std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() >= 4)
+        {
+            4
+        } else {
+            2
+        };
+        let range_size = entries.len().div_ceil(readers);
+        let collect = |entries, ancestors: &mut BTreeSet<PathBuf>| -> Result<_> {
+            let mut discovered = Vec::new();
+            self.visit_entries(
+                entries,
+                id,
+                descend,
+                ancestors,
+                false,
+                &mut |id, directory| discovered.push((id.to_owned(), directory.to_owned())),
+            )?;
+            Ok(discovered)
+        };
         std::thread::scope(|scope| -> Result<()> {
-            let later = scope.spawn(|| {
-                let mut discovered = Vec::new();
-                self.visit_entries(
-                    later,
-                    id,
-                    descend,
-                    &mut later_ancestors,
-                    false,
-                    &mut |id, directory| discovered.push((id.to_owned(), directory.to_owned())),
-                )
-                .map(|()| discovered)
-                .map_err(|error| error.to_string())
-            });
-            // Replay the second range in directory iteration order.
-            self.visit_entries(entries, id, descend, ancestors, false, found)?;
-            for (id, path) in later.join().expect("workspace directory reader panicked")? {
-                found(&id, &path);
+            let mut workers = Vec::with_capacity(readers - 1);
+            while entries.len() > range_size {
+                let later = entries.split_off(range_size);
+                let range = std::mem::replace(&mut entries, later);
+                let mut path = ancestors.clone();
+                workers.push(
+                    scope.spawn(move || {
+                        collect(range, &mut path).map_err(|error| error.to_string())
+                    }),
+                );
+            }
+            let last = collect(entries, ancestors);
+            let results = workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .expect("workspace directory reader panicked")
+                        .map_err(Into::into)
+                })
+                .chain([last]);
+            // Apply discoveries in directory iteration order.
+            for result in results {
+                for (id, path) in result? {
+                    found(&id, &path);
+                }
             }
             Ok(())
         })
