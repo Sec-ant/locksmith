@@ -378,6 +378,8 @@ pub(crate) fn render(
     preserve_baseline: bool,
     output: &mut String,
 ) {
+    #[cfg(feature = "bench-profile")]
+    let _span = crate::profile::span("render_source_yaml");
     if kind == DocumentKind::Environment
         && let Some(layout) = sources.iter().find_map(|source| {
             (source.documents.get(&kind)?.as_ref() == document)

@@ -14,6 +14,8 @@ fn read_source(path: &Path) -> ReadResult<Lockfile> {
 }
 
 pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile; 3]> {
+    #[cfg(feature = "bench-profile")]
+    let _span = locksmith::profile::span("merge_input_parsing");
     let paths = files.map(AsRef::as_ref);
     if paths[0]
         .metadata()
