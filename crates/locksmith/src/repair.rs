@@ -65,8 +65,7 @@ impl RepairInput {
         let [bootstrap, _, ..] = ranges.as_slice() else {
             return None;
         };
-        let lock = Lockfile::parse(&text[bootstrap.clone()]).ok()?;
-        lock.environment().is_some().then_some(lock)
+        crate::recovery::bootstrap_candidate(&text[bootstrap.clone()])
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].

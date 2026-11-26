@@ -109,12 +109,11 @@ pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileErro
 /// rebound to the selected providers. Missing versions or configuration metadata
 /// are reported explicitly, without registry access or package-manager calls.
 pub(crate) fn resolve(
-    base: &Lockfile,
-    ours: &Lockfile,
-    theirs: &Lockfile,
+    locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
 ) -> Result<Lockfile, LockfileError> {
-    resolve_sources([base, ours, theirs], context, false, None)
+    resolve_sources(locks, context, bootstrap, false, None)
 }
 
 struct MissingRequests<'a> {
@@ -158,7 +157,8 @@ impl<'a> MissingRequests<'a> {
 
 impl MergeContext<'_> {
     /// Merge parsed locks and report independent registry requests from the same resolution phase together.
-    /// The caller can supply the requested registry metadata in one pass.
+    /// The caller can supply the requested registry metadata in one pass. A workspace loaded
+    /// by [`MergeTarget`] can reuse its bootstrap selection through [`crate::ContextualMerge::merge_with_requests`].
     ///
     /// # Errors
     /// Returns the errors of [`crate::merge`]. A failure unrelated to missing
@@ -167,22 +167,30 @@ impl MergeContext<'_> {
         &self,
         locks: [&Lockfile; 3],
     ) -> Result<Lockfile, Vec<LockfileError>> {
-        let mut additional = Vec::new();
-        resolve_sources(locks, self, false, Some(&mut additional)).map_err(|first| {
-            let collect = matches!(
-                first,
-                LockfileError::ResolutionRequired {
-                    request: Some(_),
-                    ..
-                }
-            );
-            let mut errors = vec![first];
-            if collect {
-                errors.append(&mut additional);
-            }
-            errors
-        })
+        resolve_with_requests(locks, self, None)
     }
+}
+
+pub(crate) fn resolve_with_requests(
+    locks: [&Lockfile; 3],
+    context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
+) -> Result<Lockfile, Vec<LockfileError>> {
+    let mut additional = Vec::new();
+    resolve_sources(locks, context, bootstrap, false, Some(&mut additional)).map_err(|first| {
+        let collect = matches!(
+            first,
+            LockfileError::ResolutionRequired {
+                request: Some(_),
+                ..
+            }
+        );
+        let mut errors = vec![first];
+        if collect {
+            errors.append(&mut additional);
+        }
+        errors
+    })
 }
 
 pub(crate) fn converge_upgrade(
@@ -194,7 +202,7 @@ pub(crate) fn converge_upgrade(
     let mut current = std::borrow::Cow::Borrowed(installed);
     let mut seen = BTreeSet::new();
     loop {
-        let next = resolve_sources([baseline, baseline, &current], context, true, None)?;
+        let next = resolve_sources([baseline, baseline, &current], context, None, true, None)?;
         if next.documents == current.documents {
             return Ok(next);
         }
@@ -215,6 +223,7 @@ pub(crate) fn converge_upgrade(
 fn resolve_sources(
     locks: [&Lockfile; 3],
     context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
     prefer_baseline: bool,
     mut additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Lockfile, LockfileError> {
@@ -259,7 +268,11 @@ fn resolve_sources(
         locks.map(Some),
         context.target,
         context.manifests.get("."),
-        [Some(context.configuration); 3],
+        [0, 1, 2].map(|side| {
+            bootstrap
+                .is_none_or(|selected| selected == side)
+                .then_some(context.configuration)
+        }),
     )?;
     let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;

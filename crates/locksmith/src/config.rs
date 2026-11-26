@@ -211,6 +211,25 @@ impl WorkspaceConfig {
         }
     }
 
+    /// Decode a merge or repair source when only the final manifest is available.
+    /// A source setting can override the runner; otherwise the source's bootstrap version
+    /// takes precedence over the final manifest.
+    ///
+    /// # Errors
+    /// Returns the configuration errors described by [`Self::from_pnpm_context`].
+    pub fn from_pnpm_source(
+        raw: &Value,
+        final_manifest: Option<&Value>,
+        recorded: Option<node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let fallback = if recorded.is_none() {
+            final_manifest
+        } else {
+            None
+        };
+        Self::from_pnpm_context(raw, fallback, recorded)
+    }
+
     /// Read the project's pnpm version, using its locked version for a compatible range
     /// or when the manifest leaves the version unspecified.
     pub fn project_pnpm_version(

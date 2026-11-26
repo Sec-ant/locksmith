@@ -106,26 +106,21 @@ impl Merge {
             Target::Ours => locksmith::MergeTarget::Ours,
             Target::Theirs => locksmith::MergeTarget::Theirs,
         };
-        let (branches, config) = target.workspace_configurations(
+        let (branches, config, merge) = target.workspace_configurations(
             root,
-            [&base, &ours, &theirs],
+            [base, ours, theirs],
             self.configurations.each_ref(),
             &self.configuration,
         )?;
         let registry = registry(self.registry)?;
-        locksmith::merge(
-            base,
-            ours,
-            theirs,
-            Some(&locksmith::MergeContext {
-                target,
-                manifests: &self.manifests,
-                configurations: branches.each_ref(),
-                configuration: &config,
-                patches: &self.patches,
-                registry: registry.as_ref(),
-            }),
-        )
+        merge.merge(&locksmith::MergeContext {
+            target,
+            manifests: &self.manifests,
+            configurations: branches.each_ref(),
+            configuration: &config,
+            patches: &self.patches,
+            registry: registry.as_ref(),
+        })
     }
 }
 
@@ -227,7 +222,7 @@ impl Repair {
             .into_iter()
             .map(|p| {
                 let lock = Lockfile::try_from(p.yaml)?;
-                let config = WorkspaceConfig::from_pnpm_context(
+                let config = WorkspaceConfig::from_pnpm_source(
                     &p.configuration,
                     root,
                     lock.recorded_pnpm_version(),

@@ -63,6 +63,33 @@ for (const result of await Promise.all([
 ])) {
   assert.deepEqual(await (await parse(result)).document('environment'), bootstrap);
 }
+// A parent from before pnpm 12.19 does not share the final optional-peer policy.
+function parentLock(version, integrity) {
+  const manager = {
+    lockfileVersion: '9.0',
+    importers: { '.': { packageManagerDependencies: { pnpm: { specifier: version, version } } } },
+    packages: { [`pnpm@${version}`]: { resolution: {} } }, snapshots: { [`pnpm@${version}`]: {} },
+  };
+  const project = {
+    lockfileVersion: '9.0',
+    settings: { autoInstallPeers: true, excludeLinksFromLockfile: false },
+    importers: { '.': { dependencies: { lib: { specifier: '1.0.0', version: '1.0.0' } } } },
+    snapshots: { 'lib@1.0.0': {} },
+  };
+  if (version === '12.21.0') project.settings.projectScopedOptionalPeers = true;
+  if (integrity) project.packages = { 'lib@1.0.0': { resolution: { integrity } } };
+  return `---\n${JSON.stringify(manager)}\n---\n${JSON.stringify(project)}\n`;
+}
+const scoped = { projectScopedOptionalPeers: true };
+const fromParent = await repair(parentLock('12.21.0'), {
+  manifests: { '.': { packageManager: 'pnpm@12.21.0', dependencies: { lib: '1.0.0' } } },
+  configuration: scoped,
+  parents: [
+    { yaml: parentLock('12.18.0', 'sha512-old'), configuration: scoped },
+    { yaml: parentLock('12.21.0', 'sha512-new'), configuration: scoped },
+  ],
+});
+assert.equal((await (await parse(fromParent)).document('project')).packages['lib@1.0.0'].resolution.integrity, 'sha512-new');
 await assert.rejects(parse("lockfileVersion: '6.0'"), { code: 'UNSUPPORTED_VERSION', details: { version: '6.0' } });
 const broken = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      foo: {specifier: ^1, version: 1.0.0}\n";
 await assert.rejects(api.inspect(broken), { code: 'INVALID_GRAPH' });

@@ -182,6 +182,33 @@ fn git_merge_reads_the_final_workspace_with_the_selected_bootstrap_version() {
 }
 
 #[test]
+fn git_merge_keeps_the_bootstrap_of_the_runner_that_loaded_the_workspace() {
+    let repo = Repo::new();
+    repo.write("package.json", "{}");
+    repo.write("pnpm-workspace.yaml", "packages: []\n");
+    let project = "lockfileVersion: '9.0'\nimporters: {.: {}}\n";
+    repo.write("pnpm-lock.yaml", project);
+    repo.commit("project without a bootstrap manager");
+    repo.git(&["branch", "-f", "topic", "HEAD"]);
+    repo.write("pnpm-lock.yaml", &format!("{project}# main\n"));
+    repo.commit("change the project lock on main");
+    repo.git(&["switch", "topic"]);
+    repo.write("package.json", r#"{"pnpm":false}"#);
+    let env = json!({"lockfileVersion":"9.0","importers":{".":{"packageManagerDependencies":{
+        "pnpm":{"specifier":"^12","version":"12.21.0"}}}},
+        "packages":{"pnpm@12.21.0":{"resolution":{}}},"snapshots":{"pnpm@12.21.0":{}}});
+    repo.write("pnpm-lock.yaml", &format!("---\n{env}\n---\n{project}"));
+    repo.commit("upgrade to a runner that ignores the legacy pnpm field");
+    repo.git(&["switch", "main"]);
+    repo.git(&["merge", "--no-commit", "topic"]);
+    let lock = Lockfile::parse(&repo.git(&["show", ":pnpm-lock.yaml"])).unwrap();
+    assert_eq!(
+        lock.recorded_pnpm_version(),
+        Some("12.21.0".parse().unwrap())
+    );
+}
+
+#[test]
 fn unrelated_source_and_excluded_manifest_conflicts_leave_lock_resolved() {
     let r = Repo::new();
     r.branches(|r, side| {

@@ -49,7 +49,11 @@ impl<'a> Evidence<'a> {
             let (base, b) = self.context.parents.first().copied().unwrap_or(current);
             let (other, t) = self.context.parents.get(1).copied().unwrap_or(current);
             let context = self.merge_context([b, current.1, t]);
-            self.resolved = Some(reconcile::resolve(base, self.lock, other, &context)?);
+            self.resolved = Some(reconcile::resolve(
+                [base, self.lock, other],
+                &context,
+                None,
+            )?);
         }
         Ok(self
             .resolved

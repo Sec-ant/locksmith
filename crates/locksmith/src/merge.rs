@@ -5,6 +5,7 @@ use serde_json::{Map, json};
 use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, graph};
 
 /// A parsed lockfile or its original YAML text.
+#[derive(Clone, Copy)]
 pub enum MergeInput<'a> {
     /// Reuse an already parsed lockfile.
     Parsed(&'a Lockfile),
@@ -21,6 +22,49 @@ impl<'a> From<&'a Lockfile> for MergeInput<'a> {
 impl<'a> From<&'a str> for MergeInput<'a> {
     fn from(text: &'a str) -> Self {
         Self::Yaml(text)
+    }
+}
+
+/// The three inputs of a contextual merge, including the bootstrap graph selected
+/// while loading the final workspace. Reuse this value when adding registry evidence.
+pub struct ContextualMerge<'a> {
+    pub(crate) inputs: [MergeInput<'a>; 3],
+    pub(crate) bootstrap: Option<usize>,
+}
+
+impl ContextualMerge<'_> {
+    /// Merge these inputs against the supplied workspace.
+    ///
+    /// # Errors
+    /// Returns the contextual errors described by [`merge`].
+    pub fn merge(&self, context: &crate::MergeContext<'_>) -> Result<Lockfile, LockfileError> {
+        match self.inputs {
+            [
+                MergeInput::Parsed(b),
+                MergeInput::Parsed(o),
+                MergeInput::Parsed(t),
+            ] => crate::reconcile::resolve([b, o, t], context, self.bootstrap),
+            inputs => crate::recovery::resolve(inputs, context, self.bootstrap),
+        }
+    }
+
+    /// Collect independent registry requests when the inputs have already been parsed.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::merge`]. An error other than missing registry evidence
+    /// is reported on its own.
+    pub fn merge_with_requests(
+        &self,
+        context: &crate::MergeContext<'_>,
+    ) -> Result<Lockfile, Vec<LockfileError>> {
+        match self.inputs {
+            [
+                MergeInput::Parsed(b),
+                MergeInput::Parsed(o),
+                MergeInput::Parsed(t),
+            ] => crate::reconcile::resolve_with_requests([b, o, t], context, self.bootstrap),
+            _ => self.merge(context).map_err(|error| vec![error]),
+        }
     }
 }
 
@@ -43,14 +87,11 @@ pub fn merge<'a>(
 ) -> Result<Lockfile, LockfileError> {
     let inputs = [base.into(), ours.into(), theirs.into()];
     if let Some(context) = context {
-        return match inputs {
-            [
-                MergeInput::Parsed(b),
-                MergeInput::Parsed(o),
-                MergeInput::Parsed(t),
-            ] => crate::reconcile::resolve(b, o, t, context),
-            inputs => crate::recovery::resolve(inputs, context),
-        };
+        return ContextualMerge {
+            inputs,
+            bootstrap: None,
+        }
+        .merge(context);
     }
     let parse = |input| match input {
         MergeInput::Parsed(lock) => Ok(std::borrow::Cow::Borrowed(lock)),

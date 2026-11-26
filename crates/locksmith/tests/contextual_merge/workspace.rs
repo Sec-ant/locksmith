@@ -855,6 +855,29 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
 }
 
 #[test]
+fn branch_configurations_use_the_source_pnpm_version_before_the_final_manifest() {
+    let project = "lockfileVersion: '9.0'\nimporters: {.: {}}\n";
+    let old = r#"{"lockfileVersion":"9.0","importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":"12.18.0","version":"12.18.0"}}}}}"#;
+    let yaml = format!("---\n{old}\n---\n{project}");
+    let source = locksmith::MergeInput::from(yaml.as_str());
+    let no_pin = locksmith::MergeInput::from(project);
+    let manifest = json!({"packageManager":"pnpm@12.21.0"});
+    let raw = json!({"projectScopedOptionalPeers":true});
+    let overridden = json!({"projectScopedOptionalPeers":true,"packageManager":"pnpm@12.19.0"});
+    let final_version = json!({"pmOnFail":"ignore"});
+    let (branches, _, _) = MergeTarget::Ours
+        .workspace_configurations(
+            Some(&manifest),
+            [source, source, no_pin],
+            [&raw, &overridden, &raw],
+            &final_version,
+        )
+        .unwrap();
+    let expected = ["12.18.0", "12.19.0", "12.21.0"].map(|version| Some(version.parse().unwrap()));
+    assert_eq!(branches.map(|config| config.pnpm_version), expected);
+}
+
+#[test]
 fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
     let make = |pnpm: &str, tool: &str, scoped: bool| {
         let env = json!({"lockfileVersion":"9.0","importers":{".":{
@@ -874,10 +897,13 @@ fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
     let new = Lockfile::parse(&new_yaml).unwrap();
     let before = json!({"configDependencies":{"tool":"1.0.0"}});
     let after = json!({"configDependencies":{"tool":"2.0.0"},"projectScopedOptionalPeers":true});
+    // Duplicate snapshot values agree, so the bootstrap and its version remain usable.
+    let snapshot = r#""pnpm@12.21.0":{}"#;
+    let duplicate = new_yaml.replace(snapshot, &format!("{snapshot},{snapshot}"));
     let inputs = [
         locksmith::MergeInput::from(old_yaml.as_str()),
         (&old).into(),
-        (&new).into(),
+        duplicate.as_str().into(),
     ];
     for root in [
         json!({}),
@@ -885,13 +911,8 @@ fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
     ] {
         let manifests = BTreeMap::from([(".".into(), root.clone())]);
         for (wanted, expected) in [(&after, &new), (&before, &old)] {
-            let (branches, final_config) = MergeTarget::Ours
-                .workspace_configurations(
-                    Some(&root),
-                    inputs.each_ref(),
-                    [&before, &before, &after],
-                    wanted,
-                )
+            let (branches, final_config, prepared) = MergeTarget::Ours
+                .workspace_configurations(Some(&root), inputs, [&before, &before, &after], wanted)
                 .unwrap();
             let context = MergeContext {
                 target: MergeTarget::Ours,
@@ -901,7 +922,7 @@ fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
                 configuration: &final_config,
                 configurations: branches.each_ref(),
             };
-            let result = merge(&old, &old, &new, Some(&context)).unwrap();
+            let result = prepared.merge(&context).unwrap();
             assert_eq!(result.environment(), expected.environment());
             if expected.recorded_pnpm_version() != old.recorded_pnpm_version() {
                 let wrong_runner = WorkspaceConfig::from_pnpm_version(

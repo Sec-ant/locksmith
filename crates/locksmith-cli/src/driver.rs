@@ -107,15 +107,12 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let target = git::preferred_target(&inputs)?;
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
     let root = workspace::read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-    let (project, config) = target.workspace_for_bootstrap(
-        Some(&root),
-        locks.inputs().each_ref(),
-        |version| -> Result<_> {
+    let (project, config, merge) =
+        target.workspace_for_bootstrap(Some(&root), locks.inputs(), |version| -> Result<_> {
             let project = Project::from_manifest(root.clone(), version, &mut read)?;
             let config = policy::Policy::from_project(&project).configuration(&project.config)?;
             Ok((project, config))
-        },
-    )?;
+        })?;
     let mut dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
     if conflicts.iter().any(|p| p.as_slice() != path.as_bytes()) {
@@ -157,6 +154,6 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = locks.with_context(&context, &project.config, network)?;
+    let result = crate::merge::with_context(&merge, &context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

@@ -71,43 +71,41 @@ impl Sources {
             Self::Yaml(text) => text.each_ref().map(|s| MergeInput::from(s.as_str())),
         }
     }
+}
 
-    pub fn with_context(
-        &self,
-        context: &MergeContext<'_>,
-        raw: &Value,
-        network: Option<ProjectRc<'_>>,
-    ) -> Result<Lockfile> {
-        let result = crate::registry::resolve(
-            crate::registry::Lookup::Merge,
-            network,
-            raw,
-            context
-                .configuration
-                .pnpm_version
-                .as_ref()
-                .map(|v| v.major()),
-            |registry| {
-                let context = MergeContext {
-                    registry,
-                    ..*context
-                };
-                if let Self::Parsed(locks) = self
-                    && registry.is_some()
-                {
-                    return context.merge_with_requests(locks.each_ref());
-                }
-                let [base, ours, theirs] = self.inputs();
-                locksmith::merge(base, ours, theirs, Some(&context)).map_err(|e| vec![e])
-            },
-        )?;
-        Policy::from_configuration(context.configuration).check_peers(
-            raw,
-            &result,
-            context.manifests,
-        )?;
-        Ok(result)
-    }
+pub(crate) fn with_context(
+    merge: &locksmith::ContextualMerge<'_>,
+    context: &MergeContext<'_>,
+    raw: &Value,
+    network: Option<ProjectRc<'_>>,
+) -> Result<Lockfile> {
+    let result = crate::registry::resolve(
+        crate::registry::Lookup::Merge,
+        network,
+        raw,
+        context
+            .configuration
+            .pnpm_version
+            .as_ref()
+            .map(|v| v.major()),
+        |registry| {
+            let context = MergeContext {
+                registry,
+                ..*context
+            };
+            if registry.is_some() {
+                merge.merge_with_requests(&context)
+            } else {
+                merge.merge(&context).map_err(|e| vec![e])
+            }
+        },
+    )?;
+    Policy::from_configuration(context.configuration).check_peers(
+        raw,
+        &result,
+        context.manifests,
+    )?;
+    Ok(result)
 }
 
 pub fn from_file<P: AsRef<Path>>(
@@ -125,9 +123,9 @@ pub fn from_file<P: AsRef<Path>>(
     let root = manifests.get(".").ok_or("missing root manifest")?;
     let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
     let inputs = Sources::read(files)?;
-    let (configurations, config) = target.workspace_configurations(
+    let (configurations, config, merge) = target.workspace_configurations(
         Some(root),
-        inputs.inputs().each_ref(),
+        inputs.inputs(),
         source.each_ref(),
         &raw["configuration"],
     )?;
@@ -140,7 +138,8 @@ pub fn from_file<P: AsRef<Path>>(
         configuration: &config,
         patches: &patches,
     };
-    inputs.with_context(
+    with_context(
+        &merge,
         &context,
         &raw["configuration"],
         allow_network.then_some(ProjectRc::Working),
