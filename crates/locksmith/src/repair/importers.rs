@@ -281,10 +281,10 @@ fn fits(
     if version.starts_with("link:") {
         return same_spec;
     }
+    let range = manifest::pinned_specifier(range, version, Some(config));
     if range == "*"
-        && graph::package_key(version)
-            .parse::<node_semver::Version>()
-            .is_ok()
+        && reconcile::version_from_pin(name, name, graph::package_key(version))
+            .is_some_and(|release| release.parse::<node_semver::Version>().is_ok())
     {
         return true;
     }

@@ -72,7 +72,10 @@ fn parent_projects_can_restore_a_pin_without_selecting_a_bootstrap_from_them() {
     let parent = json!({"lockfileVersion":"9.0",
         "importers":{".":{"dependencies":{"tool":{"specifier":"^1","version":"1.2.0"}}}},
         "packages":{"tool@1.2.0":{"resolution":{"integrity":"sha512-tool"}}},"snapshots":{"tool@1.2.0":{}}});
-    let parent = Lockfile::parse(&format!("---\n{environment}\n---\n{parent}\n")).unwrap();
+    let mut parent_environment = environment.clone();
+    parent_environment["packages"]["pnpm@12.20.0"]["resolution"]["integrity"] =
+        json!("sha512-parent-bootstrap");
+    let parent = Lockfile::parse(&format!("---\n{parent_environment}\n---\n{parent}\n")).unwrap();
     let configuration =
         WorkspaceConfig::from_pnpm_version(&json!({}), &"12.21.0".parse().unwrap()).unwrap();
     let previous =
@@ -93,6 +96,75 @@ fn parent_projects_can_restore_a_pin_without_selecting_a_bootstrap_from_them() {
         restored.project().unwrap()["importers"]["."]["dependencies"]["tool"]["version"],
         "1.2.0"
     );
+}
+
+#[test]
+fn repair_retains_a_prerelease_resolved_under_modern_npm_wildcard_shorthand() {
+    let version = "1.0.0-beta.1";
+    for (runner, specifier, pin, valid) in [
+        ("11.28.11", "*", version, true),
+        ("11.28.11", "npm:*", version, true),
+        ("12.21.0", "npm:*", "tool@1.0.0-beta.1", true),
+        ("12.21.0", "npm:*", "other@1.0.0-beta.1", false),
+        ("10.34.9", "npm:*", version, false),
+    ] {
+        let name = if pin.starts_with("other@") {
+            "other"
+        } else {
+            "tool"
+        };
+        let key = format!("{name}@{version}");
+        let project = json!({"lockfileVersion":"9.0",
+            "importers":{".":{"dependencies":{"tool":{"specifier":specifier,"version":pin}}}},
+            "packages":{&key:{"resolution":{}}},"snapshots":{&key:{}}
+        });
+        let input = format!("{project}\n");
+        let config =
+            WorkspaceConfig::from_pnpm_version(&json!({}), &runner.parse().unwrap()).unwrap();
+        let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"tool":specifier}}))]);
+        let result = repair(
+            &input,
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        );
+        if valid {
+            let result = result.unwrap();
+            assert_eq!(result.to_yaml().unwrap(), input);
+            result
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &config,
+                    &BTreeMap::new(),
+                    |_| Ok(None),
+                )
+                .unwrap();
+        } else {
+            assert!(result.is_err(), "{runner}: {specifier} resolved to {pin}");
+        }
+    }
+}
+
+#[test]
+fn repair_keeps_a_qualified_numeric_alias_without_a_recorded_runner() {
+    let input = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      tool: {specifier: 'npm:1', version: '1@2.0.0'}\npackages:\n  1@2.0.0: {resolution: {}}\nsnapshots:\n  1@2.0.0: {}\n";
+    let result = repair(
+        input,
+        &RepairContext {
+            manifests: &BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"npm:1"}}))]),
+            configuration: &WorkspaceConfig::default(),
+            patches: &BTreeMap::new(),
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.to_yaml().unwrap(), input);
 }
 
 #[test]

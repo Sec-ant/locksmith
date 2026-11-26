@@ -58,12 +58,7 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let mut config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
-    if let Ok(policy) =
-        std::env::var("pnpm_config_pm_on_fail").or_else(|_| std::env::var("PNPM_CONFIG_PM_ON_FAIL"))
-    {
-        config.pm_on_fail = Some(policy);
-    }
+    let config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
     let patches = workspace::patches(&config, "", read)?;
     let canonical_root = root.canonicalize()?;
     let mut directories = Members::directories_on_disk(&project, &canonical_root)?;

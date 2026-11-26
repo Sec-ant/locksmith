@@ -526,7 +526,7 @@ fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
     )
 }
 
-fn version_from_pin<'a>(name: &str, target: &str, pin: &'a str) -> Option<&'a str> {
+pub(crate) fn version_from_pin<'a>(name: &str, target: &str, pin: &'a str) -> Option<&'a str> {
     pin.strip_prefix(target)
         .and_then(|suffix| suffix.strip_prefix('@'))
         .or_else(|| (name == target).then_some(pin))

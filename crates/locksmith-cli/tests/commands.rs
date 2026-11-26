@@ -2324,43 +2324,105 @@ fn parallel_workspace_validation_reports_the_first_error_without_waiting_on_a_fi
 }
 
 #[test]
-fn workspace_validation_reads_the_environment_manager_policy() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    write_input(root, "package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
-    write_input(
-        root,
+fn workspace_commands_share_the_environment_manager_policy() {
+    let repo = Repo::new();
+    let manifest = json!({"packageManager":"pnpm@12.21.0"});
+    repo.write("package.json", &manifest.to_string());
+    repo.write(
         "pnpm-lock.yaml",
         "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
     );
-    write_input(root, "pnpm-workspace.yaml", "packages: []\n");
-    let validate = || {
-        let mut command = registry_command(root);
-        command.args(["validate", "--workspace"]);
+    for (workspace, settings, policies) in [
+        (
+            "packages: []\n",
+            json!({}),
+            [None, Some(("pnpm_config_pm_on_fail", "ignore"))],
+        ),
+        (
+            "packages: []\npmOnFail: ignore\n",
+            json!({"pmOnFail":"ignore"}),
+            [Some(("PNPM_CONFIG_PM_ON_FAIL", "download")), None],
+        ),
+    ] {
+        repo.write("pnpm-workspace.yaml", workspace);
+        repo.write(
+            "context.json",
+            &json!({"target":"ours","manifests":{".":manifest},
+                "configuration":settings,"configurations":[{},{},{}],"patches":{}
+            })
+            .to_string(),
+        );
+        repo.commit("record the manager policy");
+        for (policy, required_pin) in policies.into_iter().zip([true, false]) {
+            for args in [
+                &["validate", "--workspace"][..],
+                &["repair", "HEAD"],
+                &["converge", "HEAD"],
+                &[
+                    "merge",
+                    "pnpm-lock.yaml",
+                    "pnpm-lock.yaml",
+                    "pnpm-lock.yaml",
+                    "--context",
+                    "context.json",
+                ],
+            ] {
+                let mut command = registry_command(repo.0.path());
+                if let Some((name, value)) = policy {
+                    command.env(name, value);
+                }
+                let out = command.args(args).output().unwrap();
+                assert_eq!(
+                    out.status.success(),
+                    !required_pin,
+                    "{args:?}: {}",
+                    report(&out)
+                );
+                if required_pin {
+                    assert!(
+                        report(&out).contains("packageManagerDependencies"),
+                        "{}",
+                        report(&out)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn git_merge_driver_obeys_the_invocations_environment_manager_policy() {
+    let repo = Repo::new();
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/*']\n");
+    repo.commit("declare a manager without a bootstrap record");
+    repo.git(&["branch", "-f", "topic", "HEAD"]);
+    repo.branches(|_, _| {});
+    let merge = || {
+        let mut command = Command::new("git");
+        command
+            .current_dir(repo.0.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("pnpm_config_pm_on_fail")
+            .env_remove("PNPM_CONFIG_PM_ON_FAIL")
+            .args(["merge", "--no-commit", "--no-edit", "topic"]);
         command
     };
-    let out = validate().output().unwrap();
+    let out = merge().output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", report(&out));
-    assert!(report(&out).contains("packageManagerDependencies"));
-    let out = validate()
+    assert!(
+        report(&out).contains("packageManagerDependencies"),
+        "{}",
+        report(&out)
+    );
+    repo.git(&["merge", "--abort"]);
+    let out = merge()
         .env("pnpm_config_pm_on_fail", "ignore")
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", report(&out));
-
-    write_input(
-        root,
-        "pnpm-workspace.yaml",
-        "packages: []\npmOnFail: ignore\n",
-    );
-    let out = validate().output().unwrap();
-    assert!(out.status.success(), "{}", report(&out));
-    let out = validate()
-        .env("pnpm_config_pm_on_fail", "download")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
-    assert!(report(&out).contains("packageManagerDependencies"));
+    assert_both(graph(repo.git(&["show", ":pnpm-lock.yaml"]).as_bytes()));
 }
 
 #[test]

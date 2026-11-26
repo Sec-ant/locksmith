@@ -40,6 +40,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         .ok_or_else(|| format!("missing {reference}:{path}"))?;
     let working_text = fs::read_to_string("pnpm-lock.yaml")?;
     let mut base_config = project.configuration()?;
+    workspace::apply_manager_policy(&mut base_config);
     let config = working.bootstrap_configuration(Some(working_text.as_str().into()), || {
         working_file(".npmrc")
     })?;

@@ -109,6 +109,28 @@ pub struct Project {
     pub workspace: bool,
     pub pnpm_version: Option<node_semver::Version>,
 }
+
+pub(super) fn apply_manager_policy(config: &mut locksmith::WorkspaceConfig) {
+    if let Ok(policy) =
+        std::env::var("pnpm_config_pm_on_fail").or_else(|_| std::env::var("PNPM_CONFIG_PM_ON_FAIL"))
+    {
+        config.pm_on_fail = Some(policy);
+    }
+}
+
+pub(super) fn bootstrap_configuration(
+    mut config: locksmith::WorkspaceConfig,
+    raw: &Value,
+    lock: Option<locksmith::MergeInput<'_>>,
+    read_rc: impl FnOnce() -> Result<Option<String>>,
+) -> Result<locksmith::WorkspaceConfig> {
+    apply_manager_policy(&mut config);
+    config
+        .config_registries
+        .extend(crate::registry::bootstrap_registries(raw, lock, read_rc)?);
+    Ok(config)
+}
+
 impl Project {
     pub fn configuration(&self) -> Result<locksmith::WorkspaceConfig> {
         Ok(crate::policy::Policy::from_project(self).configuration(&self.config)?)
@@ -119,15 +141,7 @@ impl Project {
         lock: Option<locksmith::MergeInput<'_>>,
         read_rc: impl FnOnce() -> Result<Option<String>>,
     ) -> Result<locksmith::WorkspaceConfig> {
-        let mut config = self.configuration()?;
-        config
-            .config_registries
-            .extend(crate::registry::bootstrap_registries(
-                &self.config,
-                lock,
-                read_rc,
-            )?);
-        Ok(config)
+        bootstrap_configuration(self.configuration()?, &self.config, lock, read_rc)
     }
 
     pub fn read(

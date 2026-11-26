@@ -139,15 +139,14 @@ pub fn from_file<P: AsRef<Path>>(
     let ((), config, merge) =
         target.workspace_for_candidate(Some(root), locks, |lock| -> Result<_> {
             let version = lock.and_then(Lockfile::recorded_pnpm_version);
-            let mut config =
+            let config =
                 locksmith::WorkspaceConfig::from_pnpm_context(settings, Some(root), version)?;
-            config
-                .config_registries
-                .extend(crate::registry::bootstrap_registries(
-                    settings,
-                    lock.map(Into::into),
-                    crate::registry::working_rc,
-                )?);
+            let config = crate::workspace::bootstrap_configuration(
+                config,
+                settings,
+                lock.map(Into::into),
+                crate::registry::working_rc,
+            )?;
             Ok(((), config))
         })?;
     let patches = serde_json::from_value(raw["patches"].take())?;
