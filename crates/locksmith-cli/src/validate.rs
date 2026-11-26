@@ -69,13 +69,11 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         Ok((manifests, external_members))
     };
     let (mut manifests, external_members) = if directories.len() >= 32 {
-        let readers = if directories.len() >= 128
-            && std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() >= 4)
-        {
-            4
-        } else {
-            2
-        };
+        let cpus = std::thread::available_parallelism().map_or(2, |cpus| cpus.get());
+        let readers = [8, 4]
+            .into_iter()
+            .find(|&readers| readers <= cpus && readers * 32 <= directories.len())
+            .unwrap_or(2);
         let range_size = directories.len().div_ceil(readers);
         // Join adjacent ranges in order so the first manifest error is stable.
         std::thread::scope(|scope| -> Result<_> {
