@@ -1860,6 +1860,41 @@ fn validate_follows_workspace_directory_links_and_preserves_importer_paths() {
 }
 
 #[test]
+fn legacy_pnpm_keeps_workspace_members_when_dev_engines_names_npm() {
+    let repo = Repo::new();
+    repo.write("pnpm-workspace.yaml", "{}\n");
+    for version in ["9.15.9", "10.4.1"] {
+        let manifest = json!({"packageManager":format!("pnpm@{version}"),
+            "devEngines":{"packageManager":{"name":"npm","version":"^11"}}});
+        repo.write("package.json", &manifest.to_string());
+        repo.commit("record a legacy pnpm workspace with npm engine metadata");
+        check_workspace(repo.0.path(), 0, version);
+        let repaired = repo.cmd(CLI, &["repair", "HEAD"]);
+        assert!(repaired.status.success(), "{}", report(&repaired));
+        assert!(
+            graph(&repaired.stdout)["importers"]
+                .get("apps/web")
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn a_locked_modern_manager_uses_dev_engines_over_a_legacy_pin() {
+    let repo = Repo::new();
+    repo.write("package.json", r#"{"packageManager":"pnpm@9.15.9","devEngines":{"packageManager":{"name":"pnpm","version":"^12.20.0"}}}"#);
+    let project = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let input = with_recorded_manager("12.21.0", &project);
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/*']\n");
+    repo.write("pnpm-lock.yaml", &input);
+    repo.commit("record the package manager selected by devEngines");
+    check_workspace(repo.0.path(), 0, "modern bootstrap");
+    let out = repo.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    assert_eq!(out.stdout, input.as_bytes());
+}
+
+#[test]
 fn validate_discovers_only_the_members_selected_by_the_pnpm_version_and_globs() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("app");

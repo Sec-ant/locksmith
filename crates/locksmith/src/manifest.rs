@@ -21,6 +21,9 @@ impl<'a> PnpmManager<'a> {
     }
 
     pub fn declared(manifest: &'a Value, runner: Option<&node_semver::Version>) -> Option<Self> {
+        let legacy = legacy_pnpm(manifest);
+        // pnpm 9 and 10 ignore devEngines, including npm's own engine declaration.
+        let runner = runner.or_else(|| legacy.as_ref().map(|(_, version)| version));
         let engines = &manifest["devEngines"]["packageManager"];
         let (engine, default_policy) = match engines.as_array() {
             Some(engines) => {
@@ -49,18 +52,20 @@ impl<'a> PnpmManager<'a> {
                 on_fail: engine["onFail"].as_str().or(default_policy),
             });
         }
-        let declared = manifest["packageManager"].as_str()?.strip_prefix("pnpm@")?;
-        let specifier = declared.split('+').next()?;
-        let version = specifier.parse::<node_semver::Version>().ok()?;
-        if version.to_string() != specifier {
-            return None;
-        }
+        let (specifier, version) = legacy?;
         Some(Self {
             specifier,
             requires_pin: version.major() >= 12,
             on_fail: None,
         })
     }
+}
+
+fn legacy_pnpm(manifest: &Value) -> Option<(&str, node_semver::Version)> {
+    let declared = manifest["packageManager"].as_str()?.strip_prefix("pnpm@")?;
+    let specifier = declared.split('+').next()?;
+    let version = specifier.parse::<node_semver::Version>().ok()?;
+    (version.to_string() == specifier).then_some((specifier, version))
 }
 
 pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {

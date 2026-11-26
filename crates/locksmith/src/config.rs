@@ -184,7 +184,8 @@ impl WorkspaceConfig {
         manifest: &Value,
         recorded: Option<node_semver::Version>,
     ) -> Option<node_semver::Version> {
-        let Some(manager) = crate::manifest::PnpmManager::declared(manifest, None) else {
+        let modern_runner = recorded.as_ref().filter(|v| v.major() >= 11);
+        let Some(manager) = crate::manifest::PnpmManager::declared(manifest, modern_runner) else {
             return recorded;
         };
         manager.specifier.parse().ok().or_else(|| {

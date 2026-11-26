@@ -97,7 +97,10 @@ impl Project {
         mut read: impl FnMut(&str) -> Result<Option<String>>,
     ) -> Result<Self> {
         let root = read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
-        let recorded_version = if recorded_version.is_none() && pnpm_version(&root).is_none() {
+        let recorded_version = if recorded_version.is_none()
+            && pnpm_version(&root).is_none_or(|v| {
+                v.major() < 11 && root["devEngines"].get("packageManager").is_some()
+            }) {
             read("pnpm-lock.yaml")?
                 .as_deref()
                 .and_then(locksmith::RepairInput::recorded_pnpm_version)
