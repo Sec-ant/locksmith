@@ -53,6 +53,10 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
+        Self::bootstrap_lockfile(text)?.recorded_pnpm_version()
+    }
+
+    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<Lockfile> {
         if !text.contains("\n---") {
             return None;
         }
@@ -61,9 +65,8 @@ impl RepairInput {
         let [bootstrap, _, ..] = ranges.as_slice() else {
             return None;
         };
-        Lockfile::parse(&text[bootstrap.clone()])
-            .ok()?
-            .recorded_pnpm_version()
+        let lock = Lockfile::parse(&text[bootstrap.clone()]).ok()?;
+        lock.environment().is_some().then_some(lock)
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].

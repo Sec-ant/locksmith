@@ -105,13 +105,15 @@ impl Lockfile {
         root: &Value,
         config: Option<&crate::WorkspaceConfig>,
     ) -> Result<(), LockfileError> {
-        if let Some(manager) = crate::manifest::PnpmManager::managed(
-            root,
-            config,
-            self.recorded_pnpm_version().as_ref(),
-        ) && !self
-            .matches_pnpm_manager(&manager)
-            .unwrap_or(!manager.requires_pin)
+        if let crate::manifest::ManagerPolicy::Declared(manager) =
+            crate::manifest::ManagerPolicy::for_workspace(
+                Some(root),
+                config,
+                self.recorded_pnpm_version().as_ref(),
+            )
+            && !self
+                .matches_pnpm_manager(&manager)
+                .unwrap_or(!manager.requires_pin)
         {
             return Err(crate::reconcile::missing(
                 &["importers", ".", "packageManagerDependencies", "pnpm"],

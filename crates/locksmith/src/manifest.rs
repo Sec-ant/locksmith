@@ -11,22 +11,34 @@ pub(crate) struct PnpmManager<'a> {
     on_fail: Option<&'a str>,
 }
 
-impl<'a> PnpmManager<'a> {
-    pub fn managed(
-        manifest: &'a Value,
+pub(crate) enum ManagerPolicy<'a> {
+    Ignored,
+    Unspecified,
+    Declared(PnpmManager<'a>),
+}
+
+impl<'a> ManagerPolicy<'a> {
+    pub fn for_workspace(
+        manifest: Option<&'a Value>,
         config: Option<&WorkspaceConfig>,
         recorded: Option<&node_semver::Version>,
-    ) -> Option<Self> {
+    ) -> Self {
         let runner = config
             .and_then(|c| c.pnpm_version.as_ref())
             .or_else(|| recorded.filter(|v| v.major() >= 11));
-        let manager = Self::declared(manifest, runner)?;
+        let manager = manifest.and_then(|root| PnpmManager::declared(root, runner));
         let policy = config
             .and_then(|c| c.pm_on_fail.as_deref())
-            .or(manager.on_fail);
-        (policy != Some("ignore")).then_some(manager)
+            .or_else(|| manager.as_ref()?.on_fail);
+        if policy == Some("ignore") {
+            Self::Ignored
+        } else {
+            manager.map_or(Self::Unspecified, Self::Declared)
+        }
     }
+}
 
+impl<'a> PnpmManager<'a> {
     pub fn declared(manifest: &'a Value, runner: Option<&node_semver::Version>) -> Option<Self> {
         let legacy = legacy_pnpm(manifest);
         // pnpm 9 and 10 ignore devEngines, including npm's own engine declaration.

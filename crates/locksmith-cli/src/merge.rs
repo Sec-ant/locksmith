@@ -65,7 +65,7 @@ impl Sources {
         }
     }
 
-    fn inputs(&self) -> [MergeInput<'_>; 3] {
+    pub(crate) fn inputs(&self) -> [MergeInput<'_>; 3] {
         match self {
             Self::Parsed(locks) => locks.each_ref().map(MergeInput::from),
             Self::Yaml(text) => text.each_ref().map(|s| MergeInput::from(s.as_str())),

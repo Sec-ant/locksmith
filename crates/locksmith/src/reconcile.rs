@@ -1,5 +1,6 @@
 //! Resolve the final workspace against locked graphs and supplied release metadata.
 mod assembly;
+mod bootstrap;
 mod dedupe;
 mod expand;
 mod importers;
@@ -57,33 +58,6 @@ pub enum MergeTarget {
 }
 
 impl MergeTarget {
-    /// Decode branch and final configurations for a contextual merge. Each branch supplies
-    /// its own bootstrap version. The preferred branch breaks ties for the final configuration.
-    ///
-    /// # Errors
-    /// Returns the configuration errors described by [`crate::WorkspaceConfig::from_pnpm_context`].
-    pub fn workspace_configurations(
-        self,
-        manifest: Option<&Value>,
-        inputs: [&crate::MergeInput<'_>; 3],
-        branches: [&Value; 3],
-        final_settings: &Value,
-    ) -> Result<([crate::WorkspaceConfig; 3], crate::WorkspaceConfig), LockfileError> {
-        let versions = inputs.map(|input| match input {
-            crate::MergeInput::Parsed(lock) => lock.recorded_pnpm_version(),
-            crate::MergeInput::Yaml(yaml) => crate::RepairInput::recorded_pnpm_version(yaml),
-        });
-        let [base, ours, theirs] = [0, 1, 2].map(|i| {
-            crate::WorkspaceConfig::from_pnpm_context(branches[i], manifest, versions[i].clone())
-        });
-        let preferred = [self.index(), self.other_index(), 0]
-            .into_iter()
-            .find_map(|i| versions[i].clone());
-        let final_config =
-            crate::WorkspaceConfig::from_pnpm_context(final_settings, manifest, preferred)?;
-        Ok(([base?, ours?, theirs?], final_config))
-    }
-
     fn other_index(self) -> usize {
         match self {
             Self::Ours => Source::Theirs as usize,
@@ -281,6 +255,12 @@ fn resolve_sources(
     if prefer_baseline {
         crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
     }
+    let environment = bootstrap::environment_source(
+        locks.map(Some),
+        context.target,
+        context.manifests.get("."),
+        [Some(context.configuration); 3],
+    )?;
     let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
     let branch_order = order;
     // Migration convergence keeps admissible baseline pins. Headers and the
@@ -405,12 +385,6 @@ fn resolve_sources(
         for (id, value) in context.manifests {
             manifest::check(&overrides, id, Some(value), "merged")?;
         }
-        let environment = environment_source(
-            locks,
-            branch_order,
-            &context.manifests["."],
-            context.configuration,
-        )?;
         let mut documents = BTreeMap::new();
         if let Some(env) = locks[environment].documents.get(&DocumentKind::Environment) {
             documents.insert(DocumentKind::Environment, Arc::clone(env));
@@ -435,46 +409,6 @@ fn resolve_sources(
             result => return result,
         }
     }
-}
-
-// Package-manager dependencies and their transitive platform binaries form a
-// separate lock document. Reuse the complete graph for the declared manager.
-fn environment_source(
-    locks: [&Lockfile; 3],
-    order: [usize; 3],
-    manifest: &Value,
-    config: &crate::WorkspaceConfig,
-) -> Result<usize, LockfileError> {
-    let mut matching = order
-        .into_iter()
-        .filter(|&side| config.matches_config_dependencies(locks[side].environment()));
-    let first = matching.next().ok_or_else(|| {
-        missing(
-            &["importers", ".", "configDependencies"],
-            "no bootstrap graph matches the final configuration dependencies",
-        )
-    })?;
-    let mut order = std::iter::once(first).chain(matching);
-    let recorded = order
-        .clone()
-        .find_map(|side| locks[side].recorded_pnpm_version());
-    let Some(manager) = manifest::PnpmManager::managed(manifest, Some(config), recorded.as_ref())
-    else {
-        return Ok(first);
-    };
-    let managers = locks.map(|lock| lock.matches_pnpm_manager(&manager));
-    if let Some(side) = order.clone().find(|&side| managers[side] == Some(true)) {
-        return Ok(side);
-    }
-    if !manager.requires_pin
-        && let Some(side) = order.find(|&side| managers[side].is_none())
-    {
-        return Ok(side);
-    }
-    Err(missing(
-        &["importers", ".", "packageManagerDependencies", "pnpm"],
-        format!("no locked bootstrap graph for pnpm@{}", manager.specifier),
-    ))
 }
 
 fn opaque(specifier: &str) -> bool {

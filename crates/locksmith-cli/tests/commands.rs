@@ -130,6 +130,58 @@ fn normal_merge_collects_the_cleanly_merged_manifest() {
     assert_both(graph(r.git(&["show", "HEAD:pnpm-lock.yaml"]).as_bytes()));
 }
 #[test]
+fn git_merge_reads_the_final_workspace_with_the_selected_bootstrap_version() {
+    let repo = Repo::new();
+    repo.write(
+        "package.json",
+        r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"^12.18.0"}}}"#,
+    );
+    let write_project = |pnpm: &str, tool: &str, scoped: bool| {
+        let settings = if scoped {
+            "projectScopedOptionalPeers: true\n"
+        } else {
+            ""
+        };
+        repo.write(
+            "pnpm-workspace.yaml",
+            &format!("packages: []\nconfigDependencies: {{tool: '{tool}'}}\n{settings}"),
+        );
+        let bootstrap = json!({"lockfileVersion":"9.0","importers":{".":{
+            "configDependencies":{"tool":{"specifier":tool,"version":tool}},
+            "packageManagerDependencies":{"pnpm":{"specifier":"^12.18.0","version":pnpm}}}},
+            "packages":{format!("pnpm@{pnpm}"):{"resolution":{}},format!("tool@{tool}"):{"resolution":{}}},
+            "snapshots":{format!("pnpm@{pnpm}"): {},format!("tool@{tool}"): {}}});
+        let mut project = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        if scoped {
+            project["settings"] = json!({"projectScopedOptionalPeers":true});
+        }
+        repo.write(
+            "pnpm-lock.yaml",
+            &format!("---\n{bootstrap}\n---\n{project}\n"),
+        );
+    };
+    write_project("12.18.0", "1.0.0", false);
+    repo.commit("configure the bootstrap range");
+    repo.git(&["branch", "-f", "topic", "HEAD"]);
+    write_project("12.18.1", "1.0.0", false);
+    repo.commit("update pnpm on main");
+    repo.git(&["switch", "topic"]);
+    write_project("12.21.0", "2.0.0", true);
+    repo.commit("update the configuration package and pnpm");
+    repo.git(&["switch", "main"]);
+    repo.git(&["merge", "--no-commit", "topic"]);
+    let merged = Lockfile::parse(&repo.git(&["show", ":pnpm-lock.yaml"])).unwrap();
+    assert_eq!(
+        merged.recorded_pnpm_version().unwrap().to_string(),
+        "12.21.0"
+    );
+    assert_eq!(
+        merged.project().unwrap()["settings"]["projectScopedOptionalPeers"],
+        true
+    );
+}
+
+#[test]
 fn unrelated_source_and_excluded_manifest_conflicts_leave_lock_resolved() {
     let r = Repo::new();
     r.branches(|r, side| {
@@ -1159,6 +1211,58 @@ fn reading_a_partial_clone_leaves_unrelated_historical_blobs_on_the_remote() {
 #[test]
 fn converge_reads_missing_manifests_from_a_filter_only_remote() {
     check_partial_clone(true);
+}
+
+#[test]
+fn a_blobless_clone_fetches_missing_workspace_manifests_together() {
+    let source = Repo::new();
+    let manifests = |version: &str| {
+        for i in 0..12 {
+            source.write(
+                &format!("apps/pkg{i}/package.json"),
+                &json!({"name":format!("pkg{i}"),"version":version}).to_string(),
+            );
+        }
+    };
+    manifests("1.0.0");
+    source.commit("add workspace packages");
+    let baseline = source.git(&["rev-parse", "HEAD"]);
+    manifests("2.0.0");
+    source.commit("change all workspace manifests");
+    source.git(&["config", "uploadpack.allowFilter", "true"]);
+    let clone = Repo(tempfile::tempdir().unwrap());
+    source.git(&[
+        "clone",
+        "--no-local",
+        "--filter=blob:none",
+        source.0.path().to_str().unwrap(),
+        clone.0.path().to_str().unwrap(),
+    ]);
+    let trace = clone.0.path().join("trace.jsonl");
+    let result = Command::new(CLI)
+        .current_dir(clone.0.path())
+        .env("GIT_TRACE2_EVENT", &trace)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["repair", baseline.trim()])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", report(&result));
+    assert!(
+        graph(&result.stdout)["importers"]
+            .get("apps/pkg11")
+            .is_some()
+    );
+    let events = fs::read_to_string(trace).unwrap();
+    let sessions = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|e| e["event"] == "cmd_name" && e["name"] == "upload-pack")
+        .count();
+    assert_eq!(
+        sessions, 1,
+        "server sessions needed to retrieve twelve manifests"
+    );
 }
 
 fn check_partial_clone(multiple_remotes: bool) {

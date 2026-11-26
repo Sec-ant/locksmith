@@ -305,30 +305,28 @@ pub fn prefetch_manifests<'a>(objects: impl ExactSizeIterator<Item = &'a str>) -
         return Ok(());
     }
 
-    let mut query = String::new();
-    for id in objects.collect::<BTreeSet<_>>() {
-        query.push_str(id);
-        query.push('\n');
-    }
-    let mut check = Command::new("git");
-    check
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .args(["cat-file", "--batch-check"]);
-    let objects = checked_output(command_with_input(check, query.as_bytes())?)?;
-    let mut missing = String::new();
-    for id in objects
-        .lines()
-        .filter_map(|line| line.strip_suffix(" missing"))
-    {
-        if !oid(id) {
-            return Err("invalid missing Git object ID".into());
-        }
-        missing.push_str(id);
-        missing.push('\n');
+    let mut missing: BTreeSet<_> = objects.collect();
+    let query = missing.iter().copied().collect::<Vec<_>>().join("\n");
+    // On Git 2.38, --missing disables lazy fetches and --ignore-missing skips
+    // absent input tips. All tips are selected blob IDs, so the walk ends at each one.
+    let available = checked_output(with_input(
+        &[
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=allow-any",
+            "--ignore-missing",
+            "--stdin",
+        ],
+        query.as_bytes(),
+    )?)?;
+    for id in available.lines() {
+        missing.remove(id);
     }
     if !missing.is_empty() {
-        // A batch can miss objects served by another promisor. cat-file reads
-        // each required manifest next, using Git's native remote selection.
+        let missing = missing.into_iter().collect::<Vec<_>>().join("\n");
+        // If the batch is incomplete, the following cat-file read retries each
+        // required blob and reports any manifest that remains unavailable.
         with_input(
             &[
                 "-c",

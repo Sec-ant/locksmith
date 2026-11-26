@@ -103,7 +103,19 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     if root_conflict {
         project_conflicts(&conflicts, prefix, &sources.each_ref())?;
     }
-    let project = Project::read(&mut blobs, &tree, prefix, None)?;
+    let locks = crate::merge::Sources::read(files)?;
+    let target = git::preferred_target(&inputs)?;
+    let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
+    let root = workspace::read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
+    let (project, config) = target.workspace_for_bootstrap(
+        Some(&root),
+        locks.inputs().each_ref(),
+        |version| -> Result<_> {
+            let project = Project::from_manifest(root.clone(), version, &mut read)?;
+            let config = policy::Policy::from_project(&project).configuration(&project.config)?;
+            Ok((project, config))
+        },
+    )?;
     let mut dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;
     let manifests = workspace::manifests(&project, &mut blobs, &tree, prefix)?;
     if conflicts.iter().any(|p| p.as_slice() != path.as_bytes()) {
@@ -116,14 +128,11 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
             dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
         )?;
     }
-    let policy = policy::Policy::from_project(&project);
-    let config = policy.configuration(&project.config)?;
     let [base, ours, theirs] = sources
         .each_ref()
         .map(|p| policy::Policy::from_project(p).configuration(&p.config));
     let configurations = [base?, ours?, theirs?];
     let patches = workspace::patches(&config, prefix, |file| blobs.read(&tree, file))?;
-    let target = git::preferred_target(&inputs)?;
     let mut settings = None;
     let mut credentials = None;
     if allow_network {
@@ -148,7 +157,6 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result =
-        crate::merge::Sources::read(files)?.with_context(&context, &project.config, network)?;
+    let result = locks.with_context(&context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

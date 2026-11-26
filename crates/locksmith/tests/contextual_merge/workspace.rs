@@ -854,6 +854,82 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
     assert!(merge(&old, &old, &old, Some(&ctx)).is_err());
 }
 
+#[test]
+fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
+    let make = |pnpm: &str, tool: &str, scoped: bool| {
+        let env = json!({"lockfileVersion":"9.0","importers":{".":{
+            "configDependencies":{"tool":{"specifier":tool,"version":tool}},
+            "packageManagerDependencies":{"pnpm":{"specifier":"^12.18.0","version":pnpm}}}},
+            "packages":{format!("tool@{tool}"):{"resolution":{}},format!("pnpm@{pnpm}"):{"resolution":{}}},
+            "snapshots":{format!("tool@{tool}"): {},format!("pnpm@{pnpm}"): {}}});
+        let mut project = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        if scoped {
+            project["settings"] = json!({"projectScopedOptionalPeers":true});
+        }
+        format!("---\n{env}\n---\n{project}\n")
+    };
+    let old_yaml = make("12.18.0", "1.0.0", false);
+    let new_yaml = make("12.21.0", "2.0.0", true);
+    let old = Lockfile::parse(&old_yaml).unwrap();
+    let new = Lockfile::parse(&new_yaml).unwrap();
+    let before = json!({"configDependencies":{"tool":"1.0.0"}});
+    let after = json!({"configDependencies":{"tool":"2.0.0"},"projectScopedOptionalPeers":true});
+    let inputs = [
+        locksmith::MergeInput::from(old_yaml.as_str()),
+        (&old).into(),
+        (&new).into(),
+    ];
+    for root in [
+        json!({}),
+        json!({"devEngines":{"packageManager":{"name":"pnpm","version":"^12.18.0"}}}),
+    ] {
+        let manifests = BTreeMap::from([(".".into(), root.clone())]);
+        for (wanted, expected) in [(&after, &new), (&before, &old)] {
+            let (branches, final_config) = MergeTarget::Ours
+                .workspace_configurations(
+                    Some(&root),
+                    inputs.each_ref(),
+                    [&before, &before, &after],
+                    wanted,
+                )
+                .unwrap();
+            let context = MergeContext {
+                target: MergeTarget::Ours,
+                registry: None,
+                manifests: &manifests,
+                patches: &BTreeMap::new(),
+                configuration: &final_config,
+                configurations: branches.each_ref(),
+            };
+            let result = merge(&old, &old, &new, Some(&context)).unwrap();
+            assert_eq!(result.environment(), expected.environment());
+            if expected.recorded_pnpm_version() != old.recorded_pnpm_version() {
+                let wrong_runner = WorkspaceConfig::from_pnpm_version(
+                    wanted,
+                    &old.recorded_pnpm_version().unwrap(),
+                )
+                .unwrap();
+                let incompatible = MergeContext {
+                    configuration: &wrong_runner,
+                    ..context
+                };
+                assert!(merge(&old, &old, &new, Some(&incompatible)).is_err());
+            }
+            let version = result.recorded_pnpm_version().unwrap();
+            let native = WorkspaceConfig::from_pnpm_version(wanted, &version).unwrap();
+            result
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &native,
+                    &BTreeMap::new(),
+                    |_| Ok(None),
+                )
+                .unwrap();
+        }
+    }
+}
+
 fn check_manager_pin(
     manifest: serde_json::Value,
     version: &str,
