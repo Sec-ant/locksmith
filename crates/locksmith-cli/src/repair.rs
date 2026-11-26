@@ -9,15 +9,8 @@ use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget, RepairContex
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     #[cfg(feature = "bench-profile")]
     let revision_span = locksmith::profile::span("git_revision");
-    let revision = git::output(&[
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        &format!("{reference}^{{commit}}"),
-    ])?;
-    let commit = revision.trim_end();
-    let prefix = git::output(&["rev-parse", "--show-prefix"])?;
-    let prefix = prefix.trim_end_matches('\n');
+    let (commit, prefix) = git::revision_and_prefix(reference)?;
+    let (commit, prefix) = (commit.as_str(), prefix.as_str());
     #[cfg(feature = "bench-profile")]
     drop(revision_span);
     let file = format!("{prefix}pnpm-lock.yaml");

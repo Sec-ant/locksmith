@@ -17,6 +17,22 @@ pub fn output(args: &[&str]) -> Result<String> {
     checked(Command::new("git").args(args))
 }
 
+pub fn revision_and_prefix(reference: &str) -> Result<(String, String)> {
+    let resolved = output(&[
+        "rev-parse",
+        "--show-prefix",
+        "--verify",
+        "--end-of-options",
+        &format!("{reference}^{{commit}}"),
+    ])?;
+    // The prefix may itself contain newlines, so split at the verified OID.
+    let (prefix, revision) = resolved
+        .trim_end_matches('\n')
+        .rsplit_once('\n')
+        .ok_or("invalid Git revision and prefix output")?;
+    Ok((revision.to_owned(), prefix.to_owned()))
+}
+
 fn checked(command: &mut Command) -> Result<String> {
     checked_output(command.output()?)
 }
