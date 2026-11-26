@@ -1,11 +1,15 @@
 //! Compare serialized YAML to an existing value while deserializing. No second
 //! document tree or source-layout index is allocated during output verification.
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     fmt,
 };
 
-use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{
+    Deserialize,
+    de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 
 use crate::{LockfileError, Value};
 
@@ -27,6 +31,9 @@ pub(crate) fn verify(text: &str, expected: &Value) -> Result<(), LockfileError> 
     )
     .map_err(|_| LockfileError::OutputMismatch)
 }
+
+#[derive(Deserialize)]
+struct Key<'a>(#[serde(borrow)] Cow<'a, str>);
 
 struct Expected<'a> {
     value: &'a Value,
@@ -110,19 +117,20 @@ impl<'de> Visitor<'de> for Expected<'_> {
                     .push_back(key.as_str());
             }
         }
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some(Key(key)) = map.next_key()? {
+            let key = key.as_ref();
             if self.ordered {
-                let (name, parent) = crate::manifest::override_scope(&key);
+                let (name, parent) = crate::manifest::override_scope(key);
                 self.check(
                     override_order
                         .get_mut(name)
                         .and_then(|parents| parents.get_mut(parent.unwrap_or("")))
                         .and_then(VecDeque::pop_front)
-                        == Some(key.as_str()),
+                        == Some(key),
                 )?;
             }
             let value = expected
-                .get(&key)
+                .get(key)
                 .ok_or_else(|| de::Error::custom("unexpected mapping key"))?;
             map.next_value_seed(Expected {
                 value,
