@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
 };
 
@@ -285,6 +285,34 @@ pub fn output_bytes(args: &[&str]) -> Result<Vec<u8>> {
         return Err(failure(&output).into());
     }
     Ok(output.stdout)
+}
+
+pub fn stream_paths(
+    args: &[&str],
+    visit: impl FnOnce(&mut BufReader<ChildStdout>) -> Result<()>,
+) -> Result<()> {
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut paths = BufReader::new(child.stdout.take().expect("piped Git stdout"));
+    std::thread::scope(|scope| {
+        // Drain stderr while the caller consumes stdout.
+        let child = scope.spawn(move || child.wait_with_output());
+        let visited = visit(&mut paths);
+        if visited.is_err() {
+            // Keep Git's exit status meaningful if the caller stops reading early.
+            let _ = io::copy(&mut paths, &mut io::sink());
+        }
+        drop(paths);
+        let output = child.join().expect("Git output reader panicked")?;
+        if !output.status.success() {
+            return Err(failure(&output).into());
+        }
+        visited
+    })
 }
 
 fn lazy_fetch_disabled() -> Result<bool> {

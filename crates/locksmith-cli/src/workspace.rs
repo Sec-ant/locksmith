@@ -3,7 +3,7 @@ mod patterns;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Read},
+    io::{self, BufRead, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -560,83 +560,86 @@ impl Members {
             exclude = format!("--exclude={}/", "/*".repeat(first_unused_depth));
             args.push(&exclude);
         }
-        // An indexed regular file may have become a directory symlink in the worktree.
-        let (paths, changed) = std::thread::scope(|scope| -> Result<_> {
-            let changed = scope.spawn(|| {
-                git::output_bytes(&[
-                    "diff-files",
-                    "--relative",
-                    "--name-only",
-                    "-z",
-                    "--diff-filter=T",
-                    "--",
-                    ".",
-                ])
-                .map_err(|error| error.to_string())
-            });
-            let paths = git::output_bytes(&args)?;
-            Ok((
-                paths,
-                changed.join().expect("Git type change scan panicked")?,
-            ))
-        })?;
-        let changed: BTreeSet<_> = changed.split(|&b| b == 0).collect();
         let root = std::env::current_dir()?.canonicalize()?;
         let descend = self.descend.get("").map_or(&[][..], Vec::as_slice);
-        for record in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
-            let (path, possible_link) = if let Some(path) = record.strip_prefix(b"? ") {
-                (path, true)
-            } else {
-                let tab = record
-                    .iter()
-                    .position(|&b| b == b'\t')
-                    .ok_or("invalid git ls-files entry")?;
-                let path = &record[tab + 1..];
-                (
-                    path,
-                    record.get(2..8) == Some(b"120000")
-                        || changed.contains(path)
-                        || record[0].is_ascii_lowercase()
-                        || record[0] == b'S',
-                )
-            };
-            let Ok(path) = std::str::from_utf8(path) else {
-                continue;
-            };
-            if let Some((id, name)) = path.rsplit_once('/')
-                && MANIFEST_NAMES.contains(&name)
-                && self.contains(id)
-            {
-                directories.insert(id.to_owned());
+        git::stream_paths(&args, |paths| {
+            // An indexed regular file may have become a directory symlink in the worktree.
+            let changed = git::output_bytes(&[
+                "diff-files",
+                "--relative",
+                "--name-only",
+                "-z",
+                "--diff-filter=T",
+                "--",
+                ".",
+            ])?;
+            let changed: BTreeSet<_> = changed.split(|&b| b == 0).collect();
+            let mut record = Vec::new();
+            loop {
+                record.clear();
+                if paths.read_until(0, &mut record)? == 0 {
+                    break;
+                }
+                let record = record.strip_suffix(b"\0").unwrap_or(&record);
+                if record.is_empty() {
+                    continue;
+                }
+                let (path, possible_link) = if let Some(path) = record.strip_prefix(b"? ") {
+                    (path, true)
+                } else {
+                    let tab = record
+                        .iter()
+                        .position(|&b| b == b'\t')
+                        .ok_or("invalid git ls-files entry")?;
+                    let path = &record[tab + 1..];
+                    (
+                        path,
+                        record.get(2..8) == Some(b"120000")
+                            || changed.contains(path)
+                            || record[0].is_ascii_lowercase()
+                            || record[0] == b'S',
+                    )
+                };
+                let Ok(path) = std::str::from_utf8(path) else {
+                    continue;
+                };
+                if let Some((id, name)) = path.rsplit_once('/')
+                    && MANIFEST_NAMES.contains(&name)
+                    && self.contains(id)
+                {
+                    directories.insert(id.to_owned());
+                }
+                // Git lists a directory symlink itself, never its member manifests.
+                if !possible_link || !self.may_visit(path, descend) {
+                    continue;
+                }
+                let link = root.join(path);
+                match fs::symlink_metadata(&link) {
+                    Ok(meta) if meta.file_type().is_symlink() => {}
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e.into()),
+                }
+                let Some(target) = linked_directory(&link)? else {
+                    continue;
+                };
+                let mut ancestors: BTreeSet<_> =
+                    link.ancestors().skip(1).map(Path::to_owned).collect();
+                if ancestors.insert(target.clone()) {
+                    self.visit(
+                        &target,
+                        path,
+                        descend,
+                        &mut ancestors,
+                        false,
+                        &mut |id, _| {
+                            directories.insert(id.to_owned());
+                        },
+                    )?;
+                }
             }
-            // Git lists a directory symlink itself, never its member manifests.
-            if !possible_link || !self.may_visit(path, descend) {
-                continue;
-            }
-            let link = root.join(path);
-            match fs::symlink_metadata(&link) {
-                Ok(meta) if meta.file_type().is_symlink() => {}
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-            let Some(target) = linked_directory(&link)? else {
-                continue;
-            };
-            let mut ancestors: BTreeSet<_> = link.ancestors().skip(1).map(Path::to_owned).collect();
-            if ancestors.insert(target.clone()) {
-                self.visit(
-                    &target,
-                    path,
-                    descend,
-                    &mut ancestors,
-                    false,
-                    &mut |id, _| {
-                        directories.insert(id.to_owned());
-                    },
-                )?;
-            }
-        }
+            Ok(())
+        })?;
         Ok(directories)
     }
 
