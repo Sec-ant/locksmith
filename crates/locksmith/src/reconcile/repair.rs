@@ -221,8 +221,13 @@ fn extend_dependencies(
                 sources.candidates().get(actual_name).into_iter().flatten()
             {
                 let candidate_ref = reference(name, candidate);
-                if !accepts(name, &desired, &candidate_ref, metadata)
-                    || sources.authorized_patch(candidate, metadata) != existing_patch
+                if !accepts(
+                    name,
+                    &desired,
+                    &candidate_ref,
+                    metadata,
+                    Some(sources.configuration),
+                ) || sources.authorized_patch(candidate, metadata) != existing_patch
                 {
                     continue;
                 }
@@ -501,7 +506,13 @@ pub(super) fn repair_snapshot(
             }
             let mut needs_override = expected.as_ref().is_none_or(|range| {
                 range.as_ref() != graph::package_key(reference)
-                    && !accepts(name, range, reference, metadata)
+                    && !accepts(
+                        name,
+                        range,
+                        reference,
+                        metadata,
+                        Some(sources.configuration),
+                    )
             });
             let needs_patch =
                 !reference.starts_with("link:") && !sources.authorized_patch(&old_key, metadata);
@@ -532,7 +543,13 @@ pub(super) fn repair_snapshot(
                         )
                     })
                 && let Some(declaration) = package["peerDependencies"][name].as_str()
-                && !accepts(name, declaration, reference, metadata)
+                && !accepts(
+                    name,
+                    declaration,
+                    reference,
+                    metadata,
+                    Some(sources.configuration),
+                )
             {
                 expected = Some(Cow::Borrowed(declaration));
                 needs_override = true;
@@ -601,7 +618,13 @@ pub(super) fn repair_snapshot(
                         }
                         let candidate_ref = crate::reconcile::reference(name, candidate);
                         let matches = if needs_override {
-                            accepts(name, desired, &candidate_ref, metadata)
+                            accepts(
+                                name,
+                                desired,
+                                &candidate_ref,
+                                metadata,
+                                Some(sources.configuration),
+                            )
                         } else {
                             graph::package_key(candidate) == graph::package_key(&old_key)
                         };

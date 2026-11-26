@@ -57,14 +57,18 @@ impl RepairInput {
     }
 
     pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, bool)> {
-        if !text.contains("\n---") {
+        // Ordinary project-only lockfiles need no preliminary parse. Quoted
+        // keys can also spell a bootstrap field using escapes.
+        if !text.contains("\n---")
+            && !text.contains("configDependencies")
+            && !text.contains("packageManagerDependencies")
+            && !text.contains('\\')
+        {
             return None;
         }
         let text = text.trim_start_matches('\u{feff}');
         let ranges = crate::source::document_ranges(text);
-        let [bootstrap, _, ..] = ranges.as_slice() else {
-            return None;
-        };
+        let bootstrap = ranges.first()?;
         crate::recovery::bootstrap_candidate(&text[bootstrap.clone()])
     }
 
@@ -102,15 +106,12 @@ impl RepairInput {
         Self::parse_with_snapshot_reference(text, &witness)
     }
 
-    /// Repair the original source against this context.
+    /// Check the source's bootstrap against the current workspace.
     ///
     /// # Errors
-    /// Returns the workspace, graph and resolution errors described by [`repair`].
-    pub fn apply(&self, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
+    /// Returns an error if the root manifest is missing or the bootstrap is invalid.
+    pub fn validate_bootstrap(&self, context: &RepairContext<'_>) -> Result<(), LockfileError> {
         let lock = &self.0;
-        let doc = lock
-            .project()
-            .ok_or_else(|| missing(&[], "missing project document"))?;
         let root = context
             .manifests
             .get(".")
@@ -125,12 +126,28 @@ impl RepairInput {
             ));
         }
         if let Some(env) = lock.environment() {
-            let issues = graph::validate(env, DocumentKind::Environment);
+            let issues = graph::validate_with_config(
+                env,
+                DocumentKind::Environment,
+                Some(context.configuration),
+            );
             if !issues.is_empty() {
                 return Err(LockfileError::InvalidGraph(issues));
             }
         }
-        lock.check_package_manager(root, Some(context.configuration))?;
+        lock.check_package_manager(root, Some(context.configuration))
+    }
+
+    /// Repair the original source against this context.
+    ///
+    /// # Errors
+    /// Returns the workspace, graph and resolution errors described by [`repair`].
+    pub fn apply(&self, context: &RepairContext<'_>) -> Result<Lockfile, LockfileError> {
+        let lock = &self.0;
+        let doc = lock
+            .project()
+            .ok_or_else(|| missing(&[], "missing project document"))?;
+        self.validate_bootstrap(context)?;
         let mut evidence = Evidence::new(lock, context);
         let current = (lock, context.configuration);
         let sources = [

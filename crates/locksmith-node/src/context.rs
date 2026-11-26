@@ -156,10 +156,17 @@ impl Converge {
         let migration = baseline_version != candidate_version;
         let empty = json!({});
         let final_settings = self.configuration.as_ref().or(migration.then_some(&empty));
-        let before = self
-            .baseline_configuration
+        let baseline_settings = self.baseline_configuration.or_else(|| {
+            final_settings.filter(|_| migration).map(|raw| {
+                let mut raw = raw.clone();
+                if let Some(settings) = raw.as_object_mut() {
+                    settings.remove("packageManager");
+                }
+                raw
+            })
+        });
+        let before = baseline_settings
             .as_ref()
-            .or(final_settings.filter(|_| migration))
             .map(|raw| {
                 WorkspaceConfig::from_pnpm_context(
                     raw,

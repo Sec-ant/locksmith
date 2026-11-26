@@ -1123,6 +1123,28 @@ snapshots:\n  child@1.0.0: {{}}\n  child@2.0.0: {{}}\n{snapshots}"
 }
 
 #[test]
+fn repair_reports_bootstrap_errors_before_loading_parent_projects() {
+    let repo = Repo::new();
+    let project = "lockfileVersion: '9.0'\nimporters: {.: {}}\n";
+    repo.git(&["rm", "package.json"]);
+    repo.write("pnpm-workspace.yaml", "packages: []\n");
+    repo.write("pnpm-lock.yaml", &with_recorded_manager("12.18.0", project));
+    repo.commit("record a lock without a manifest");
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    repo.write("pnpm-lock.yaml", &with_recorded_manager("12.20.0", project));
+    repo.commit("restore the manifest with a different manager");
+
+    let out = repo.cmd(CLI, &["repair"]);
+    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert!(out.stdout.is_empty());
+    assert!(
+        report(&out).contains("bootstrap graph does not match the declared pnpm@12.21.0"),
+        "{}",
+        report(&out)
+    );
+}
+
+#[test]
 fn repair_reports_ambiguous_duplicates_without_emitting_yaml() {
     let repo = Repo::new();
     repo.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters: {}\nsnapshots:\n  x@1.0.0: {}\n  x@1.0.0: {dependencies: {y: 2.0.0}}\n");
@@ -1197,6 +1219,7 @@ fn workspace_walks_follow_the_runners_character_class_semantics() {
     for (version, patterns, expected) in [
         ("10.5.2", bounded, &ordinary[..]),
         ("10.6.0", bounded, &names[..]),
+        ("10.34.9", &["apps/{[a/../b],web}"], &[][..]),
         ("11.28.12", bounded, &names[..]),
         ("9.15.9", recursive, &names[..]),
         ("12.14.0", bounded, &ordinary[..]),
@@ -1225,6 +1248,21 @@ fn workspace_walks_follow_the_runners_character_class_semantics() {
             report(&out)
         );
     }
+}
+
+#[test]
+fn pnpm10_normalizes_parent_segments_before_matching_workspace_globs() {
+    let repo = Repo::new();
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/[a/../b]']\n");
+    repo.write("apps/b]/package.json", r#"{"name":"b"}"#);
+    let lock = "lockfileVersion: '9.0'\nimporters: {.: {}, 'apps/b]': {}}\n";
+    repo.write("pnpm-lock.yaml", lock);
+    repo.commit("record the directory selected by pnpm 10.34.9");
+    let validated = repo.cmd(CLI, &["validate", "--workspace"]);
+    assert!(validated.status.success(), "{}", report(&validated));
+    let repaired = repo.cmd(CLI, &["repair", "HEAD"]);
+    assert!(repaired.status.success(), "{}", report(&repaired));
+    assert_eq!(repaired.stdout, lock.as_bytes());
 }
 
 #[test]
@@ -2198,7 +2236,65 @@ fn a_locked_modern_manager_uses_dev_engines_over_a_legacy_pin() {
         );
         assert!(out.status.success(), "{}", report(&out));
         assert_eq!(graph(&out.stdout), graph(project.as_bytes()));
+        let merged = Lockfile::parse(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+        assert_eq!(
+            merged.recorded_pnpm_version().unwrap().to_string(),
+            "12.21.0"
+        );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_workspace_validation_reports_the_first_error_without_waiting_on_a_fifo() {
+    use std::{
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(root, "package.json", "{}");
+    write_input(root, "pnpm-workspace.yaml", "packages: ['apps/*']");
+    write_input(
+        root,
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\nimporters: {.: {}}\n",
+    );
+    for index in 0..31 {
+        let manifest = if index == 0 { "{invalid" } else { "{}" };
+        write_input(root, &format!("apps/{index:02}/package.json"), manifest);
+    }
+    fs::create_dir(root.join("apps/31")).unwrap();
+    let fifo = Command::new("mkfifo")
+        .arg(root.join("apps/31/package.json"))
+        .output()
+        .unwrap();
+    assert!(fifo.status.success(), "{}", report(&fifo));
+
+    let mut process = Command::new(CLI)
+        .current_dir(root)
+        .args(["validate", "--workspace"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            process.kill().unwrap();
+            process.wait().unwrap();
+            panic!("workspace validation blocked on a manifest FIFO");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let out = process.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", report(&out));
+    assert!(
+        report(&out).contains("apps/00/package.json"),
+        "{}",
+        report(&out)
+    );
 }
 
 #[test]
@@ -3127,6 +3223,7 @@ fn a_shadowed_workspace_manifest_is_never_followed() {
         r.0.path().join("apps/web/package.json5"),
     )
     .unwrap();
+    std::os::unix::fs::symlink("outside/unused.json", r.0.path().join("package.json5")).unwrap();
     r.commit("link the lower-priority manifest");
     r.git(&["branch", "-f", "topic", "HEAD"]);
     r.branches(|r, side| r.write("outside/unused.json", &json!({"side":side}).to_string()));
@@ -3557,6 +3654,29 @@ fn converge_accepts_a_pnpm_patch_release_upgrade() {
 }
 
 #[test]
+fn converge_replaces_an_invalid_baseline_manager_pin_even_when_the_version_is_unchanged() {
+    let repo = Repo::new();
+    let project = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let candidate = with_recorded_manager("12.21.0", &project);
+    repo.write("package.json", r#"{"packageManager":"pnpm@12.21.0"}"#);
+    repo.write("pnpm-workspace.yaml", "packages: ['apps/*']\n");
+    repo.write(
+        "pnpm-lock.yaml",
+        &candidate.replace(r#""specifier":"12.21.0""#, r#""specifier":"12.20.0""#),
+    );
+    repo.commit("record the same pnpm version with a stale specifier");
+    repo.write("pnpm-lock.yaml", &candidate);
+
+    let out = repo.cmd(CLI, &["converge", "HEAD"]);
+    assert!(out.status.success(), "{}", report(&out));
+    let merged = Lockfile::parse(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    assert_eq!(
+        merged.environment(),
+        Lockfile::parse(&candidate).unwrap().environment()
+    );
+}
+
+#[test]
 fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -3569,16 +3689,21 @@ fn inspect_reads_an_in_tree_peer_provider_without_an_importer() {
         "packages":{"plugin@1.0.0":{"resolution":{},"peerDependencies":{"host":"^1.0.0"}}},
         "snapshots":{"plugin@1.0.0":{"dependencies":{"host":"link:vendor/host"}}}});
     write_input(root, "pnpm-lock.yaml", doc.to_string());
-    let out = Command::new(CLI)
-        .current_dir(root)
-        .args(["inspect", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", report(&out));
-    assert_eq!(
-        serde_json::from_slice::<Value>(&out.stdout).unwrap()["peers"],
-        json!([])
-    );
+    let inspect = || {
+        let out = Command::new(CLI)
+            .current_dir(root)
+            .args(["inspect", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", report(&out));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(inspect()["peers"], json!([]));
+    fs::remove_dir_all(root.join("vendor")).unwrap();
+    write_input(root, "vendor", "not a directory");
+    let peers = inspect();
+    assert_eq!(peers["peers"][0]["status"], "unknown");
+    assert_eq!(peers["peers"][0]["reason"], "providerVersion");
 }
 
 #[test]

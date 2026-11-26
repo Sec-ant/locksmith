@@ -98,9 +98,9 @@ fn restorations<'a>(
                     if peers.contains(name.as_str())
                         || overrides.contains(name.as_str())
                         || root
-                            && !entry["specifier"]
-                                .as_str()
-                                .is_some_and(|s| reconcile::accepts(name, s, prior, donor))
+                            && !entry["specifier"].as_str().is_some_and(|s| {
+                                reconcile::accepts(name, s, prior, donor, Some(after))
+                            })
                     {
                         continue;
                     }

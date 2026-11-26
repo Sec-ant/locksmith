@@ -76,6 +76,26 @@ for (const baseline of [olderManaged, yaml]) {
   ], { configuration: {} });
   assert.deepEqual(await (await parse(migrated)).document('environment'), bootstrap);
 }
+const legacyBootstrap = JSON.parse(JSON.stringify(bootstrap).replaceAll('12.21.0', '11.0.0'));
+const aliasLock = (environment, actual, pin) => {
+  const key = `${actual}@${pin.split('@').at(-1)}`;
+  const project = {
+    lockfileVersion: '9.0',
+    importers: { '.': { dependencies: { foo: { specifier: 'npm:1', version: pin } } } },
+    packages: { [key]: { resolution: {} } }, snapshots: { [key]: {} },
+  };
+  return `---\n${JSON.stringify(environment)}\n---\n${JSON.stringify(project)}\n`;
+};
+const numericAlias = { dependencies: { foo: 'npm:1' } };
+const migratedAlias = await converge(aliasLock(legacyBootstrap, '1', '1@2.0.0'), aliasLock(bootstrap, 'foo', '1.2.0'), [
+  { importer: '.', before: numericAlias, after: numericAlias },
+], { configuration: { packageManager: 'pnpm@12.21.0' } });
+const migratedAliasLock = await parse(migratedAlias);
+assert.deepEqual(await migratedAliasLock.document('environment'), bootstrap);
+assert.equal((await migratedAliasLock.document('project')).importers['.'].dependencies.foo.version, '1.2.0');
+const staleManager = managed.replace('"specifier":"12.21.0"', '"specifier":"12.20.0"');
+const correctedManager = await converge(staleManager, managed, [{ importer: '.', before: modernRoot, after: modernRoot }]);
+assert.deepEqual(await (await parse(correctedManager)).document('environment'), bootstrap);
 for (const result of await Promise.all([
   merge(managed, managedHandle, managed, modernContext),
   converge(managedHandle, managed, [{ importer: '.', before: modernRoot, after: modernRoot }], { configuration: {} }),

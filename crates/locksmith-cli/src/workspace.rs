@@ -47,8 +47,15 @@ pub fn check_conflicts(
 
 pub fn read_manifest(
     dir: &str,
-    mut read: impl FnMut(&str) -> Result<Option<String>>,
+    read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<Option<Value>> {
+    Ok(read_named_manifest(dir, read)?.map(|(_, manifest)| manifest))
+}
+
+pub(super) fn read_named_manifest(
+    dir: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<Option<(&'static str, Value)>> {
     for name in MANIFEST_NAMES {
         let path = if dir == "." {
             name.to_owned()
@@ -56,7 +63,7 @@ pub fn read_manifest(
             format!("{dir}/{name}")
         };
         let Some(text) = read(&path)? else { continue };
-        return parse_manifest(&path, &text).map(Some);
+        return Ok(Some((name, parse_manifest(&path, &text)?)));
     }
     Ok(None)
 }

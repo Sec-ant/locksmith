@@ -1,9 +1,46 @@
 use std::collections::BTreeMap;
 
-use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget, WorkspaceConfig, merge};
+use locksmith::{
+    Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget, RepairInput, WorkspaceConfig,
+    merge,
+};
 use serde_json::json;
 
 const EMPTY: &str = "lockfileVersion: '9.0'\nimporters: {'.': {}}\n";
+
+#[test]
+fn bootstrap_metadata_is_available_from_a_single_yaml_document() {
+    let yaml = "lockfileVersion: '9.0'\nimporters:\n  .:\n    packageManagerDependencies:\n      pnpm: {specifier: 12.21.0, version: 12.21.0}\n    configDependencies:\n      tool: {specifier: 1.0.0, version: 1.0.0}\npackages:\n  tool@1.0.0: {resolution: {integrity: sha512-example}}\n";
+    let declarations = json!({"tool":{
+        "integrity":"1.0.0+sha512-example","tarball":"https://registry.example/tool/-/tool-1.0.0.tgz"
+    }});
+    let declarations = declarations.as_object().unwrap();
+    let version = "12.21.0".parse::<node_semver::Version>().unwrap();
+    for text in [
+        yaml.to_owned(),
+        yaml.replace(
+            "packageManagerDependencies",
+            r#""packageManager\u0044ependencies""#,
+        )
+        .replace("configDependencies", r#""config\u0044ependencies""#),
+    ] {
+        let parsed = Lockfile::parse(&text).unwrap();
+        assert_eq!(
+            RepairInput::recorded_pnpm_version(&text),
+            Some(version.clone())
+        );
+        for input in [MergeInput::from(text.as_str()), MergeInput::from(&parsed)] {
+            assert_eq!(input.recorded_pnpm_version(), Some(version.clone()));
+            assert_eq!(input.implicit_config_tarballs(declarations), ["tool"]);
+        }
+    }
+    assert_eq!(RepairInput::recorded_pnpm_version(EMPTY), None);
+    assert!(
+        MergeInput::from(EMPTY)
+            .implicit_config_tarballs(declarations)
+            .is_empty()
+    );
+}
 
 fn source(entries: &str) -> String {
     format!(

@@ -97,9 +97,16 @@ pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
     )
 }
 
-/// A plain version in a lock references the original dependency. Older pnpm versions
-/// encode a numeric package alias as `name@version` instead.
-pub(crate) fn pinned_specifier<'a>(specifier: &'a str, pin: &str) -> &'a str {
+/// Use the runner's alias rules when known. With no version, a plain pin
+/// indicates shorthand and a qualified pin can identify a legacy numeric alias.
+pub(crate) fn pinned_specifier<'a>(
+    specifier: &'a str,
+    pin: &str,
+    configuration: Option<&WorkspaceConfig>,
+) -> &'a str {
+    if let Some(config) = configuration.filter(|config| config.pnpm_version.is_some()) {
+        return config.registry_specifier(specifier);
+    }
     if let Some(range) = specifier.strip_prefix("npm:")
         && range.parse::<node_semver::Range>().is_ok()
         && graph::package_key(pin)

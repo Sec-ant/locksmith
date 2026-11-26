@@ -108,7 +108,8 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let locks = crate::merge::Sources::read(files)?;
     let target = git::preferred_target(&inputs)?;
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
-    let root = workspace::read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
+    let (root_name, root) =
+        workspace::read_named_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
     let (project, config, merge) =
         target.workspace_for_candidate(Some(&root), locks.inputs(), |lock| -> Result<_> {
             let version = lock.and_then(locksmith::Lockfile::recorded_pnpm_version);
@@ -122,7 +123,12 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     if !blobs.conflicts.is_empty() {
         blobs.check_linked_conflicts(
             &tree,
-            dependency_inputs.iter().map(|p| format!("{prefix}{p}")),
+            dependency_inputs
+                .iter()
+                .filter(|p| {
+                    p.as_str() == root_name || !workspace::MANIFEST_NAMES.contains(&p.as_str())
+                })
+                .map(|p| format!("{prefix}{p}")),
         )?;
     }
     let [base, ours, theirs] = sources.each_ref().map(|p| p.configuration());

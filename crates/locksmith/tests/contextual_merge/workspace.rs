@@ -1,7 +1,7 @@
 use super::{cfg, lock};
 use locksmith::{
-    Lockfile, LockfileError, MergeContext, MergeTarget, PeerRules, Value, WorkspaceConfig,
-    inspect_peers, merge,
+    Lockfile, LockfileError, MergeContext, MergeTarget, PeerRules, RepairContext, Value,
+    WorkspaceConfig, inspect_peers, merge, repair,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -717,6 +717,55 @@ fn direct_aliases_keep_bare_version_pins_and_prune_stale_publication_times() {
 }
 
 #[test]
+fn numeric_npm_aliases_follow_the_runner_for_direct_and_catalog_pins() {
+    for (runner, target, pin) in [("10.34.9", "1", "1@1.2.0"), ("11.1.0", "foo", "1.2.0")] {
+        let runner = runner.parse().unwrap();
+        for catalog in [false, true] {
+            let make = |specifier: &str, actual: &str, pin: &str| {
+                let authored = if catalog { "catalog:" } else { specifier };
+                let key = format!("{actual}@1.2.0");
+                let mut project = json!({"lockfileVersion":"9.0",
+                    "importers":{".":{"dependencies":{"foo":{"specifier":authored,"version":pin}}}},
+                    "packages":{&key:{"resolution":{}}},"snapshots":{&key:{}}});
+                let mut raw = json!({});
+                if catalog {
+                    project["catalogs"] =
+                        json!({"default":{"foo":{"specifier":specifier,"version":"1.2.0"}}});
+                    raw["catalog"] = json!({"foo":specifier});
+                }
+                (
+                    Lockfile::parse(&project.to_string()).unwrap(),
+                    WorkspaceConfig::from_pnpm_version(&raw, &runner).unwrap(),
+                )
+            };
+            let (base, before) = make("^1", "foo", "1.2.0");
+            let (other, after) = make("npm:1", target, pin);
+            let authored = if catalog { "catalog:" } else { "npm:1" };
+            let manifests =
+                BTreeMap::from([(".".into(), json!({"dependencies":{"foo":authored}}))]);
+            let merged = merge(
+                &base,
+                &base,
+                &other,
+                Some(&MergeContext {
+                    registry: None,
+                    target: MergeTarget::Ours,
+                    manifests: &manifests,
+                    configurations: [&before, &before, &after],
+                    configuration: &after,
+                    patches: &BTreeMap::new(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(
+                merged.project().unwrap()["importers"]["."]["dependencies"]["foo"]["version"],
+                pin
+            );
+        }
+    }
+}
+
+#[test]
 fn registry_pin_and_matching_workspace_release_follow_final_link_policy() {
     let lock=Lockfile::parse(&json!({"lockfileVersion":"9.0","importers":{".":{"dependencies":{"foo":{"specifier":"^1","version":"1.1.0"}}},"packages/foo":{}},"packages":{"foo@1.1.0":{"resolution":{"integrity":"sha512-test"}}},"snapshots":{"foo@1.1.0":{}}}).to_string()).unwrap();
     for (local, prefer, expected) in [
@@ -908,6 +957,20 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
             valid
         );
     }
+    let malformed = WorkspaceConfig::from_pnpm(&json!({"configDependencies":{"config":{
+        "integrity":"2.0.0","tarball":"https://mirror.test/config-2.0.0.tgz"
+    }}}))
+    .unwrap();
+    assert!(
+        new.validate_workspace(
+            &manifests,
+            &Default::default(),
+            &malformed,
+            ctx.patches,
+            |_| Ok(None)
+        )
+        .is_err()
+    );
     let mut broken = new.environment().unwrap().clone();
     broken["snapshots"] = json!({});
     let broken = Lockfile::parse(&format!("---\n{broken}\n---\n{project}\n")).unwrap();
@@ -917,6 +980,68 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
             .environment(),
         new.environment()
     );
+}
+
+#[test]
+fn merge_and_repair_validate_bootstrap_settings_for_the_runner() {
+    for (runner, quoted_supported) in [("11.28.12", false), ("12.21.0", true)] {
+        let make = |setting| {
+            let key = format!("pnpm@{runner}");
+            let environment = json!({"lockfileVersion":"9.0","settings":{"autoInstallPeers":setting},
+                "importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":runner,"version":runner}}}},
+                "packages":{&key:{"resolution":{}}},"snapshots":{&key:{}}});
+            format!("---\n{environment}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n")
+        };
+        let plain = make(json!(true));
+        let quoted = make(json!("true"));
+        let config =
+            WorkspaceConfig::from_pnpm_version(&json!({}), &runner.parse().unwrap()).unwrap();
+        let manifests = BTreeMap::from([(".".into(), json!({}))]);
+        let patches = BTreeMap::new();
+        let merged = merge(
+            plain.as_str(),
+            quoted.as_str(),
+            plain.as_str(),
+            Some(&MergeContext {
+                registry: None,
+                target: MergeTarget::Ours,
+                manifests: &manifests,
+                configuration: &config,
+                configurations: [&config; 3],
+                patches: &patches,
+            }),
+        )
+        .unwrap();
+        let expected = if quoted_supported {
+            json!("true")
+        } else {
+            json!(true)
+        };
+        assert_eq!(
+            merged.environment().unwrap()["settings"]["autoInstallPeers"],
+            expected
+        );
+
+        let context = RepairContext {
+            registry: None,
+            manifests: &manifests,
+            configuration: &config,
+            patches: &patches,
+            parents: &[],
+        };
+        assert_eq!(repair(&plain, &context).unwrap().to_yaml().unwrap(), plain);
+        if quoted_supported {
+            assert_eq!(
+                repair(&quoted, &context).unwrap().to_yaml().unwrap(),
+                quoted
+            );
+        } else {
+            assert!(
+                matches!(repair(&quoted, &context), Err(LockfileError::InvalidGraph(issues))
+                if issues.iter().any(|issue| issue.path == ["settings"]))
+            );
+        }
+    }
 }
 
 #[test]

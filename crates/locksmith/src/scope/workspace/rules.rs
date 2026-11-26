@@ -99,7 +99,13 @@ pub(super) fn catalogs(
                     .flatten();
                 for (id, group, dep) in users.clone() {
                     if !dep["version"].as_str().is_some_and(|pin| {
-                        metadata::catalog_consumer_fits(name, spec, pin, Some(installed))
+                        metadata::catalog_consumer_fits(
+                            name,
+                            spec,
+                            pin,
+                            Some(installed),
+                            Some(configs[1]),
+                        )
                     }) {
                         return Err(missing(
                             &["importers", id, group, name],
@@ -142,7 +148,13 @@ pub(super) fn catalogs(
                         importer_dependency(docs[0], id, name)
                             .and_then(|(_, dep)| dep["version"].as_str())
                             .is_some_and(|p| {
-                                metadata::catalog_consumer_fits(name, spec, p, Some(installed))
+                                metadata::catalog_consumer_fits(
+                                    name,
+                                    spec,
+                                    p,
+                                    Some(installed),
+                                    Some(configs[1]),
+                                )
                             })
                     };
                     if users
@@ -274,7 +286,7 @@ pub(super) fn importer_choices(
                     };
                     let accepts = |dep: &Value, doc: &Value| {
                         dep["version"].as_str().is_some_and(|pin| {
-                            reconcile::accepts(name, effective, pin, doc)
+                            reconcile::accepts(name, effective, pin, doc, Some(configs[1]))
                                 || (effective.parse::<node_semver::Range>().is_err()
                                     && manifest::alias(effective).is_none()
                                     && dep == right)
@@ -288,7 +300,13 @@ pub(super) fn importer_choices(
                     }
                     let fits_catalog = entry.is_none()
                         || left["version"].as_str().is_some_and(|p| {
-                            metadata::catalog_consumer_fits(name, effective, p, entry)
+                            metadata::catalog_consumer_fits(
+                                name,
+                                effective,
+                                p,
+                                entry,
+                                Some(configs[1]),
+                            )
                         });
                     if accepts(left, docs[0]) && fits_catalog {
                         RootChoice::Baseline
@@ -392,7 +410,7 @@ pub(in crate::scope) fn check_installed_rules(
                 (Some(_), None) => required.is_none() || expected[1][1].contains_key(name),
                 (Some(s), Some((_, p))) if overridden || previous_edge.is_none() => {
                     s.parse::<node_semver::Range>().is_err() && manifest::alias(s).is_none()
-                        || reconcile::accepts(name, s, p, donor)
+                        || reconcile::accepts(name, s, p, donor, Some(after))
                 }
                 _ => true,
             };

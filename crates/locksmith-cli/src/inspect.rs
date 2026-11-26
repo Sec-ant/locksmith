@@ -23,7 +23,14 @@ pub fn run(file: &Path, override_version: Option<node_semver::Version>, json: bo
         let resolved = match path.canonicalize() {
             Ok(resolved) if resolved.starts_with(&dir) => resolved,
             Ok(_) => return Ok(None),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(e) => return Err(format!("{}: {e}", path.display()).into()),
         };
         Ok(Some(

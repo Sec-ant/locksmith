@@ -354,7 +354,8 @@ impl WorkspaceConfig {
                     }
                 })
             } else {
-                pin["specifier"] == spec
+                declaration.is_string()
+                    && pin["specifier"] == spec
                     && pin["version"]
                         .as_str()
                         .and_then(|v| v.parse::<node_semver::Version>().ok())

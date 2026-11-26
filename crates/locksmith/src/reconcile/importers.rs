@@ -428,7 +428,8 @@ impl PinSelector<'_, '_> {
             workspace_packages,
         } = self;
         let docs = sources.documents();
-        let specifier = context.configuration.registry_specifier(specifier);
+        let configuration = context.configuration;
+        let specifier = configuration.registry_specifier(specifier);
         let resolved = workspace_packages.resolve(name, specifier, id, package)?;
         let local = resolved.as_ref().map(|(link, _)| link);
         if specifier.starts_with("workspace:") && !injected(name, package, context.configuration) {
@@ -475,7 +476,7 @@ impl PinSelector<'_, '_> {
             && !sources.inputs[target].matches_configuration
             && sources.inputs[target].unchanged_rules
             && let Some(pin) = super::preference::dependency(docs[target], id, name)
-            && accepts(name, specifier, pin, output)
+            && accepts(name, specifier, pin, output, Some(configuration))
         {
             let key = graph::snapshot_key(name, pin, graph::section(docs[target], "snapshots"));
             if sources.inputs[target].compatibility.unchanged(&key)
@@ -525,7 +526,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     };
                     if local.map(String::as_str) == Some(reference)
-                        || accepts(name, specifier, reference, output)
+                        || accepts(name, specifier, reference, output, Some(configuration))
                         || (dep.get("specifier").and_then(Value::as_str) == Some(specifier)
                             && opaque(specifier))
                     {
@@ -592,7 +593,7 @@ impl PinSelector<'_, '_> {
                                 continue;
                             }
                             let version = reference(name, key);
-                            if accepts(name, specifier, &version, output) {
+                            if accepts(name, specifier, &version, output, Some(configuration)) {
                                 selected = Some((side, version, key.to_owned()));
                                 borrowed = true;
                                 break;
@@ -636,7 +637,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     }
                     let reference = reference(name, key);
-                    if accepts(name, specifier, &reference, output)
+                    if accepts(name, specifier, &reference, output, Some(configuration))
                         && sources.desired_patch(key, output).is_some()
                     {
                         if sources.authorized_patch(key, output) {

@@ -63,6 +63,39 @@ fn run(text: &str, range: &str, parent: Option<&Lockfile>) -> Result<String, Loc
 }
 
 #[test]
+fn parent_projects_can_restore_a_pin_without_selecting_a_bootstrap_from_them() {
+    let environment = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"packageManagerDependencies":{"pnpm":{"specifier":"12.20.0","version":"12.20.0"}}}},
+        "packages":{"pnpm@12.20.0":{"resolution":{}}},"snapshots":{"pnpm@12.20.0":{}}});
+    let input =
+        format!("---\n{environment}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n");
+    let parent = json!({"lockfileVersion":"9.0",
+        "importers":{".":{"dependencies":{"tool":{"specifier":"^1","version":"1.2.0"}}}},
+        "packages":{"tool@1.2.0":{"resolution":{"integrity":"sha512-tool"}}},"snapshots":{"tool@1.2.0":{}}});
+    let parent = Lockfile::parse(&format!("---\n{environment}\n---\n{parent}\n")).unwrap();
+    let configuration =
+        WorkspaceConfig::from_pnpm_version(&json!({}), &"12.21.0".parse().unwrap()).unwrap();
+    let previous =
+        WorkspaceConfig::from_pnpm_version(&json!({}), &"12.20.0".parse().unwrap()).unwrap();
+    let restored = repair(
+        &input,
+        &RepairContext {
+            manifests: &BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"^1"}}))]),
+            configuration: &configuration,
+            parents: &[(&parent, &previous)],
+            patches: &BTreeMap::new(),
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(restored.environment(), Some(&environment));
+    assert_eq!(
+        restored.project().unwrap()["importers"]["."]["dependencies"]["tool"]["version"],
+        "1.2.0"
+    );
+}
+
+#[test]
 fn repair_accepts_equivalent_pnpm_settings_and_rejects_changed_rules() {
     let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
     let ignored = lock.replace(

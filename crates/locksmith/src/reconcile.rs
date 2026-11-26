@@ -9,7 +9,7 @@ mod preference;
 pub(crate) mod published;
 mod repair;
 
-use crate::{DocumentKind, Lockfile, LockfileError, Value, graph, manifest, peer};
+use crate::{DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -439,7 +439,7 @@ fn resolve_sources(
             &[locks[target], locks[context.target.other_index()], locks[0]],
         );
         result.preserve_baseline = prefer_baseline;
-        result.validate()?;
+        result.validate_with_config(Some(context.configuration))?;
         Ok(result)
     };
     let mut preferences = preference::Preferences::default();
@@ -466,7 +466,13 @@ pub(crate) fn reference(name: &str, key: &str) -> String {
         .unwrap_or(key)
         .into()
 }
-pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &Value) -> bool {
+pub(crate) fn accepts(
+    name: &str,
+    specifier: &str,
+    reference: &str,
+    metadata: &Value,
+    configuration: Option<&WorkspaceConfig>,
+) -> bool {
     if let Some(catalog) = specifier.strip_prefix("catalog:") {
         let catalog = if catalog.is_empty() {
             "default"
@@ -483,14 +489,20 @@ pub(crate) fn accepts(name: &str, specifier: &str, reference: &str, metadata: &V
         let Some(version) = entry.get("version").and_then(Value::as_str) else {
             return false;
         };
-        return catalog_pin_matches(name, entry["specifier"].as_str(), version, reference);
+        let spec = entry["specifier"]
+            .as_str()
+            .map(|s| manifest::pinned_specifier(s, reference, configuration));
+        return catalog_pin_matches(name, spec, version, reference);
     }
-    range_accepts(name, specifier, reference)
+    range_accepts(
+        name,
+        manifest::pinned_specifier(specifier, reference, configuration),
+        reference,
+    )
 }
 
 fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
     let pin = graph::package_key(reference);
-    let spec = spec.map(|s| manifest::pinned_specifier(s, reference));
     if let Some(request) = spec.and_then(|s| s.strip_prefix("workspace:"))
         && let Some(path) = version.strip_prefix("file:")
     {
@@ -508,7 +520,6 @@ fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference:
 }
 
 fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
-    let specifier = manifest::pinned_specifier(specifier, reference);
     let (range, version) = if let Some((target, range)) = manifest::alias(specifier) {
         let Some(version) = reference
             .strip_prefix(&format!("{target}@"))

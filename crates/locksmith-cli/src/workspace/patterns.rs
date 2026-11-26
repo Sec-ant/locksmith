@@ -13,9 +13,13 @@ fn end_of_class(chars: &mut Peekable<CharIndices<'_>>) -> Option<usize> {
     chars.find(|(_, c)| *c == ']').map(|(end, _)| end + 1)
 }
 
-fn normalize(pattern: &str, on_disk: bool) -> Result<String> {
+fn normalize<'a>(
+    pattern: &str,
+    segments: impl IntoIterator<Item = &'a str>,
+    on_disk: bool,
+) -> Result<String> {
     let mut parts = Vec::new();
-    for part in components(pattern) {
+    for part in segments {
         match part {
             "" | "." => (),
             ".." if parts.last().is_some_and(|&p| p != "..") => {
@@ -37,7 +41,17 @@ pub(super) fn expand(
     on_disk: bool,
 ) -> Result<Vec<String>> {
     let overflow = || format!("too many alternatives in workspace glob {pattern:?}");
-    let expanded = brace_expansion::expand_with_max(pattern, MAX_ALTERNATIVES + 1);
+    let javascript = runner.is_some_and(|v| v.major() < 12);
+    let tinyglobby = javascript && runner.is_some_and(|v| v >= &Version::from((10, 6, 0)));
+    let normalized;
+    let source = if tinyglobby {
+        // tinyglobby normalizes paths before expanding braces or parsing classes.
+        normalized = normalize(pattern, pattern.split('/'), on_disk)?;
+        normalized.as_str()
+    } else {
+        pattern
+    };
+    let expanded = brace_expansion::expand_with_max(source, MAX_ALTERNATIVES + 1);
     if expanded.len() > MAX_ALTERNATIVES {
         return Err(overflow().into());
     }
@@ -55,7 +69,7 @@ pub(super) fn expand(
     });
     let mut result = Vec::new();
     for alternative in expanded {
-        let alt = normalize(&alternative, on_disk)?;
+        let alt = normalize(&alternative, components(&alternative), on_disk)?;
         if alt.is_empty() {
             continue;
         }
@@ -87,14 +101,13 @@ pub(super) fn expand(
         {
             continue;
         }
-        if runner.is_none_or(|v| v.major() >= 12) {
+        if !javascript {
             result.push(alt);
             continue;
         }
         // Picomatch also recognizes the written brackets literally. Before 10.6
         // only recursive walks and exclusions can reach a class spanning directories.
-        let crosses_dirs =
-            negative || recursive || runner.is_some_and(|v| v >= &Version::from((10, 6, 0)));
+        let crosses_dirs = negative || recursive || tinyglobby;
         let choices =
             javascript_class_paths(&alt, classes, crosses_dirs, MAX_ALTERNATIVES - result.len())
                 .ok_or_else(overflow)?;

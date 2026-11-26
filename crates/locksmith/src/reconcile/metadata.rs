@@ -1,6 +1,6 @@
 //! Construct the project-wide settings, catalogs, checksums and patch records.
 use super::{MergeContext, missing};
-use crate::{LockfileError, Value, graph, manifest, peer};
+use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
 use serde_json::json;
 
 pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Option<&str>) -> bool {
@@ -30,20 +30,21 @@ pub(crate) fn catalog_consumer_fits(
     spec: &str,
     reference: &str,
     entry: Option<&Value>,
+    configuration: Option<&WorkspaceConfig>,
 ) -> bool {
+    let effective = manifest::pinned_specifier(spec, reference, configuration);
     if let Some(entry) = entry {
         let Some(version) = catalog_entry_version(spec, entry) else {
             return false;
         };
-        let effective = manifest::pinned_specifier(spec, reference);
         if effective != spec && !catalog_version_fits(effective, version, None) {
             return false;
         }
-        if super::catalog_pin_matches(name, Some(spec), version, reference) {
+        if super::catalog_pin_matches(name, Some(effective), version, reference) {
             return true;
         }
     }
-    super::range_accepts(name, spec, reference)
+    super::range_accepts(name, effective, reference)
 }
 
 pub(crate) fn resolve(

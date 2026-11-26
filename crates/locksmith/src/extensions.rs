@@ -128,7 +128,7 @@ pub(crate) fn plan(
         let mut changes = Vec::new();
         for (name, spec) in targets {
             let edge = graph::dependency(body, name);
-            if edge.is_some_and(|(_, pin)| reconcile::accepts(name, spec, pin, doc)) {
+            if edge.is_some_and(|(_, pin)| reconcile::accepts(name, spec, pin, doc, Some(cfg))) {
                 continue;
             }
             let pin = peers

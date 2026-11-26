@@ -117,6 +117,7 @@ pub(super) fn repair<'a>(
                     v,
                     prior.and_then(|d| d["specifier"].as_str()) == Some(spec.as_ref()),
                     doc,
+                    context.configuration,
                 )
             });
             if let Some(catalog) = catalog {
@@ -269,7 +270,14 @@ fn catalog_fits(spec: &str, entry: &Value) -> bool {
     reconcile::metadata::catalog_entry_version(spec, entry).is_some()
 }
 
-fn fits(name: &str, range: &str, version: &str, same_spec: bool, doc: &Value) -> bool {
+fn fits(
+    name: &str,
+    range: &str,
+    version: &str,
+    same_spec: bool,
+    doc: &Value,
+    config: &crate::WorkspaceConfig,
+) -> bool {
     if version.starts_with("link:") {
         return same_spec;
     }
@@ -281,7 +289,7 @@ fn fits(name: &str, range: &str, version: &str, same_spec: bool, doc: &Value) ->
         return true;
     }
     if range.starts_with("npm:") || range.parse::<node_semver::Range>().is_ok() {
-        return reconcile::accepts(name, range, version, doc);
+        return reconcile::accepts(name, range, version, doc, Some(config));
     }
     same_spec
 }

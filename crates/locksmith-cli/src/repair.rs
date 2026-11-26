@@ -46,6 +46,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     };
     let result = match input.apply(&context) {
         Err(LockfileError::ResolutionRequired { .. }) => {
+            input.validate_bootstrap(&context)?;
             let revisions = git::output(&["rev-list", "--parents", "-1", commit])?;
             let mut blobs = git::Blobs::open()?;
             let mut evidence = Vec::new();

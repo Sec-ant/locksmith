@@ -380,7 +380,7 @@ pub(crate) fn records(
     let locked = |name: &str, spec: &str, request: &RegistryRequest| -> Option<String> {
         index.get(request.name())?.iter().find_map(|key| {
             let value = reference(name, key);
-            (accepts(name, spec, &value, metadata)
+            (accepts(name, spec, &value, metadata, Some(config))
                 && desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
                     == Some(crate::peer::patch(key)))
             .then_some(value)
@@ -438,11 +438,9 @@ pub(crate) fn records(
                     peer?;
                     // Another importer may supply this peer under a different
                     // selector. The workspace resolver applies its actual scope.
-                    registry
-                        .selections
-                        .get(req.name())?
-                        .values()
-                        .find(|key| accepts(name, spec, &reference(name, key), metadata))
+                    registry.selections.get(req.name())?.values().find(|key| {
+                        accepts(name, spec, &reference(name, key), metadata, Some(config))
+                    })
                 })?;
                 let hash =
                     desired_patch(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;

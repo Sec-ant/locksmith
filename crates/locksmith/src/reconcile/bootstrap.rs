@@ -209,7 +209,11 @@ pub(super) fn environment_source<'a>(
         if !provisional[side]
             && let Some(env) = lock.and_then(Lockfile::environment)
         {
-            let issues = crate::graph::validate(env, crate::DocumentKind::Environment);
+            let issues = crate::graph::validate_with_config(
+                env,
+                crate::DocumentKind::Environment,
+                Some(config),
+            );
             if !issues.is_empty() {
                 invalid_environment.get_or_insert(issues);
                 continue;

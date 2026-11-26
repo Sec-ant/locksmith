@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind, Read},
     path::{Path, PathBuf},
 };
 
@@ -11,6 +11,28 @@ use crate::{
     Result,
     workspace::{self, Members, Project},
 };
+
+fn read_manifest_file(path: &Path) -> io::Result<String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A FIFO must not block a manifest reader or the scoped threads joining it.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "expected a regular manifest file",
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
 
 pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
     let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -31,7 +53,15 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
             Err(e) => Err(format!("{}: {e}", path.display()).into()),
         }
     };
-    let manifest = workspace::read_manifest(".", read)?;
+    let read_manifest = |relative: &str| {
+        let path = root.join(relative);
+        match read_manifest_file(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display()).into()),
+        }
+    };
+    let manifest = workspace::read_manifest(".", read_manifest)?;
     let has_root_manifest = manifest.is_some();
     let project = Project::from_manifest(
         manifest.unwrap_or_else(|| serde_json::json!({})),
@@ -59,7 +89,7 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         let mut manifests = BTreeMap::new();
         let mut external_members = BTreeSet::new();
         for (id, directory) in directories {
-            if let Some(manifest) = workspace::read_manifest(&id, read)? {
+            if let Some(manifest) = workspace::read_manifest(&id, read_manifest)? {
                 if id != ".." && !id.starts_with("../") && !directory.starts_with(&canonical_root) {
                     external_members.insert(id.clone());
                 }

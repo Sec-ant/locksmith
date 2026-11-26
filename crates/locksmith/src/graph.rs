@@ -561,7 +561,9 @@ fn check_catalogs(
                     }
             } else {
                 spec.zip(pin).is_some_and(|(spec, pin)| {
-                    crate::reconcile::metadata::catalog_consumer_fits(name, spec, pin, entry)
+                    crate::reconcile::metadata::catalog_consumer_fits(
+                        name, spec, pin, entry, config,
+                    )
                 })
             };
             if !fits {
@@ -595,10 +597,6 @@ fn check_overrides(
             }
         }
     }
-}
-
-pub(crate) fn validate(document: &Value, kind: DocumentKind) -> Vec<ValidationIssue> {
-    validate_with_config(document, kind, None)
 }
 
 pub(crate) fn validate_with_config(

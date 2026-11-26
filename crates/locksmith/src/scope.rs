@@ -137,11 +137,11 @@ pub fn converge_with_recorded_baselines(
         manifests: changes,
         recorded: recorded_baselines,
     };
-    if let Some(root) = changes
+    let root = changes
         .iter()
         .find(|c| c.importer == ".")
-        .and_then(|c| c.after)
-    {
+        .and_then(|c| c.after);
+    if let Some(root) = root {
         candidate.check_package_manager(root, options.configuration)?;
     }
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
@@ -198,6 +198,34 @@ pub fn converge_with_recorded_baselines(
             },
         );
     }
+    // Correcting only the bootstrap pin leaves the baseline's project graph eligible.
+    let reconciled;
+    let baseline = if root.is_some_and(|root| {
+        baseline
+            .check_package_manager(root, options.configuration)
+            .is_err()
+    }) {
+        let kind = crate::DocumentKind::Environment;
+        let mut documents = baseline.documents.clone();
+        if let Some(environment) = candidate.documents.get(&kind) {
+            let inferred = crate::WorkspaceConfig {
+                pnpm_version: candidate.recorded_pnpm_version(),
+                ..Default::default()
+            };
+            let config = options.configuration.unwrap_or(&inferred);
+            let issues = graph::validate_with_config(environment, kind, Some(config));
+            if !issues.is_empty() {
+                return Err(LockfileError::InvalidGraph(issues));
+            }
+            documents.insert(kind, std::sync::Arc::clone(environment));
+        } else {
+            documents.remove(&kind);
+        }
+        reconciled = Lockfile::with_documents(documents, &[baseline, candidate]);
+        &reconciled
+    } else {
+        baseline
+    };
     let mut result = select(baseline, candidate, inputs, options)?;
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
@@ -496,7 +524,13 @@ fn manifest_edits<'a>(
                 && let (Some((old_group, previous)), Some((new_group, next))) = (old, new)
                 && let (Some(pin), Some(declaration)) =
                     (previous["version"].as_str(), next["specifier"].as_str())
-                && crate::reconcile::accepts(name, declaration, pin, base)
+                && crate::reconcile::accepts(
+                    name,
+                    declaration,
+                    pin,
+                    base,
+                    Some(candidate_rules.configuration()),
+                )
                 && graphs[0].target(change.importer, name, previous).is_none()
                 && graphs[1].target(change.importer, name, next).is_none()
             {
