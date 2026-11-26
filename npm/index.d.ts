@@ -1,4 +1,4 @@
-/** Effective pnpm settings. Set packageManager to an exact pnpm@version for version-specific rules. */
+/** Effective pnpm settings. Set packageManager to an exact pnpm@version to override the version inferred from the manifest and bootstrap lock. */
 export type Configuration = Record<string, unknown> & { packageManager?: string }
 export type Manifest = Record<string, unknown>
 export type Manifests = Record<string, Manifest>

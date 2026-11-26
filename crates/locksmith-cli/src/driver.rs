@@ -148,6 +148,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = crate::merge::with_context(files, &context, &policy, &project.config, network)?;
+    let result =
+        crate::merge::Sources::read(files)?.with_context(&context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

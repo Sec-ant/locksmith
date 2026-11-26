@@ -15,28 +15,6 @@ pub(super) fn decode<T: DeserializeOwned>(raw: Value) -> Result<T> {
     serde_json::from_value(raw).map_err(|error| LockfileError::InvalidDocument(error.to_string()))
 }
 
-fn configuration(raw: &Value, manifest: Option<&Value>) -> Result<WorkspaceConfig> {
-    let version = match raw.get("packageManager") {
-        Some(manager) => {
-            let version = manager
-                .as_str()
-                .and_then(|s| s.strip_prefix("pnpm@"))
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| {
-                    LockfileError::InvalidDocument(
-                        "packageManager must be an exact pnpm@version".into(),
-                    )
-                })?;
-            Some(version)
-        }
-        None => manifest.and_then(|root| WorkspaceConfig::project_pnpm_version(root, None)),
-    };
-    match version {
-        Some(version) => WorkspaceConfig::from_pnpm_version(raw, &version),
-        None => WorkspaceConfig::from_pnpm(raw),
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum Request {
@@ -124,23 +102,26 @@ impl Merge {
         theirs: locksmith::MergeInput<'_>,
     ) -> Result<Lockfile> {
         let root = self.manifests.get(".");
-        let [b, o, t] = self
-            .configurations
-            .each_ref()
-            .map(|raw| configuration(raw, root));
+        let target = match self.target {
+            Target::Ours => locksmith::MergeTarget::Ours,
+            Target::Theirs => locksmith::MergeTarget::Theirs,
+        };
+        let (branches, config) = target.workspace_configurations(
+            root,
+            [&base, &ours, &theirs],
+            self.configurations.each_ref(),
+            &self.configuration,
+        )?;
         let registry = registry(self.registry)?;
         locksmith::merge(
             base,
             ours,
             theirs,
             Some(&locksmith::MergeContext {
-                target: match self.target {
-                    Target::Ours => locksmith::MergeTarget::Ours,
-                    Target::Theirs => locksmith::MergeTarget::Theirs,
-                },
+                target,
                 manifests: &self.manifests,
-                configurations: [&b?, &o?, &t?],
-                configuration: &configuration(&self.configuration, root)?,
+                configurations: branches.each_ref(),
+                configuration: &config,
                 patches: &self.patches,
                 registry: registry.as_ref(),
             }),
@@ -178,12 +159,24 @@ impl Converge {
         let before = self
             .baseline_configuration
             .as_ref()
-            .map(|raw| configuration(raw, root.and_then(|c| c.before.as_ref())))
+            .map(|raw| {
+                WorkspaceConfig::from_pnpm_context(
+                    raw,
+                    root.and_then(|c| c.before.as_ref()),
+                    baseline.recorded_pnpm_version(),
+                )
+            })
             .transpose()?;
         let after = self
             .configuration
             .as_ref()
-            .map(|raw| configuration(raw, root.and_then(|c| c.after.as_ref())))
+            .map(|raw| {
+                WorkspaceConfig::from_pnpm_context(
+                    raw,
+                    root.and_then(|c| c.after.as_ref()),
+                    candidate.recorded_pnpm_version(),
+                )
+            })
             .transpose()?;
         let registry = registry(self.registry)?;
         let changes: Vec<_> = changes
@@ -233,10 +226,13 @@ impl Repair {
             .parents
             .into_iter()
             .map(|p| {
-                Ok((
-                    Lockfile::try_from(p.yaml)?,
-                    configuration(&p.configuration, root)?,
-                ))
+                let lock = Lockfile::try_from(p.yaml)?;
+                let config = WorkspaceConfig::from_pnpm_context(
+                    &p.configuration,
+                    root,
+                    lock.recorded_pnpm_version(),
+                )?;
+                Ok((lock, config))
             })
             .collect::<Result<Vec<_>>>()?;
         let parents: Vec<_> = parents.iter().map(|(lock, cfg)| (lock, cfg)).collect();
@@ -245,7 +241,11 @@ impl Repair {
             yaml,
             &locksmith::RepairContext {
                 manifests: &self.manifests,
-                configuration: &configuration(&self.configuration, root)?,
+                configuration: &WorkspaceConfig::from_pnpm_context(
+                    &self.configuration,
+                    root,
+                    locksmith::RepairInput::recorded_pnpm_version(yaml),
+                )?,
                 patches: &self.patches,
                 parents: &parents,
                 registry: registry.as_ref(),
@@ -264,9 +264,12 @@ impl PeerOptions {
     fn rules(&self, lock: &Lockfile) -> Result<PeerRules> {
         let empty = json!({});
         let raw = self.configuration.as_ref().unwrap_or(&empty);
-        let config = configuration(raw, self.manifests.as_ref().and_then(|ms| ms.get(".")))?;
-        let version = config.pnpm_version.or_else(|| lock.recorded_pnpm_version());
-        let matching = PeerVersionMatching::for_pnpm(version.as_ref());
+        let config = WorkspaceConfig::from_pnpm_context(
+            raw,
+            self.manifests.as_ref().and_then(|ms| ms.get(".")),
+            lock.recorded_pnpm_version(),
+        )?;
+        let matching = PeerVersionMatching::for_pnpm(config.pnpm_version.as_ref());
         PeerRules::from_pnpm(raw, matching)
     }
 

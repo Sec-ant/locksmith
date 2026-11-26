@@ -1892,6 +1892,27 @@ fn a_locked_modern_manager_uses_dev_engines_over_a_legacy_pin() {
     let out = repo.cmd(CLI, &["converge", "HEAD"]);
     assert!(out.status.success(), "{}", report(&out));
     assert_eq!(out.stdout, input.as_bytes());
+    let manifest: Value = serde_json::from_str(&repo.git(&["show", "HEAD:package.json"])).unwrap();
+    let member: Value =
+        serde_json::from_str(&repo.git(&["show", "HEAD:apps/web/package.json"])).unwrap();
+    for config in [json!({}), json!({"packageManager":"pnpm@12.21.0"})] {
+        let context = json!({"target":"ours","manifests":{".":manifest,"apps/web":member},
+            "configurations":[{},{},{}],"configuration":config,"patches":{}});
+        repo.write("ctx.json", &context.to_string());
+        let out = repo.cmd(
+            CLI,
+            &[
+                "merge",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yaml",
+                "--context",
+                "ctx.json",
+            ],
+        );
+        assert!(out.status.success(), "{}", report(&out));
+        assert_eq!(graph(&out.stdout), graph(project.as_bytes()));
+    }
 }
 
 #[test]

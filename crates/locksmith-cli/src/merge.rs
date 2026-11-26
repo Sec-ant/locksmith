@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, error::Error, fs, path::Path, thread};
 
-use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget};
+use locksmith::{Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget};
 use serde_json::Value;
 
 use crate::registry::ProjectRc;
@@ -43,53 +43,71 @@ pub(crate) fn read_three<P: AsRef<Path>>(files: [&P; 3]) -> ReadResult<[Lockfile
     ])
 }
 
-pub fn with_context<P: AsRef<Path>>(
-    files: [&P; 3],
-    context: &MergeContext<'_>,
-    policy: &Policy,
-    raw: &Value,
-    network: Option<ProjectRc<'_>>,
-) -> Result<Lockfile> {
-    let parsed = read_three(files);
-    let parsed = match parsed {
-        Ok(locks) => Ok(locks),
-        Err(e)
-            if matches!(
-                e.downcast_ref::<LockfileError>(),
-                Some(LockfileError::Parse(_))
-            ) =>
-        {
-            let [base, ours, theirs] = files.map(fs::read_to_string);
-            Err([base?, ours?, theirs?])
-        }
-        Err(e) => return Err(e as Box<dyn Error>),
-    };
-    let result = crate::registry::resolve(
-        crate::registry::Lookup::Merge,
-        network,
-        raw,
-        context
-            .configuration
-            .pnpm_version
-            .as_ref()
-            .map(|v| v.major()),
-        |registry| {
-            let context = MergeContext {
-                registry,
-                ..*context
-            };
-            match &parsed {
-                Ok(locks) if registry.is_some() => context.merge_with_requests(locks.each_ref()),
-                Ok([b, o, t]) => locksmith::merge(b, o, t, Some(&context)).map_err(|e| vec![e]),
-                Err([b, o, t]) => {
-                    locksmith::merge(b.as_str(), o.as_str(), t.as_str(), Some(&context))
-                        .map_err(|e| vec![e])
-                }
+pub(crate) enum Sources {
+    Parsed([Lockfile; 3]),
+    Yaml([String; 3]),
+}
+
+impl Sources {
+    pub fn read<P: AsRef<Path>>(files: [&P; 3]) -> Result<Self> {
+        match read_three(files) {
+            Ok(locks) => Ok(Self::Parsed(locks)),
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<LockfileError>(),
+                    Some(LockfileError::Parse(_))
+                ) =>
+            {
+                let [base, ours, theirs] = files.map(fs::read_to_string);
+                Ok(Self::Yaml([base?, ours?, theirs?]))
             }
-        },
-    )?;
-    policy.check_peers(raw, &result, context.manifests)?;
-    Ok(result)
+            Err(e) => Err(e as Box<dyn Error>),
+        }
+    }
+
+    fn inputs(&self) -> [MergeInput<'_>; 3] {
+        match self {
+            Self::Parsed(locks) => locks.each_ref().map(MergeInput::from),
+            Self::Yaml(text) => text.each_ref().map(|s| MergeInput::from(s.as_str())),
+        }
+    }
+
+    pub fn with_context(
+        &self,
+        context: &MergeContext<'_>,
+        raw: &Value,
+        network: Option<ProjectRc<'_>>,
+    ) -> Result<Lockfile> {
+        let result = crate::registry::resolve(
+            crate::registry::Lookup::Merge,
+            network,
+            raw,
+            context
+                .configuration
+                .pnpm_version
+                .as_ref()
+                .map(|v| v.major()),
+            |registry| {
+                let context = MergeContext {
+                    registry,
+                    ..*context
+                };
+                if let Self::Parsed(locks) = self
+                    && registry.is_some()
+                {
+                    return context.merge_with_requests(locks.each_ref());
+                }
+                let [base, ours, theirs] = self.inputs();
+                locksmith::merge(base, ours, theirs, Some(&context)).map_err(|e| vec![e])
+            },
+        )?;
+        Policy::from_configuration(context.configuration).check_peers(
+            raw,
+            &result,
+            context.manifests,
+        )?;
+        Ok(result)
+    }
 }
 
 pub fn from_file<P: AsRef<Path>>(
@@ -104,22 +122,15 @@ pub fn from_file<P: AsRef<Path>>(
         _ => return Err("context.target must be ours or theirs".into()),
     };
     let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
-    let policy = Policy::from_manifest(manifests.get(".").ok_or("missing root manifest")?);
+    let root = manifests.get(".").ok_or("missing root manifest")?;
     let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
-    let [base, ours, theirs] = source.each_ref().map(|s| -> Result<_> {
-        if let Some(manager) = s.get("packageManager") {
-            let version = manager
-                .as_str()
-                .and_then(|s| s.strip_prefix("pnpm@"))
-                .and_then(|v| v.parse().ok())
-                .ok_or("context.configurations[].packageManager must be an exact pnpm@version")?;
-            Ok(locksmith::WorkspaceConfig::from_pnpm_version(s, &version)?)
-        } else {
-            Ok(policy.configuration(s)?)
-        }
-    });
-    let configurations = [base?, ours?, theirs?];
-    let config = policy.configuration(&raw["configuration"])?;
+    let inputs = Sources::read(files)?;
+    let (configurations, config) = target.workspace_configurations(
+        Some(root),
+        inputs.inputs().each_ref(),
+        source.each_ref(),
+        &raw["configuration"],
+    )?;
     let patches = serde_json::from_value(raw["patches"].take())?;
     let context = MergeContext {
         registry: None,
@@ -129,10 +140,8 @@ pub fn from_file<P: AsRef<Path>>(
         configuration: &config,
         patches: &patches,
     };
-    with_context(
-        files,
+    inputs.with_context(
         &context,
-        &policy,
         &raw["configuration"],
         allow_network.then_some(ProjectRc::Working),
     )

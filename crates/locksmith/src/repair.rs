@@ -53,6 +53,9 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
+        if !text.contains("\n---") {
+            return None;
+        }
         let text = text.trim_start_matches('\u{feff}');
         let ranges = crate::source::document_ranges(text);
         let [bootstrap, _, ..] = ranges.as_slice() else {

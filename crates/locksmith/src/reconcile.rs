@@ -57,6 +57,33 @@ pub enum MergeTarget {
 }
 
 impl MergeTarget {
+    /// Decode branch and final configurations for a contextual merge. Each branch supplies
+    /// its own bootstrap version. The preferred branch breaks ties for the final configuration.
+    ///
+    /// # Errors
+    /// Returns the configuration errors described by [`crate::WorkspaceConfig::from_pnpm_context`].
+    pub fn workspace_configurations(
+        self,
+        manifest: Option<&Value>,
+        inputs: [&crate::MergeInput<'_>; 3],
+        branches: [&Value; 3],
+        final_settings: &Value,
+    ) -> Result<([crate::WorkspaceConfig; 3], crate::WorkspaceConfig), LockfileError> {
+        let versions = inputs.map(|input| match input {
+            crate::MergeInput::Parsed(lock) => lock.recorded_pnpm_version(),
+            crate::MergeInput::Yaml(yaml) => crate::RepairInput::recorded_pnpm_version(yaml),
+        });
+        let [base, ours, theirs] = [0, 1, 2].map(|i| {
+            crate::WorkspaceConfig::from_pnpm_context(branches[i], manifest, versions[i].clone())
+        });
+        let preferred = [self.index(), self.other_index(), 0]
+            .into_iter()
+            .find_map(|i| versions[i].clone());
+        let final_config =
+            crate::WorkspaceConfig::from_pnpm_context(final_settings, manifest, preferred)?;
+        Ok(([base?, ours?, theirs?], final_config))
+    }
+
     fn other_index(self) -> usize {
         match self {
             Self::Ours => Source::Theirs as usize,
@@ -428,7 +455,11 @@ fn environment_source(
         )
     })?;
     let mut order = std::iter::once(first).chain(matching);
-    let Some(manager) = manifest::PnpmManager::managed(manifest, Some(config)) else {
+    let recorded = order
+        .clone()
+        .find_map(|side| locks[side].recorded_pnpm_version());
+    let Some(manager) = manifest::PnpmManager::managed(manifest, Some(config), recorded.as_ref())
+    else {
         return Ok(first);
     };
     let managers = locks.map(|lock| lock.matches_pnpm_manager(&manager));

@@ -12,8 +12,15 @@ pub(crate) struct PnpmManager<'a> {
 }
 
 impl<'a> PnpmManager<'a> {
-    pub fn managed(manifest: &'a Value, config: Option<&WorkspaceConfig>) -> Option<Self> {
-        let manager = Self::declared(manifest, config.and_then(|c| c.pnpm_version.as_ref()))?;
+    pub fn managed(
+        manifest: &'a Value,
+        config: Option<&WorkspaceConfig>,
+        recorded: Option<&node_semver::Version>,
+    ) -> Option<Self> {
+        let runner = config
+            .and_then(|c| c.pnpm_version.as_ref())
+            .or_else(|| recorded.filter(|v| v.major() >= 11));
+        let manager = Self::declared(manifest, runner)?;
         let policy = config
             .and_then(|c| c.pm_on_fail.as_deref())
             .or(manager.on_fail);

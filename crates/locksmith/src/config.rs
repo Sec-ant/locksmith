@@ -178,6 +178,39 @@ pub struct WorkspaceConfig {
     pub extension_checksum: Option<ExtensionChecksum>,
 }
 impl WorkspaceConfig {
+    /// Decode an API context's effective settings. An explicit `packageManager` option
+    /// selects the runner. Otherwise use the manifest declaration and the bootstrap lock.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid runner override or invalid pnpm settings.
+    pub fn from_pnpm_context(
+        raw: &Value,
+        manifest: Option<&Value>,
+        recorded: Option<node_semver::Version>,
+    ) -> Result<Self, LockfileError> {
+        let version = match raw.get("packageManager") {
+            Some(manager) => Some(
+                manager
+                    .as_str()
+                    .and_then(|s| s.strip_prefix("pnpm@"))
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| {
+                        LockfileError::InvalidDocument(
+                            "packageManager must be an exact pnpm@version".into(),
+                        )
+                    })?,
+            ),
+            None => match manifest {
+                Some(root) => Self::project_pnpm_version(root, recorded),
+                None => recorded,
+            },
+        };
+        match version {
+            Some(version) => Self::from_pnpm_version(raw, &version),
+            None => Self::from_pnpm(raw),
+        }
+    }
+
     /// Read the project's pnpm version, using its locked version for a compatible range
     /// or when the manifest leaves the version unspecified.
     pub fn project_pnpm_version(

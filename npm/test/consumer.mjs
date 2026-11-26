@@ -47,6 +47,22 @@ const context = { target: 'ours', manifests: { '.': {} }, configurations: [{}, {
 assert.equal(await merge(yaml, yaml, yaml, context), yaml);
 assert.equal(await converge(yaml, lock, []), yaml);
 assert.equal(await repair(yaml, context), yaml);
+const modernRoot = { packageManager: 'pnpm@9.15.9', devEngines: { packageManager: { name: 'pnpm', version: '^12.20.0' } } };
+const bootstrap = {
+  lockfileVersion: '9.0',
+  importers: { '.': { packageManagerDependencies: { pnpm: { specifier: '12.21.0', version: '12.21.0' } } } },
+  packages: { 'pnpm@12.21.0': { resolution: {} } }, snapshots: { 'pnpm@12.21.0': {} },
+};
+const managed = `---\n${JSON.stringify(bootstrap)}\n---\nlockfileVersion: '9.0'\nimporters: {'.': {}}\n`;
+const modernContext = { ...context, manifests: { '.': modernRoot } };
+const managedHandle = await parse(managed);
+for (const result of await Promise.all([
+  merge(managed, managedHandle, managed, modernContext),
+  converge(managedHandle, managed, [{ importer: '.', before: modernRoot, after: modernRoot }], { configuration: {} }),
+  repair(managed, modernContext),
+])) {
+  assert.deepEqual(await (await parse(result)).document('environment'), bootstrap);
+}
 await assert.rejects(parse("lockfileVersion: '6.0'"), { code: 'UNSUPPORTED_VERSION', details: { version: '6.0' } });
 const broken = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      foo: {specifier: ^1, version: 1.0.0}\n";
 await assert.rejects(api.inspect(broken), { code: 'INVALID_GRAPH' });
