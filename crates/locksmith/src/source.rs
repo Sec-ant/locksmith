@@ -152,14 +152,20 @@ impl Source {
 pub(crate) fn document_ranges(text: &str) -> Vec<Range<usize>> {
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut offset = 0;
-    for line in text.split_inclusive('\n') {
-        let marker = line.trim_end().strip_prefix("---");
-        if marker.is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(" #")) {
+    let markers = text
+        .starts_with("---")
+        .then_some(0)
+        .into_iter()
+        .chain(text.match_indices("\n---").map(|(offset, _)| offset + 1));
+    for offset in markers {
+        let end = text[offset..]
+            .find('\n')
+            .map_or(text.len(), |newline| offset + newline + 1);
+        let suffix = text[offset + 3..end].trim_end();
+        if suffix.is_empty() || suffix.starts_with(" #") {
             parts.push(start..offset);
-            start = offset + line.len();
+            start = end;
         }
-        offset += line.len();
     }
     parts.push(start..text.len());
     parts.retain(|range| {
