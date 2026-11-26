@@ -69,19 +69,41 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         Ok((manifests, external_members))
     };
     let (mut manifests, external_members) = if directories.len() >= 32 {
-        let boundary = directories
-            .keys()
-            .nth(directories.len() / 2)
-            .unwrap()
-            .clone();
-        let later = directories.split_off(&boundary);
-        // Read two adjacent ranges so the first manifest error keeps its original order.
+        let readers = if directories.len() >= 128
+            && std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() >= 4)
+        {
+            4
+        } else {
+            2
+        };
+        let range_size = directories.len().div_ceil(readers);
+        // Join adjacent ranges in order so the first manifest error is stable.
         std::thread::scope(|scope| -> Result<_> {
-            let later = scope.spawn(|| collect(later).map_err(|error| error.to_string()));
-            let (mut manifests, mut external) = collect(directories)?;
-            let (mut more, mut links) = later.join().expect("manifest reader panicked")?;
-            manifests.append(&mut more);
-            external.append(&mut links);
+            let mut workers = Vec::with_capacity(readers - 1);
+            while directories.len() > range_size {
+                let boundary = directories.keys().nth(range_size).unwrap().clone();
+                let later = directories.split_off(&boundary);
+                let range = std::mem::replace(&mut directories, later);
+                workers
+                    .push(scope.spawn(move || collect(range).map_err(|error| error.to_string())));
+            }
+            let last = collect(directories);
+            let results = workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .expect("manifest reader panicked")
+                        .map_err(Into::into)
+                })
+                .chain([last]);
+            let mut manifests = BTreeMap::new();
+            let mut external = BTreeSet::new();
+            for result in results {
+                let (mut more, mut links) = result?;
+                manifests.append(&mut more);
+                external.append(&mut links);
+            }
             Ok((manifests, external))
         })?
     } else {
