@@ -660,11 +660,13 @@ impl Members {
         if entries.len() < 32 {
             return self.visit_entries(entries, id, descend, ancestors, split, found);
         }
-        let cpus = std::thread::available_parallelism().map_or(2, |cpus| cpus.get());
-        let readers = [8, 4]
-            .into_iter()
-            .find(|&readers| readers <= cpus && readers * 32 <= entries.len())
-            .unwrap_or(2);
+        let readers = if entries.len() >= 128
+            && std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() >= 4)
+        {
+            4
+        } else {
+            2
+        };
         let range_size = entries.len().div_ceil(readers);
         let collect = |entries, ancestors: &mut BTreeSet<PathBuf>| -> Result<_> {
             let mut discovered = Vec::new();
