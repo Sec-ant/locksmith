@@ -138,11 +138,11 @@ pub(super) fn repair<'a>(
                         entry.clone()
                     } else if let Some(pin) = retained {
                         let base = graph::package_key(pin);
-                        let version = manifest::alias(range).map_or(base, |(pkg, _)| {
-                            base.strip_prefix(pkg)
-                                .and_then(|v| v.strip_prefix('@'))
-                                .unwrap_or(base)
-                        });
+                        let effective =
+                            manifest::pinned_specifier(range, pin, Some(context.configuration));
+                        let target = manifest::alias(effective).map_or(name, |(target, _)| target);
+                        let version =
+                            reconcile::version_from_pin(name, target, base).unwrap_or(base);
                         json!({"specifier":range,"version":version})
                     } else {
                         return Err(reconcile::published::need_version(

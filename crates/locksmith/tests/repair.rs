@@ -237,6 +237,56 @@ fn a_valid_catalog_range_can_have_two_different_locked_versions() {
 }
 
 #[test]
+fn repair_rebuilds_a_wildcard_catalog_from_a_retained_prerelease_pin() {
+    let release = "1.0.0-beta.1";
+    let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"tool":"catalog:"}}))]);
+    for range in ["*", "npm:*"] {
+        let config = WorkspaceConfig::from_pnpm_version(
+            &json!({"catalog":{"tool":range}}),
+            &"12.21.0".parse().unwrap(),
+        )
+        .unwrap();
+        for pin in ["tool@1.0.0-beta.1", release] {
+            let input = json!({"lockfileVersion":"9.0",
+                "catalogs":{"default":{"tool":{"specifier":"npm:old-tool@^1","version":"1.0.0"}}},
+                "importers":{".":{"dependencies":{"tool":{"specifier":"catalog:","version":pin}}}},
+                "packages":{"tool@1.0.0-beta.1":{"resolution":{}}},
+                "snapshots":{"tool@1.0.0-beta.1":{}}
+            });
+            let output = repair(
+                &input.to_string(),
+                &RepairContext {
+                    manifests: &manifests,
+                    configuration: &config,
+                    patches: &BTreeMap::new(),
+                    parents: &[],
+                    registry: None,
+                },
+            )
+            .unwrap();
+            let project = output.project().unwrap();
+            assert_eq!(
+                project["catalogs"]["default"]["tool"],
+                json!({"specifier":range,"version":release})
+            );
+            assert_eq!(
+                project["importers"]["."]["dependencies"]["tool"]["version"],
+                pin
+            );
+            output
+                .validate_workspace(
+                    &manifests,
+                    &Default::default(),
+                    &config,
+                    &BTreeMap::new(),
+                    |_| Ok(None),
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[test]
 fn local_catalog_links_keep_the_recorded_catalog_shape() {
     let manifests = BTreeMap::from([
         (".".into(), json!({"dependencies":{"sdk":"catalog:"}})),
