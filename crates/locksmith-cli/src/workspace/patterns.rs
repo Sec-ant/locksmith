@@ -87,7 +87,7 @@ pub(super) fn expand(
         {
             continue;
         }
-        if !runner.is_some_and(|v| v.major() <= 11) {
+        if runner.is_none_or(|v| v.major() >= 12) {
             result.push(alt);
             continue;
         }
