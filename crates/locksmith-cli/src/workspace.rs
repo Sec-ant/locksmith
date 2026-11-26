@@ -251,6 +251,9 @@ pub fn manifests(
     let mut manifests = BTreeMap::from([(".".into(), project.root.clone())]);
     if project.workspace {
         let members = Members::new(project)?;
+        if members.include.is_empty() {
+            return Ok(manifests);
+        }
         let mut paths = BTreeMap::new();
         let root = format!("{tree}:{}", prefix.trim_end_matches('/'));
         members.committed_paths(&root, "", tree, prefix, &mut paths, blobs)?;
