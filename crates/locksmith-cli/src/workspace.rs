@@ -1,3 +1,5 @@
+mod patterns;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -453,27 +455,13 @@ impl Members {
             if pattern.contains(['(', ')', '\\']) || pattern.starts_with(['!', '/']) {
                 return Err(format!("unsupported workspace glob {value:?}").into());
             }
-            // Expand before normalizing: alternatives can have different depths.
-            let expanded = brace_expansion::expand_with_max(pattern, 1025);
-            if expanded.len() > 1024 {
-                return Err(format!("too many alternatives in workspace glob {value:?}").into());
-            }
-            for alternative in expanded {
-                let mut parts = Vec::new();
-                for part in glob_components(&alternative) {
-                    match part {
-                        "" | "." => (),
-                        ".." if parts.last().is_some_and(|&p| p != "..") => {
-                            parts.pop();
-                        }
-                        ".." if !on_disk => {
-                            return Err(
-                                format!("workspace glob escapes the root: {value:?}").into()
-                            );
-                        }
-                        _ => parts.push(part),
-                    }
-                }
+            for alternative in patterns::expand(
+                pattern,
+                value.starts_with('!'),
+                project.pnpm_version.as_ref(),
+                on_disk,
+            )? {
+                let parts = patterns::components(&alternative);
                 if !parts.is_empty() {
                     for &part in &parts {
                         if !this.component_patterns.contains_key(part) {
@@ -776,30 +764,6 @@ impl Members {
         let matches = |p: &Pattern| p.matches_with(&path, GLOB_OPTIONS);
         self.include.iter().any(matches) && !self.exclude.iter().any(matches)
     }
-}
-
-/// Split path components without treating a slash inside a glob character class as a separator.
-fn glob_components(pattern: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut chars = pattern.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        match ch {
-            '[' => {
-                chars.next_if(|(_, c)| *c == '!');
-                // The first character in a class can be a literal closing bracket.
-                chars.next();
-                chars.by_ref().find(|(_, c)| *c == ']');
-            }
-            '/' => {
-                parts.push(&pattern[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&pattern[start..]);
-    parts
 }
 
 fn excluded_directory(path: &str) -> bool {

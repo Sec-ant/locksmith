@@ -1142,6 +1142,55 @@ fn workspace_globs_can_contain_a_slash_in_a_character_class() {
 }
 
 #[test]
+fn workspace_walks_follow_the_runners_character_class_semantics() {
+    let repo = Repo::new();
+    let names = ["web", "veb", "[v/w]eb", "fo/bar", "foobar", "foabar"];
+    for (index, name) in names.iter().enumerate() {
+        repo.write(
+            &format!("apps/{name}/package.json"),
+            &json!({"name":format!("pkg{index}")}).to_string(),
+        );
+    }
+    let ordinary = ["web", "veb", "foobar", "foabar"];
+    let bounded = &["apps/[v/w]eb", "apps/fo[o/a]bar"][..];
+    let recursive = &["apps/**/[v/w]eb", "apps/**/fo[o/a]bar"][..];
+    let excluded = &["apps/**", "!apps/[v/w]eb", "!apps/fo[o/a]bar"][..];
+    let grouped = &["apps/{[v/w]eb,absent}", "apps/{fo[o/a]bar,absent}"][..];
+    // Expected members from pnpm install --lockfile-only at the indicated releases.
+    for (version, patterns, expected) in [
+        ("10.5.2", bounded, &ordinary[..]),
+        ("10.6.0", bounded, &names[..]),
+        ("11.28.12", bounded, &names[..]),
+        ("9.15.9", recursive, &names[..]),
+        ("12.14.0", bounded, &ordinary[..]),
+        ("12.15.0", bounded, &[][..]),
+        ("12.21.0", recursive, &ordinary[..]),
+        ("12.21.0", excluded, &["[v/w]eb", "fo/bar"][..]),
+        ("12.21.0", grouped, &ordinary[..]),
+    ] {
+        repo.write(
+            "package.json",
+            &json!({"packageManager":format!("pnpm@{version}")}).to_string(),
+        );
+        repo.write(
+            "pnpm-workspace.yaml",
+            &json!({"packages":patterns,"pmOnFail":"ignore"}).to_string(),
+        );
+        let mut lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+        for name in expected {
+            lock["importers"][format!("apps/{name}")] = json!({});
+        }
+        repo.write("pnpm-lock.yaml", &lock.to_string());
+        let out = repo.cmd(CLI, &["validate", "--workspace"]);
+        assert!(
+            out.status.success(),
+            "{version} {patterns:?}: {}",
+            report(&out)
+        );
+    }
+}
+
+#[test]
 fn normalized_workspace_globs_and_pnpm_manifest_formats_keep_healthy_importers() {
     let repo = Repo::new();
     let lock = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
