@@ -266,17 +266,12 @@ pub fn manifests(
                     .map(|(id, (name, _))| format!("{prefix}{id}/{name}")),
             )?;
         }
-        let mut paths = paths.into_iter().peekable();
-        while paths.peek().is_some() {
-            let batch: Vec<_> = paths.by_ref().take(git::BLOB_BATCH_SIZE).collect();
-            blobs.queue_objects(batch.iter().map(|(_, (_, oid))| oid.as_str()))?;
-            for (id, (name, oid)) in batch {
-                let text = blobs
-                    .read_object_reply(&oid)?
-                    .ok_or_else(|| format!("missing manifest at {tree}:{prefix}{id}/{name}"))?;
-                let manifest = parse_manifest(&format!("{prefix}{id}/{name}"), &text)?;
-                manifests.insert(id, manifest);
-            }
+        for (id, (name, oid)) in paths {
+            let text = blobs
+                .read_object(&oid)?
+                .ok_or_else(|| format!("missing manifest at {tree}:{prefix}{id}/{name}"))?;
+            let manifest = parse_manifest(&format!("{prefix}{id}/{name}"), &text)?;
+            manifests.insert(id, manifest);
         }
     }
     Ok(manifests)
