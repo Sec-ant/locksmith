@@ -266,6 +266,30 @@ fn only_active_hook_conflicts_block_the_lockfile_merge() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn only_the_selected_default_hook_follows_conflicted_symlink_targets() {
+    for (hook, active) in [(".pnpmfile.cjs", true), (".pnpmfile.mjs", false)] {
+        let repo = Repo::new();
+        repo.write("tools/hook", "module.exports = {};\n");
+        std::os::unix::fs::symlink("tools/hook", repo.0.path().join(hook)).unwrap();
+        repo.commit("store the hook through a symlink");
+        repo.git(&["branch", "-f", "topic", "HEAD"]);
+        repo.branches(|r, side| r.write("tools/hook", side));
+        let out = repo.cmd("git", &["merge", "--no-edit", "topic"]);
+        assert!(!out.status.success());
+        let conflicts = repo.git(&["diff", "--name-only", "--diff-filter=U"]);
+        assert!(conflicts.lines().any(|p| p == "tools/hook"));
+        assert_eq!(
+            conflicts.lines().any(|p| p == "pnpm-lock.yaml"),
+            active,
+            "{hook}: {}",
+            report(&out)
+        );
+    }
+}
+
 #[test]
 fn names_conflicted_configuration_and_preserves_all_lock_stages() {
     let r = Repo::new();
@@ -3167,6 +3191,18 @@ fn an_unresolved_member_directory_link_blocks_the_lock_even_if_the_preview_has_n
 
 #[cfg(unix)]
 #[test]
+fn an_untracked_link_through_a_regular_file_is_not_a_workspace_directory() {
+    let repo = Repo::new();
+    repo.write("file", "not a directory");
+    std::os::unix::fs::symlink("../file/child", repo.0.path().join("apps/broken")).unwrap();
+    for args in [["converge", "HEAD"], ["validate", "--workspace"]] {
+        let out = repo.cmd(CLI, &args);
+        assert!(out.status.success(), "{}", report(&out));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn converge_ignores_a_cyclic_directory_symlink_like_pnpm() {
     let r = Repo::new();
     std::os::unix::fs::symlink("self", r.0.path().join("apps/self")).unwrap();
@@ -3345,22 +3381,105 @@ fn workspace_validation_uses_the_effective_registry_for_implicit_config_tarballs
     for file in ["pnpm-workspace.yaml", "pnpm-lock.yaml"] {
         repo.write(file, &fs::read_to_string(root.join(file)).unwrap());
     }
-    let converge = || {
+    let converge = |host| {
         Command::new(CLI)
             .current_dir(repo.0.path())
-            .env("pnpm_config_registry", "https://private.example")
+            .env("pnpm_config_registry", host)
             .args(["converge", "HEAD"])
             .output()
             .unwrap()
     };
-    let out = converge();
+    let out = converge("https://private.example");
     assert!(out.status.success(), "{}", report(&out));
+    let mismatch = converge("https://other.example");
+    assert!(!mismatch.status.success());
+    assert!(
+        report(&mismatch).contains("bootstrap graph differs from the configuration dependencies"),
+        "{}",
+        report(&mismatch)
+    );
     let cfg = fs::read_to_string(root.join("pnpm-workspace.yaml")).unwrap();
     repo.write(
         "pnpm-workspace.yaml",
         &format!("{cfg}\nregistries: {{default: 'https://other.example'}}\n"),
     );
-    assert!(!converge().status.success());
+    let changed = converge("https://private.example");
+    assert!(!changed.status.success());
+    assert!(
+        report(&changed).contains("changed workspace setting registries"),
+        "{}",
+        report(&changed)
+    );
+
+    let mut explicit = boot.clone();
+    for (url, valid) in [
+        ("https://private.example/tool/-/tool-1.0.0.tgz", true),
+        ("https://other.example/custom", false),
+    ] {
+        explicit["packages"]["tool@1.0.0"]["resolution"]["tarball"] = json!(url);
+        write_input(
+            root,
+            "pnpm-lock.yaml",
+            format!("---\n{explicit}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n"),
+        );
+        let out = Command::new(CLI)
+            .current_dir(root)
+            .env("npm_config_userconfig", root)
+            .args(["validate", "--workspace"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), valid, "{url}: {}", report(&out));
+        if !valid {
+            assert!(
+                report(&out).contains("configDependencies differ"),
+                "{}",
+                report(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn merge_can_select_an_explicit_bootstrap_when_another_candidate_needs_registry_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let url = "https://private.example/tool/-/tool-1.0.0.tgz";
+    let settings = json!({
+        "configDependencies": {"tool": {"integrity": "1.0.0+sha512-fixture", "tarball": url}}
+    });
+    let context = json!({
+        "target": "ours",
+        "manifests": {".": {}},
+        "configurations": [settings, settings, settings],
+        "configuration": settings,
+        "patches": {}
+    });
+    write_input(root, "ctx", context.to_string());
+    let mut boot = json!({
+        "lockfileVersion": "9.0",
+        "importers": {".": {"configDependencies": {"tool": {"specifier": "1.0.0", "version": "1.0.0"}}}},
+        "packages": {"tool@1.0.0": {"resolution": {"integrity": "sha512-fixture"}}},
+        "snapshots": {"tool@1.0.0": {}}
+    });
+    let lock =
+        |env: &Value| format!("---\n{env}\n---\nlockfileVersion: '9.0'\nimporters: {{.: {{}}}}\n");
+    write_input(root, "implicit", lock(&boot));
+    boot["packages"]["tool@1.0.0"]["resolution"]["tarball"] = json!(url);
+    write_input(root, "explicit", lock(&boot));
+    for (ours, theirs) in [("explicit", "implicit"), ("implicit", "explicit")] {
+        let out = Command::new(CLI)
+            .current_dir(root)
+            .env("npm_config_userconfig", root)
+            .args(["merge", "implicit", ours, theirs, "--context", "ctx"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", report(&out));
+        let result = Lockfile::parse(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+        assert_eq!(
+            result.environment().unwrap()["packages"]["tool@1.0.0"]["resolution"]["tarball"],
+            url
+        );
+    }
 }
 
 #[test]

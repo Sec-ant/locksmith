@@ -49,7 +49,7 @@ pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
         lock.validate()?;
         return Err("workspace validation requires effective manifests when a pnpmfile is active or recorded in the lock".into());
     }
-    let config = project.configuration()?;
+    let config = project.bootstrap_configuration(Some((&lock).into()), || read(".npmrc"))?;
     let patches = workspace::patches(&config, "", read)?;
     let mut manifests = BTreeMap::new();
     let canonical_root = root.canonicalize()?;

@@ -20,9 +20,6 @@ fn project_conflicts(
     for project in projects {
         workspaces
             .push(Members::new(project).map_err(|e| format!("{prefix}pnpm-workspace.yaml: {e}"))?);
-        if project.config["ignorePnpmfile"] != true {
-            inputs.extend(workspace::DEFAULT_HOOK_FILES.into_iter().map(str::to_owned));
-        }
         inputs.extend(workspace::file_inputs(&project.config)?);
     }
     workspace::check_conflicts(conflicts, |path| {
@@ -113,9 +110,11 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
     let root = workspace::read_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
     let (project, config, merge) =
-        target.workspace_for_bootstrap(Some(&root), locks.inputs(), |version| -> Result<_> {
+        target.workspace_for_candidate(Some(&root), locks.inputs(), |lock| -> Result<_> {
+            let version = lock.and_then(locksmith::Lockfile::recorded_pnpm_version);
             let project = Project::from_manifest(root.clone(), version, &mut read)?;
-            let config = project.configuration()?;
+            let config =
+                project.bootstrap_configuration(lock.map(Into::into), || read(".npmrc"))?;
             Ok((project, config))
         })?;
     let dependency_inputs = project_conflicts(&conflicts, prefix, &[&project])?;

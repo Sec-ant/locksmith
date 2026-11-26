@@ -56,17 +56,21 @@ struct RegistrySettings {
 /// Resolve only the registry routes needed to verify explicitly declared bootstrap tarballs.
 pub fn bootstrap_registries(
     workspace: &Value,
+    lock: Option<locksmith::MergeInput<'_>>,
     read_project_rc: impl FnOnce() -> Result<Option<String>>,
 ) -> Result<BTreeMap<String, String>> {
     let mut routes = BTreeMap::new();
     let Some(deps) = workspace["configDependencies"].as_object() else {
         return Ok(routes);
     };
-    let mut names = deps
-        .iter()
-        .filter(|(_, dep)| dep.get("tarball").is_some())
-        .peekable();
-    if names.peek().is_some() {
+    if !deps.values().any(|dep| dep.get("tarball").is_some()) {
+        return Ok(routes);
+    }
+    let Some(lock) = lock else {
+        return Ok(routes);
+    };
+    let names = lock.implicit_config_tarballs(deps);
+    if !names.is_empty() {
         let rc = read_project_rc()?;
         let settings = RegistrySettings::load(
             workspace,
@@ -75,7 +79,7 @@ pub fn bootstrap_registries(
                 credentials: None,
             },
         )?;
-        for (name, _) in names {
+        for name in names {
             let scope = name.split_once('/').map_or("default", |(scope, _)| scope);
             if !routes.contains_key(scope) {
                 routes.insert(scope.to_owned(), settings.registry(name)?);

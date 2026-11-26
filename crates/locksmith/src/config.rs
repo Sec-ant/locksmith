@@ -179,6 +179,23 @@ pub struct WorkspaceConfig {
     /// Checksum format for package extensions, when the package manager is known.
     pub extension_checksum: Option<ExtensionChecksum>,
 }
+pub(crate) fn locked_config_resolution<'a>(
+    env: &'a Value,
+    name: &str,
+    pin: &Value,
+    version: &str,
+    integrity: &str,
+) -> Option<&'a Value> {
+    let resolution = env["packages"]
+        .get(format!("{name}@{version}"))?
+        .get("resolution")?;
+    (integrity.starts_with("sha")
+        && pin["specifier"] == version
+        && pin["version"] == version
+        && resolution["integrity"] == integrity)
+        .then_some(resolution)
+}
+
 impl WorkspaceConfig {
     /// Decode an API context's effective settings. An explicit `packageManager` option
     /// selects the runner. Otherwise use the manifest declaration and the bootstrap lock.
@@ -308,30 +325,34 @@ impl WorkspaceConfig {
                 .split_once('+')
                 .filter(|(_, hash)| hash.starts_with("sha"))
             {
-                let resolution = &environment.expect("recorded bootstrap dependency")["packages"]
-                    [format!("{name}@{version}")]["resolution"];
-                pin["specifier"] == version
-                    && pin["version"] == version
-                    && resolution["integrity"] == integrity
-                    && declaration.get("tarball").is_none_or(|url| {
-                        match resolution.get("tarball") {
-                            Some(locked) => locked == url,
-                            None => {
-                                // pnpm omits a registry's conventional tarball URL, even when explicitly configured.
-                                let bare = name.rsplit('/').next().unwrap();
-                                let base = name
-                                    .split_once('/')
-                                    .and_then(|(scope, _)| self.config_registries.get(scope))
-                                    .or_else(|| self.config_registries.get("default"))
-                                    .map_or("https://registry.npmjs.org", String::as_str);
-                                url.as_str()
-                                    == Some(&format!(
-                                        "{}/{name}/-/{bare}-{version}.tgz",
-                                        base.trim_end_matches('/')
-                                    ))
-                            }
+                let Some(resolution) = locked_config_resolution(
+                    environment.expect("recorded bootstrap dependency"),
+                    name,
+                    pin,
+                    version,
+                    integrity,
+                ) else {
+                    return false;
+                };
+                declaration.get("tarball").is_none_or(|url| {
+                    match resolution.get("tarball") {
+                        Some(locked) => locked == url,
+                        None => {
+                            // pnpm omits a registry's conventional tarball URL, even when explicitly configured.
+                            let bare = name.rsplit('/').next().unwrap();
+                            let base = name
+                                .split_once('/')
+                                .and_then(|(scope, _)| self.config_registries.get(scope))
+                                .or_else(|| self.config_registries.get("default"))
+                                .map_or("https://registry.npmjs.org", String::as_str);
+                            url.as_str()
+                                == Some(&format!(
+                                    "{}/{name}/-/{bare}-{version}.tgz",
+                                    base.trim_end_matches('/')
+                                ))
                         }
-                    })
+                    }
+                })
             } else {
                 pin["specifier"] == spec
                     && pin["version"]

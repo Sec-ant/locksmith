@@ -1,11 +1,11 @@
 //! Select a complete pnpm bootstrap graph and interpret the project with its runner.
-use std::borrow::Cow;
+use std::cell::OnceCell;
 
 use node_semver::Version;
 
 use super::{MergeTarget, Source, missing};
 use crate::{
-    ContextualMerge, Lockfile, LockfileError, MergeInput, RepairInput, Value, WorkspaceConfig,
+    ContextualMerge, Lockfile, LockfileError, MergeInput, Value, WorkspaceConfig,
     manifest::ManagerPolicy,
 };
 
@@ -22,7 +22,7 @@ impl MergeTarget {
         branches: [&Value; 3],
         final_settings: &Value,
     ) -> Result<([WorkspaceConfig; 3], WorkspaceConfig, ContextualMerge<'a>), LockfileError> {
-        let bootstrap = bootstrap_locks(inputs);
+        let bootstrap = inputs.map(MergeInput::bootstrap);
         let locks = bootstrap.each_ref().map(|(lock, _)| lock.as_deref());
         let [base, ours, theirs] = [0, 1, 2].map(|i| {
             let version = locks[i].and_then(Lockfile::recorded_pnpm_version);
@@ -33,7 +33,8 @@ impl MergeTarget {
             manifest,
             locks,
             bootstrap.each_ref().map(|(_, provisional)| *provisional),
-            |version| {
+            |lock| {
+                let version = lock.and_then(Lockfile::recorded_pnpm_version);
                 WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
                     .map(|config| ((), config))
             },
@@ -60,9 +61,25 @@ impl MergeTarget {
         self,
         manifest: Option<&Value>,
         inputs: [MergeInput<'a>; 3],
-        load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
+        mut load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
     ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
-        let bootstrap = bootstrap_locks(inputs);
+        self.workspace_for_candidate(manifest, inputs, |lock| {
+            load(lock.and_then(Lockfile::recorded_pnpm_version))
+        })
+    }
+
+    /// Select a bootstrap graph using the settings needed to interpret each candidate.
+    /// The loader can use explicit artifact URLs in that lock without resolving registry routes.
+    ///
+    /// # Errors
+    /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
+    pub fn workspace_for_candidate<'a, T, E: From<LockfileError>>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
+    ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
+        let bootstrap = inputs.map(MergeInput::bootstrap);
         let (project, config, bootstrap) = select_workspace(
             self,
             manifest,
@@ -92,51 +109,52 @@ fn input_error<E: From<LockfileError>>(inputs: [MergeInput<'_>; 3], error: E) ->
         .unwrap_or(error)
 }
 
-fn bootstrap_locks<'a>(inputs: [MergeInput<'a>; 3]) -> [(Option<Cow<'a, Lockfile>>, bool); 3] {
-    inputs.map(|input| match input {
-        MergeInput::Parsed(lock) => (Some(Cow::Borrowed(lock)), false),
-        MergeInput::Yaml(yaml) => RepairInput::bootstrap_lockfile(yaml)
-            .map_or((None, false), |(lock, alternatives)| {
-                (Some(Cow::Owned(lock)), alternatives)
-            }),
-    })
-}
-
 fn select_workspace<T, E: From<LockfileError>>(
     target: MergeTarget,
     manifest: Option<&Value>,
     locks: [Option<&Lockfile>; 3],
     provisional: [bool; 3],
-    mut load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
+    mut load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
 ) -> Result<(T, WorkspaceConfig, usize), E> {
-    let versions = locks.map(|lock| lock.and_then(Lockfile::recorded_pnpm_version));
-    if versions[0] == versions[1] && versions[0] == versions[2] {
-        let (project, config) = load(versions[0].clone())?;
-        let side = environment_source(locks, target, manifest, [Some(&config); 3], provisional)?;
-        return Ok((project, config, side));
-    }
-    let mut candidates = versions.map(load);
-    // Older runners can reject settings that are valid for the selected newer runner.
-    if let [Err(first), Err(_), Err(_)] = candidates {
-        return Err(first);
-    }
-    let configs = candidates
-        .each_ref()
-        .map(|result| result.as_ref().ok().map(|(_, config)| config));
-    let side = environment_source(locks, target, manifest, configs, provisional)?;
-    candidates.swap(0, side);
-    let [selected, _, _] = candidates;
-    let (project, config) = selected?;
+    let mut candidates = [OnceCell::new(), OnceCell::new(), OnceCell::new()];
+    let selected = environment_source(
+        locks,
+        target,
+        manifest,
+        |side| {
+            candidates[side]
+                .get_or_init(|| load(locks[side]))
+                .as_ref()
+                .ok()
+                .map(|(_, config)| config)
+        },
+        provisional,
+    );
+    let side = match selected {
+        Ok(side) => side,
+        Err(error) => {
+            // An older runner can reject settings valid for a newer candidate.
+            if let [Some(Err(first)), Some(Err(_)), Some(Err(_))] =
+                candidates.map(OnceCell::into_inner)
+            {
+                return Err(first);
+            }
+            return Err(error.into());
+        }
+    };
+    let (project, config) = candidates[side]
+        .take()
+        .expect("selected candidate was loaded")?;
     Ok((project, config, side))
 }
 
 // Package-manager dependencies and their transitive platform binaries form a
 // separate lock document. Reuse the complete graph for the declared manager.
-pub(super) fn environment_source(
+pub(super) fn environment_source<'a>(
     locks: [Option<&Lockfile>; 3],
     target: MergeTarget,
     root: Option<&Value>,
-    configurations: [Option<&WorkspaceConfig>; 3],
+    mut configuration: impl FnMut(usize) -> Option<&'a WorkspaceConfig>,
     provisional: [bool; 3],
 ) -> Result<usize, LockfileError> {
     let mut best = None;
@@ -144,7 +162,7 @@ pub(super) fn environment_source(
     let mut matched_config = false;
     let mut wanted = None;
     for side in [target.index(), target.other_index(), Source::Base as usize] {
-        let Some(config) = configurations[side] else {
+        let Some(config) = configuration(side) else {
             continue;
         };
         let lock = locks[side];

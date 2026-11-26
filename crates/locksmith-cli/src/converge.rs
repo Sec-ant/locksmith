@@ -37,13 +37,15 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_project(&working);
-    let base_config = project.configuration()?;
-    let config = working.configuration()?;
     let path = format!("{prefix}pnpm-lock.yaml");
     let baseline_text = blobs
         .read(tree, &path)?
         .ok_or_else(|| format!("missing {reference}:{path}"))?;
     let working_text = fs::read_to_string("pnpm-lock.yaml")?;
+    let base_config = project.configuration()?;
+    let config = working.bootstrap_configuration(Some(working_text.as_str().into()), || {
+        working_file(".npmrc")
+    })?;
     let upgrade = base_config.changes_pnpm_version(&config);
     for key in project
         .config

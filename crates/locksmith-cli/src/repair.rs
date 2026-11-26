@@ -24,7 +24,9 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let version = RepairInput::recorded_pnpm_version(&text);
     let project = Project::read(&mut blobs, commit, prefix, version)?;
     let policy = Policy::from_project(&project);
-    let config = project.configuration()?;
+    let config = project.bootstrap_configuration(Some(text.as_str().into()), || {
+        blobs.read(commit, &format!("{prefix}.npmrc"))
+    })?;
     let patches = workspace::patches(&config, prefix, |file| blobs.read(commit, file))?;
     let manifests = workspace::manifests(&project, &mut blobs, commit, prefix)?;
     // Release Git's mapped packfiles before allocating the lockfile graph.

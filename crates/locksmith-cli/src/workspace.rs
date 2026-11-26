@@ -77,7 +77,6 @@ pub(crate) fn parse_manifest(path: &str, text: &str) -> Result<Value> {
 }
 
 pub struct Project {
-    bootstrap_registries: BTreeMap<String, String>,
     pub root: Value,
     pub config: Value,
     pub workspace: bool,
@@ -85,10 +84,22 @@ pub struct Project {
 }
 impl Project {
     pub fn configuration(&self) -> Result<locksmith::WorkspaceConfig> {
-        let mut config = crate::policy::Policy::from_project(self).configuration(&self.config)?;
+        Ok(crate::policy::Policy::from_project(self).configuration(&self.config)?)
+    }
+
+    pub fn bootstrap_configuration(
+        &self,
+        lock: Option<locksmith::MergeInput<'_>>,
+        read_rc: impl FnOnce() -> Result<Option<String>>,
+    ) -> Result<locksmith::WorkspaceConfig> {
+        let mut config = self.configuration()?;
         config
             .config_registries
-            .extend(self.bootstrap_registries.clone());
+            .extend(crate::registry::bootstrap_registries(
+                &self.config,
+                lock,
+                read_rc,
+            )?);
         Ok(config)
     }
 
@@ -128,8 +139,6 @@ impl Project {
     ) -> Result<Self> {
         let version = locksmith::WorkspaceConfig::project_pnpm_version(&root, recorded_version);
         let (mut config, workspace) = settings(&root, version.as_ref(), &mut read)?;
-        let bootstrap_registries =
-            crate::registry::bootstrap_registries(&config, || read(".npmrc"))?;
         // The core uses hook identity to select already-locked evidence. A
         // newly composed hook with no matching source must remain unresolved.
         let mut hooks = serde_json::Map::new();
@@ -150,7 +159,6 @@ impl Project {
             config["pnpmfileChecksum"] = Value::Object(hooks);
         }
         Ok(Self {
-            bootstrap_registries,
             root,
             config,
             workspace,
@@ -774,7 +782,14 @@ fn excluded_directory(path: &str) -> bool {
 fn linked_directory(path: &Path) -> Result<Option<PathBuf>> {
     match path.canonicalize() {
         Ok(target) => Ok(fs::metadata(&target)?.is_dir().then_some(target)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
         #[cfg(unix)]
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Ok(None),
         #[cfg(windows)]

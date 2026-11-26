@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use serde_json::{Map, json};
 
@@ -11,6 +11,56 @@ pub enum MergeInput<'a> {
     Parsed(&'a Lockfile),
     /// Parse the supplied YAML as part of the merge.
     Yaml(&'a str),
+}
+
+impl<'a> MergeInput<'a> {
+    pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, bool) {
+        match self {
+            Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), false),
+            Self::Yaml(text) => crate::RepairInput::bootstrap_lockfile(text)
+                .map_or((None, false), |(lock, provisional)| {
+                    (Some(Cow::Owned(lock)), provisional)
+                }),
+        }
+    }
+
+    /// Read the recorded runner from the bootstrap document, including recoverable YAML inputs.
+    pub fn recorded_pnpm_version(self) -> Option<node_semver::Version> {
+        self.bootstrap()
+            .0
+            .as_deref()
+            .and_then(Lockfile::recorded_pnpm_version)
+    }
+
+    /// Return explicitly declared tarballs whose matching bootstrap release omits its URL.
+    /// Adapters need registry settings only for these packages.
+    pub fn implicit_config_tarballs(self, declarations: &Map<String, Value>) -> Vec<&str> {
+        let (lock, _) = self.bootstrap();
+        let Some(env) = lock.as_deref().and_then(Lockfile::environment) else {
+            return Vec::new();
+        };
+        let Some(entries) = env["importers"]["."]["configDependencies"].as_object() else {
+            return Vec::new();
+        };
+        if declarations.len() != entries.len() {
+            return Vec::new();
+        }
+        declarations
+            .iter()
+            .filter_map(|(name, dep)| {
+                dep.get("tarball")?.as_str()?;
+                let (version, integrity) = dep.get("integrity")?.as_str()?.split_once('+')?;
+                let resolution = crate::config::locked_config_resolution(
+                    env,
+                    name,
+                    entries.get(name)?,
+                    version,
+                    integrity,
+                )?;
+                resolution.get("tarball").is_none().then_some(name.as_str())
+            })
+            .collect()
+    }
 }
 
 impl<'a> From<&'a Lockfile> for MergeInput<'a> {
@@ -94,8 +144,8 @@ pub fn merge<'a>(
         .merge(context);
     }
     let parse = |input| match input {
-        MergeInput::Parsed(lock) => Ok(std::borrow::Cow::Borrowed(lock)),
-        MergeInput::Yaml(text) => Lockfile::parse(text).map(std::borrow::Cow::Owned),
+        MergeInput::Parsed(lock) => Ok(Cow::Borrowed(lock)),
+        MergeInput::Yaml(text) => Lockfile::parse(text).map(Cow::Owned),
     };
     let [b, o, t] = inputs;
     three_way(&*parse(b)?, &*parse(o)?, &*parse(t)?)

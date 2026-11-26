@@ -121,21 +121,32 @@ pub fn from_file<P: AsRef<Path>>(
     };
     let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
     let root = manifests.get(".").ok_or("missing root manifest")?;
-    let mut source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
-    let mut final_settings = raw["configuration"].clone();
-    for settings in source.iter_mut().chain([&mut final_settings]) {
-        let routes = crate::registry::bootstrap_registries(settings, crate::registry::working_rc)?;
-        if !routes.is_empty() {
-            settings["registries"] = serde_json::to_value(routes)?;
-        }
-    }
+    let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
     let inputs = Sources::read(files)?;
-    let (configurations, config, merge) = target.workspace_configurations(
-        Some(root),
-        inputs.inputs(),
-        source.each_ref(),
-        &final_settings,
-    )?;
+    let locks = inputs.inputs();
+    let [base, ours, theirs] = [0, 1, 2].map(|i| {
+        locksmith::WorkspaceConfig::from_pnpm_source(
+            &source[i],
+            Some(root),
+            locks[i].recorded_pnpm_version(),
+        )
+    });
+    let configurations = [base?, ours?, theirs?];
+    let settings = &raw["configuration"];
+    let ((), config, merge) =
+        target.workspace_for_candidate(Some(root), locks, |lock| -> Result<_> {
+            let version = lock.and_then(Lockfile::recorded_pnpm_version);
+            let mut config =
+                locksmith::WorkspaceConfig::from_pnpm_context(settings, Some(root), version)?;
+            config
+                .config_registries
+                .extend(crate::registry::bootstrap_registries(
+                    settings,
+                    lock.map(Into::into),
+                    crate::registry::working_rc,
+                )?);
+            Ok(((), config))
+        })?;
     let patches = serde_json::from_value(raw["patches"].take())?;
     let context = MergeContext {
         registry: None,

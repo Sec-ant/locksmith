@@ -274,11 +274,11 @@ fn resolve_sources(
         locks.map(Some),
         context.target,
         context.manifests.get("."),
-        [0, 1, 2].map(|side| {
+        |side| {
             bootstrap
                 .is_none_or(|selected| selected == side)
                 .then_some(context.configuration)
-        }),
+        },
         [false; 3],
     )?;
     let evidence = published::records(context, &metadata, docs, order, additional.as_deref_mut())?;
