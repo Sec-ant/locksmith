@@ -1,3 +1,14 @@
+## 0.3.9 (2026-11-27)
+
+### Fixes
+
+- Select compatible recorded settings in contextual merges and report a mismatch when no source reflects the final pnpm workspace.
+- Allow `merge --context` to omit `patches` when the workspace has no configured patches.
+- Reject pnpm 12 lockfiles whose recorded resolution settings or integrity target disagree with the workspace in `validate --workspace`.
+- Read the pnpm 9 peer suffix limit from `.npmrc` and accept inline comments on `peers-suffix-max-length`.
+- Check `pnpmfileChecksum` in Rust workspace validation when the caller supplies effective manifests.
+- Accept comments after whitespace on YAML document markers in two-document pnpm lockfiles.
+
 ## 0.3.8 (2026-11-26)
 
 ### Fixes
