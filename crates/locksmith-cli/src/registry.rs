@@ -189,8 +189,11 @@ pub fn resolve(
             else {
                 return Err(error.into());
             };
-            let failure = attempts.entry(request.clone()).or_insert_with(|| {
-                let fetched = fetch(request, &mut data, path.first().is_some_and(|s| s == "importers"));
+            let direct = path.first().is_some_and(|s| s == "importers");
+            let failure = attempts
+                .entry((request.as_ref().clone(), direct))
+                .or_insert_with(|| {
+                    let fetched = fetch(request, &mut data, direct);
                 if let Err(reason) = fetched {
                     if purpose == Lookup::Converge
                         && let RegistryRequest::Manifest { name, version } = request.as_ref()
@@ -408,50 +411,65 @@ impl RegistrySettings {
         Ok(None)
     }
 }
+fn apply_registry_config(
+    config: &mut Value,
+    rc: &BTreeMap<String, String>,
+    pnpm_major: Option<u64>,
+) -> Result<u64> {
+    for (key, field) in [
+        ("minimum_release_age", "minimumReleaseAge"),
+        ("minimum_release_age_strict", "minimumReleaseAgeStrict"),
+        ("minimum_release_age_exclude", "minimumReleaseAgeExclude"),
+        (
+            "minimum_release_age_ignore_missing_time",
+            "minimumReleaseAgeIgnoreMissingTime",
+        ),
+        ("resolution_mode", "resolutionMode"),
+        ("trust_policy", "trustPolicy"),
+        ("trust_policy_exclude", "trustPolicyExclude"),
+        ("lockfile_include_tarball_url", "lockfileIncludeTarballUrl"),
+    ] {
+        let value = env_config("pnpm", key).or_else(|| env_config("npm", key));
+        let legacy = key.replace('_', "-");
+        if let Some(v) = value.as_deref().or_else(|| {
+            config
+                .get(field)
+                .is_none()
+                .then(|| rc.get(&legacy).map(String::as_str))
+                .flatten()
+        }) {
+            config[field] = serde_json::from_str(v).unwrap_or_else(|_| {
+                if matches!(field, "minimumReleaseAgeExclude" | "trustPolicyExclude") {
+                    Value::Array(
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(Value::from)
+                            .collect(),
+                    )
+                } else {
+                    Value::from(v)
+                }
+            });
+        }
+    }
+    match config.get("minimumReleaseAge") {
+        Some(v) => Ok(v
+            .as_u64()
+            .ok_or("minimumReleaseAge must be a nonnegative number of minutes")?),
+        None => Ok(if pnpm_major.is_some_and(|v| v >= 11) {
+            1440
+        } else {
+            0
+        }),
+    }
+}
+
 impl Registry {
     fn new(workspace: &Value, pnpm_major: Option<u64>, project: ProjectRc<'_>) -> Result<Self> {
         let mut settings = RegistrySettings::load(workspace, project)?;
-        let config = &mut settings.config;
+        let min_age = apply_registry_config(&mut settings.config, &settings.rc, pnpm_major)?;
         let rc = &settings.rc;
-        for (key, field) in [
-            ("minimum_release_age", "minimumReleaseAge"),
-            ("minimum_release_age_strict", "minimumReleaseAgeStrict"),
-            ("minimum_release_age_exclude", "minimumReleaseAgeExclude"),
-            (
-                "minimum_release_age_ignore_missing_time",
-                "minimumReleaseAgeIgnoreMissingTime",
-            ),
-            ("resolution_mode", "resolutionMode"),
-            ("trust_policy", "trustPolicy"),
-            ("trust_policy_exclude", "trustPolicyExclude"),
-            ("lockfile_include_tarball_url", "lockfileIncludeTarballUrl"),
-        ] {
-            let value = env_config("pnpm", key).or_else(|| env_config("npm", key));
-            let legacy = key.replace('_', "-");
-            if let Some(v) = value.as_deref().or_else(|| {
-                config
-                    .get(field)
-                    .is_none()
-                    .then(|| rc.get(&legacy).map(String::as_str))
-                    .flatten()
-            }) {
-                config[field] = serde_json::from_str(v).unwrap_or_else(|_| Value::from(v));
-            }
-        }
-        let min_age = match config.get("minimumReleaseAge") {
-            Some(v) => v
-                .as_u64()
-                .ok_or("minimumReleaseAge must be a nonnegative number of minutes")?,
-            None => rc
-                .get("minimum-release-age")
-                .map(|s| s.parse())
-                .transpose()?
-                .unwrap_or(if pnpm_major.is_some_and(|v| v >= 11) {
-                    1440
-                } else {
-                    0
-                }),
-        };
         let mut builder = Agent::config_builder()
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(30)));
@@ -550,5 +568,38 @@ impl Registry {
                 .unwrap_or(false),
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn project_rc_accepts_exclusion_and_missing_time_keys_and_parses_plain_lists() {
+        let mut rc = BTreeMap::new();
+        let text = "\
+minimum-release-age=60
+minimum-release-age-exclude=pkg-a, @org/pkg-b
+minimum-release-age-ignore-missing-time=true
+trust-policy=no-downgrade
+trust-policy-exclude=trusted-pkg
+";
+        project_rc(&mut rc, text, false);
+        assert_eq!(rc["minimum-release-age"], "60");
+        assert_eq!(rc["minimum-release-age-exclude"], "pkg-a, @org/pkg-b");
+        assert_eq!(rc["minimum-release-age-ignore-missing-time"], "true");
+        assert_eq!(rc["trust-policy-exclude"], "trusted-pkg");
+
+        let mut config = serde_json::json!({});
+        let min_age = apply_registry_config(&mut config, &rc, Some(12)).unwrap();
+        assert_eq!(min_age, 60);
+        assert_eq!(
+            config["minimumReleaseAgeExclude"],
+            json!(["pkg-a", "@org/pkg-b"])
+        );
+        assert_eq!(config["minimumReleaseAgeIgnoreMissingTime"], json!(true));
+        assert_eq!(config["trustPolicyExclude"], json!(["trusted-pkg"]));
     }
 }

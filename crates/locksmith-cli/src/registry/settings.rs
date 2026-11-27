@@ -51,7 +51,10 @@ pub(super) fn project_rc(settings: &mut BTreeMap<String, String>, text: &str, cr
                 key,
                 "minimum-release-age"
                     | "minimum-release-age-strict"
+                    | "minimum-release-age-exclude"
+                    | "minimum-release-age-ignore-missing-time"
                     | "trust-policy"
+                    | "trust-policy-exclude"
                     | "resolution-mode"
                     | "lockfile-include-tarball-url"
             );

@@ -439,7 +439,7 @@ pub struct Blobs {
     directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
-    input: ChildStdin,
+    input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
 }
 impl Blobs {
@@ -452,7 +452,7 @@ impl Blobs {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
-        let input = child.stdin.take().expect("piped git stdin");
+        let input = Some(child.stdin.take().expect("piped git stdin"));
         let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
         Ok(Self {
             conflicts: BTreeSet::new(),
@@ -473,7 +473,7 @@ impl Blobs {
     }
 
     fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
-        let input = &mut self.input;
+        let input = self.input.as_mut().expect("cat-file stdin open");
         writeln!(input, "{object}")?;
         input.flush()?;
         let mut header = String::new();
@@ -482,13 +482,26 @@ impl Blobs {
             return Ok(None);
         }
         let mut fields = header.split_whitespace();
-        if !fields.next().is_some_and(oid) || fields.next() != Some("blob") {
+        let object_id = fields.next();
+        let kind = fields.next();
+        let length = fields.next().and_then(|s| s.parse::<usize>().ok());
+        if !object_id.is_some_and(oid) || kind.is_none() {
             return Err(format!("expected a Git blob at {object}").into());
         }
-        let length = fields
-            .next()
-            .ok_or("missing git blob length")?
-            .parse::<usize>()?;
+        let Some(length) = length else {
+            return Err("missing git blob length".into());
+        };
+        if kind != Some("blob") {
+            // Drain the non-blob payload + trailing newline so subsequent reads stay aligned.
+            let mut remaining = length + 1;
+            let mut scratch = [0u8; 4096];
+            while remaining > 0 {
+                let chunk = remaining.min(scratch.len());
+                self.output.read_exact(&mut scratch[..chunk])?;
+                remaining -= chunk;
+            }
+            return Err(format!("expected a Git blob at {object}").into());
+        }
         let mut bytes = vec![0; length];
         self.output.read_exact(&mut bytes)?;
         let mut delimiter = [0];
@@ -501,7 +514,34 @@ impl Blobs {
 }
 impl Drop for Blobs {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        drop(self.input.take());
+        if self.child.wait().is_err() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blobs_stays_synchronized_after_non_blob_object() {
+        let head = output(&["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        let tree = output(&["rev-parse", "HEAD^{tree}"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut blobs = Blobs::open(&["package.json"], &[".pnpmfile.mjs"]).unwrap();
+        let commit_err = blobs.read_object(&head).unwrap_err().to_string();
+        assert!(commit_err.contains("expected a Git blob"));
+        let tree_err = blobs.read_object(&tree).unwrap_err().to_string();
+        assert!(tree_err.contains("expected a Git blob"));
+        let cargo_toml = blobs
+            .read(&head, "crates/locksmith-cli/Cargo.toml")
+            .unwrap()
+            .unwrap();
+        assert!(cargo_toml.contains("locksmith-cli"));
     }
 }

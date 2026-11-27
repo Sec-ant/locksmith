@@ -41,7 +41,11 @@ pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()>
         .filter(|p| p.is_empty() || p.ends_with('/'))
         .ok_or("expected the Git path of pnpm-lock.yaml")?;
     let destination = Path::new(files[1]);
-    let mut temp = NamedTempFile::new_in(destination.parent().unwrap_or(Path::new(".")))?;
+    let dir = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = NamedTempFile::new_in(dir)?;
     match resolve(files, path, prefix, allow_network) {
         Ok(yaml) => {
             temp.write_all(yaml.as_bytes())?;

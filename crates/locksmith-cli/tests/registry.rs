@@ -570,3 +570,107 @@ fn git_driver_resolves_a_missing_release_and_keeps_git_stages_on_registry_failur
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|r| r.path == "/repo/left"));
 }
+
+#[test]
+fn lowest_direct_mode_separates_direct_and_transitive_attempts() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([
+        (
+            "wrapper",
+            json!({"name": "wrapper", "dist-tags": {"latest": "1.0.0"}, "versions": {"1.0.0": {"dependencies": {"dep": "^1"}}}}),
+        ),
+        (
+            "dep",
+            json!({"name": "dep", "dist-tags": {"latest": "1.2.0"}, "versions": {"1.0.0": {}, "1.2.0": {}}}),
+        ),
+    ]));
+    let config = json!({"registry": registry.base, "minimumReleaseAge": 0, "resolutionMode": "lowest-direct"});
+    write(
+        root,
+        "ctx",
+        &json!({
+            "target": "ours",
+            "manifests": {".": {"dependencies": {"wrapper": "1.0.0", "dep": "^1"}}},
+            "configuration": config,
+            "configurations": [config, config, config],
+            "patches": {}
+        }),
+    );
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
+    );
+    let graph = output(run(
+        root,
+        CLI,
+        &[
+            "merge",
+            "lock",
+            "lock",
+            "lock",
+            "--context",
+            "ctx",
+            "--allow-network",
+        ],
+    ));
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["dep"]["version"],
+        "1.0.0"
+    );
+    assert_eq!(
+        graph["snapshots"]["wrapper@1.0.0"]["dependencies"]["dep"],
+        "1.2.0"
+    );
+    let _ = registry.finish();
+}
+
+#[test]
+fn project_rc_exclusion_and_missing_time_settings_apply_during_lookup() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([(
+        "exempt",
+        json!({"name": "exempt", "dist-tags": {"latest": "1.0.0"}, "versions": {"1.0.0": {}}}),
+    )]));
+    fs::write(
+        root.join(".npmrc"),
+        format!(
+            "registry={}\nminimum-release-age=1440\nminimum-release-age-exclude=exempt\nminimum-release-age-ignore-missing-time=true\ntrust-policy=no-downgrade\ntrust-policy-exclude=exempt\n",
+            registry.base
+        ),
+    )
+    .unwrap();
+    write(
+        root,
+        "package.json",
+        &json!({"dependencies": {"exempt": "1.0.0"}}),
+    );
+    write(
+        root,
+        "pnpm-lock.yaml",
+        &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
+    );
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(run(root, "git", &args).status.success());
+    }
+    let graph = output(run(root, CLI, &["repair", "HEAD", "--allow-network"]));
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["exempt"]["version"],
+        "1.0.0"
+    );
+    let _ = registry.finish();
+}

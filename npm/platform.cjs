@@ -1,6 +1,11 @@
 const { join, dirname } = require('node:path');
 
+let cachedPlatformDir;
+
 function platformDirectory() {
+  if (cachedPlatformDir !== undefined) {
+    return cachedPlatformDir;
+  }
   const { platform, arch } = process;
   let suffix = '';
   if (platform === 'linux') {
@@ -10,7 +15,8 @@ function platformDirectory() {
   }
   const name = `es-locksmith-${platform}-${arch}${suffix}`;
   try {
-    return dirname(require.resolve(`${name}/package.json`));
+    cachedPlatformDir = dirname(require.resolve(`${name}/package.json`));
+    return cachedPlatformDir;
   } catch (cause) {
     throw new Error(`Missing native package ${name}. Install es-locksmith with optional dependencies enabled on a supported platform.`, { cause });
   }
