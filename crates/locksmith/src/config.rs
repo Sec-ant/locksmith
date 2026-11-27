@@ -408,40 +408,55 @@ impl WorkspaceConfig {
         settings
     }
 
+    pub(crate) fn check_recorded_peer_suffix(&self, doc: &Value) -> Result<(), LockfileError> {
+        let key = "peersSuffixMaxLength";
+        let default_suffix = Value::from(1000);
+        let expected = self
+            .resolution
+            .parameters
+            .get(key)
+            .unwrap_or(&default_suffix);
+        Self::check_recorded_setting(&doc["settings"], key, expected, &default_suffix)
+    }
+
     pub(crate) fn check_recorded_settings(&self, doc: &Value) -> Result<(), LockfileError> {
+        self.check_recorded_peer_suffix(doc)?;
         let settings = &doc["settings"];
         let major = self.pnpm_version.as_ref().map(|v| v.major());
-        let parameters = &self.resolution.parameters;
-        let default_suffix = Value::from(1000);
         let disabled = Value::Bool(false);
-        for (key, expected, default, supported) in [
-            (
-                "peersSuffixMaxLength",
-                parameters
-                    .get("peersSuffixMaxLength")
-                    .unwrap_or(&default_suffix),
-                &default_suffix,
-                true,
-            ),
+        for (key, expected, supported) in [
             (
                 "injectWorkspacePackages",
                 &Value::Bool(self.resolution.inject_workspace_packages),
-                &disabled,
                 major.is_none_or(|m| m >= 10),
             ),
             (
                 "addMissingPeerTypes",
-                parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
-                &disabled,
+                self.resolution
+                    .parameters
+                    .get("addMissingPeerTypes")
+                    .unwrap_or(&disabled),
                 major.is_none_or(|m| m >= 12),
             ),
         ] {
-            if supported && settings.get(key).unwrap_or(default) != expected {
-                return Err(missing(
-                    &["settings", key],
-                    "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
-                ));
+            if supported {
+                Self::check_recorded_setting(settings, key, expected, &disabled)?;
             }
+        }
+        Ok(())
+    }
+
+    fn check_recorded_setting(
+        settings: &Value,
+        key: &str,
+        expected: &Value,
+        default: &Value,
+    ) -> Result<(), LockfileError> {
+        if settings.get(key).unwrap_or(default) != expected {
+            return Err(missing(
+                &["settings", key],
+                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+            ));
         }
         Ok(())
     }

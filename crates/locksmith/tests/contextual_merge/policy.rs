@@ -213,6 +213,48 @@ fn contextual_merge_requires_recorded_settings_matching_the_final_workspace() {
 }
 
 #[test]
+fn contextual_merge_matches_peer_suffix_limit_without_a_pnpm_version() {
+    let input = |settings: &Value| {
+        let document = json!({
+            "lockfileVersion": "9.0", "importers": {".": {}}, "settings": settings,
+        });
+        Lockfile::parse(&document.to_string()).unwrap()
+    };
+    let preferred = input(&json!({"peersSuffixMaxLength": 32}));
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    for (configuration, matching_settings) in [
+        (
+            // These two switches still depend on a known runner during merge.
+            json!({"peersSuffixMaxLength": 64, "injectWorkspacePackages": true, "addMissingPeerTypes": true}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
+        (json!({}), json!({})),
+    ] {
+        let config = cfg(&configuration);
+        let matching = input(&matching_settings);
+        let context = MergeContext {
+            registry: None,
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configurations: [&config; 3],
+            configuration: &config,
+            patches: &BTreeMap::new(),
+        };
+
+        let merged = merge(&preferred, &preferred, &matching, Some(&context)).unwrap();
+        assert_eq!(
+            merged.project().unwrap()["settings"].get("peersSuffixMaxLength"),
+            matching_settings.get("peersSuffixMaxLength")
+        );
+        assert!(matches!(
+            merge(&preferred, &preferred, &preferred, Some(&context)),
+            Err(LockfileError::ResolutionRequired { path, .. })
+                if path == ["settings", "peersSuffixMaxLength"]
+        ));
+    }
+}
+
+#[test]
 fn configuration_decoding_normalizes_defaults_and_excludes_acceptance_policy() {
     let implicit = WorkspaceConfig::from_pnpm(&json!({})).unwrap();
     let explicit=WorkspaceConfig::from_pnpm(&json!({"autoInstallPeers":true,"dedupePeers":false,"excludeLinksFromLockfile":false,"resolvePeersFromWorkspaceRoot":true,"injectWorkspacePackages":false,"strictPeerDependencies":true})).unwrap();
