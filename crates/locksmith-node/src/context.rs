@@ -193,16 +193,17 @@ impl Converge {
                 after: c.after.as_ref(),
             })
             .collect();
-        locksmith::converge_with_patches(
+        locksmith::converge(
             baseline,
             candidate,
             &changes,
             locksmith::ConvergeOptions {
                 baseline_configuration: before.as_ref(),
                 configuration: after.as_ref(),
+                patches: Some(&self.patches),
                 registry: registry.as_ref(),
+                ..Default::default()
             },
-            &self.patches,
         )
     }
 }

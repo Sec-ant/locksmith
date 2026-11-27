@@ -180,12 +180,12 @@ fn duplicate_snapshots_converge_to_the_installed_peer_graph() {
         duplicated.as_str(),
         texts[1].as_str(),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&old; 3],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();

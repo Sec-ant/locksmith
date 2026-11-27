@@ -67,7 +67,7 @@ fn unchanged_pnpm_configuration_can_be_supplied_once() {
             locksmith::ConvergeOptions {
                 configuration: Some(&config),
                 baseline_configuration,
-                registry: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -107,13 +107,14 @@ fn recorded_and_authored_baselines_validate_their_own_specifiers() {
     let recorded = json!({"dependencies":{"lib":"2.0.0"}});
     let reconstructed = std::collections::BTreeSet::from(["app".to_owned()]);
     let check = |before: &Value, after: &Value| {
-        locksmith::converge_with_recorded_baselines(
+        locksmith::converge(
             &lock,
             &lock,
             &[change("app", before, after)],
-            Default::default(),
-            &Default::default(),
-            &reconstructed,
+            locksmith::ConvergeOptions {
+                recorded_baselines: Some(&reconstructed),
+                ..Default::default()
+            },
         )
     };
     assert!(check(&recorded, &authored).is_ok());
@@ -630,7 +631,7 @@ fn adding_or_removing_a_root_provider_respects_workspace_inheritance() {
                 locksmith::ConvergeOptions {
                     baseline_configuration: None,
                     configuration: Some(&config),
-                    registry: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1036,7 +1037,7 @@ fn an_extension_preserves_siblings_and_stops_at_an_existing_peer_provider() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool| {
         let host = if installed {
@@ -1129,7 +1130,7 @@ fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &installed, &[], options).unwrap();
     let doc = result.project().unwrap();
@@ -1146,7 +1147,7 @@ fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     assert!(converge(&base, &installed, &[], options).is_err());
 }
@@ -1176,7 +1177,7 @@ fn a_changed_local_provider_rebinds_its_sibling_and_keeps_the_siblings_other_dep
     let opts = ConvergeOptions {
         baseline_configuration: Some(&old),
         configuration: Some(&new),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &fresh, &[], opts).unwrap();
     assert_eq!(result.project(), expected.project());
@@ -1223,7 +1224,7 @@ fn a_new_consumer_can_reuse_an_exact_catalog_release_without_adding_a_catalog_re
     let opts = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &installed, &changes, opts).unwrap();
     let doc = result.project().unwrap();
@@ -1303,7 +1304,7 @@ fn a_shared_peer_context_can_keep_the_installed_assignment_and_restore_independe
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool, leaf: &str, palette: &str| {
         let mut roots = json!({});
@@ -1388,7 +1389,7 @@ fn a_catalog_consumer_keeps_its_compatible_pin_when_the_cached_release_changes()
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |cached: &str, imported: &str| {
         let source = lock(
@@ -1451,7 +1452,7 @@ fn an_exact_override_restores_the_required_extension_in_each_consumers_peer_scop
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool, second_witness: bool| {
         let mut importers = json!({});
@@ -1523,7 +1524,7 @@ fn an_unchanged_override_keeps_the_installed_correction_and_its_required_subtree
     let options = ConvergeOptions {
         baseline_configuration: Some(&config),
         configuration: Some(&config),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool| {
         let drift = if installed { "1.1.0" } else { "1.0.0" };
@@ -1577,7 +1578,7 @@ fn converge_adds_and_removes_catalog_entries_when_workspace_config_is_unchanged(
     let options = ConvergeOptions {
         baseline_configuration: Some(&config),
         configuration: Some(&config),
-        registry: None,
+        ..Default::default()
     };
 
     let without_consumer = parse(json!({

@@ -6,7 +6,10 @@ use crate::{
 };
 use crate::{catalog::accepts_pin, error::missing, pin::reference};
 use serde_json::{Map, json};
-use std::collections::BTreeMap;
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 pub(super) struct SelectedImporters {
     pub(super) records: Map<String, Value>,
@@ -38,8 +41,7 @@ pub(super) fn select(
         sources,
         workspace_packages: WorkspaceLinks::new(context.manifests, context.configuration),
     };
-    let mut configured_roots = BTreeMap::new();
-    let mut configured_sources = BTreeMap::new();
+    let mut configured = ConfiguredRoots::default();
     let overrides = manifest::Overrides::new(output, context.configuration);
     let mut missing_requests = super::MissingRequests::new(additional);
     for (id, package) in context.manifests.get_key_value(".").into_iter().chain(
@@ -48,37 +50,7 @@ pub(super) fn select(
             .iter()
             .filter(|(id, _)| id.as_str() != "."),
     ) {
-        let mut record = sources
-            .order
-            .iter()
-            .find_map(|side| docs[*side].get("importers")?.get(id))
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        for group in schema::DEPENDENCY_GROUPS {
-            record
-                .as_object_mut()
-                .ok_or_else(|| missing(&["importers", id], "expected importer mapping"))?
-                .remove(group);
-        }
-        for (field, source) in [
-            ("dependenciesMeta", package.get("dependenciesMeta")),
-            (
-                "linkDirectory",
-                manifest::link_directory(package, context.configuration),
-            ),
-            (
-                "publishDirectory",
-                package
-                    .get("publishConfig")
-                    .and_then(|v| v.get("directory")),
-            ),
-        ] {
-            if let Some(value) = source {
-                record[field] = value.clone();
-            } else {
-                record.as_object_mut().unwrap().remove(field);
-            }
-        }
+        let mut record = importer_metadata(id, package, sources)?;
         let declarations = manifest::declarations(package, &overrides, id)?;
         let mut roots = BTreeMap::new();
         for (name, (group, specifier)) in &declarations {
@@ -110,285 +82,25 @@ pub(super) fn select(
                 .workspace_root_peers;
             peer::importer_providers(&docs[side]["importers"], id, global)
         });
-        let has_witness = roots.values().any(|pin| {
-            !pin.reference.starts_with("link:")
-                && !sources.inputs[pin.side].unchanged_rules
-                && !configured_roots
-                    .entry((pin.side, pin.key.clone()))
-                    .or_insert_with(|| configured_peer_roots(&pin.key, pin.side, output, sources))
-                    .is_empty()
-        });
-        if has_witness {
-            let mut available = roots
-                .iter()
-                .map(|(name, pin)| (name.clone(), peer::root_provider(id, &pin.reference)))
-                .collect::<BTreeMap<_, _>>();
-            if id != "." && context.configuration.resolution.workspace_root_peers {
-                for group in schema::DEPENDENCY_GROUPS {
-                    for (name, dep) in importers
-                        .get(".")
-                        .and_then(|root| graph::section(root, group))
-                        .into_iter()
-                        .flatten()
-                    {
-                        if let Some(reference) = dep.get("version").and_then(Value::as_str) {
-                            available
-                                .entry(name.clone())
-                                .or_insert_with(|| peer::root_provider(".", reference));
-                        }
-                    }
-                }
-            }
-            let available = peer::canonical_providers(&available);
-            for (name, pin) in &mut roots {
-                if pin.reference.starts_with("link:") || sources.inputs[pin.side].unchanged_rules {
-                    continue;
-                }
-                let witnesses = configured_roots
-                    .entry((pin.side, pin.key.clone()))
-                    .or_insert_with(|| configured_peer_roots(&pin.key, pin.side, output, sources));
-                if witnesses.is_empty() {
-                    continue;
-                }
-                let Some(before) =
-                    peers.binding_context(pin.side, &pin.key, &previous_scopes[pin.side])
-                else {
-                    continue;
-                };
-                for (source, candidate) in witnesses {
-                    let Some(after) =
-                        peers.binding_context(*source, candidate, &previous_scopes[*source])
-                    else {
-                        continue;
-                    };
-                    // Preserve bindings outside the final workspace scope. Available
-                    // providers, including newly required peers, are rebound below.
-                    if before.iter().any(|(name, binding)| {
-                        after
-                            .get(name)
-                            .is_none_or(|next| next != binding && !available.contains_key(name))
-                    }) || after
-                        .keys()
-                        .any(|name| !before.contains_key(name) && !available.contains_key(name))
-                    {
-                        continue;
-                    }
-                    configured_sources.insert((*candidate).to_owned(), *source);
-                    pin.side = *source;
-                    pin.reference = reference(name, candidate);
-                    pin.key = (*candidate).to_owned();
-                    pin.borrowed = true;
-                    break;
-                }
-            }
-        }
+        selector.adopt_configured_roots(
+            id,
+            &mut roots,
+            &importers,
+            &previous_scopes,
+            &mut configured,
+            peers,
+        );
         let original = roots.clone();
-        for (name, pin) in &mut roots {
-            if pin.reference.starts_with("link:") || sources.authorized_patch(&pin.key, output) {
-                continue;
-            }
-            let hash = sources
-                .desired_patch(&pin.key, output)
-                .expect("selected patch");
-            pin.key = peers.repatch(pin.side, &pin.key, hash).ok_or_else(|| {
-                missing(
-                    &["importers", id, name],
-                    "patch identity requires the original peer bindings",
-                )
-            })?;
-            pin.reference = reference(name, &pin.key);
-        }
-        let mut used_sources = [false; 4];
-        for pin in original.values().filter(|pin| !pin.borrowed) {
-            used_sources[pin.side] = true;
-        }
-        let previous_bindings = previous_scopes.each_ref().map(peer::canonical_providers);
-        // Provider changes propagate at most one root dependency per pass in an
-        // acyclic peer graph. Existing coherent cycles settle without changes.
-        let mut unsettled = None;
-        for _ in 0..=roots.len() {
-            let mut providers: BTreeMap<String, String> = BTreeMap::new();
-            if id != "."
-                && context.configuration.resolution.workspace_root_peers
-                && let Some(root) = importers.get(".")
-            {
-                for group in schema::DEPENDENCY_GROUPS {
-                    for (name, dep) in graph::section(root, group).into_iter().flatten() {
-                        if let Some(version) = dep.get("version").and_then(Value::as_str) {
-                            providers.insert(name.clone(), peer::root_provider(".", version));
-                        }
-                    }
-                }
-            }
-            providers.extend(
-                roots
-                    .iter()
-                    .map(|(name, pin)| (name.clone(), peer::root_provider(id, &pin.reference))),
-            );
-            let provider_bindings = peer::canonical_providers(&providers);
-            // Roots selected from the same input see the same provider changes during this pass.
-            let changed_providers: [BTreeMap<_, _>; 4] = std::array::from_fn(|side| {
-                if !used_sources[side] {
-                    return BTreeMap::new();
-                }
-                let previous = &previous_scopes[side];
-                providers
-                    .iter()
-                    .filter(|(peer, value)| previous.get(*peer) != Some(*value))
-                    .map(|(peer, value)| (peer.clone(), value.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            });
-            unsettled = None;
-            let mut unresolved = None;
-            peers.begin_pass();
-            for (name, pin) in &original {
-                if pin.reference.starts_with("link:") {
-                    continue;
-                }
-                let names = peer_names(docs[pin.side], &pin.key);
-                let changes = if pin.borrowed {
-                    &providers
-                } else {
-                    &changed_providers[pin.side]
-                };
-                let needs_rebinding = if pin.borrowed {
-                    match peers.source_context(pin.side, &pin.key, &previous_scopes[pin.side]) {
-                        Some(bindings) => bindings.iter().any(|(peer, old)| {
-                            peer != "patch_hash"
-                                && provider_bindings.get(peer).is_some_and(|new| new != old)
-                        }),
-                        None => names.iter().any(|peer| changes.contains_key(peer)),
-                    }
-                } else {
-                    names.iter().any(|peer| changes.contains_key(peer))
-                };
-                if !needs_rebinding {
-                    continue;
-                }
-                // Reuse a locked instance of the same artifact when an importer
-                // actually used it under the selected providers. An opaque peer
-                // suffix also has this witness; reconstruct only mixed contexts.
-                let existing = sources.order.iter().find_map(|&other| {
-                    let record = docs[other].get("importers")?.get(id)?;
-                    let reference = schema::DEPENDENCY_GROUPS.iter().find_map(|group| {
-                        record.get(*group)?.get(name)?.get("version")?.as_str()
-                    })?;
-                    let key = graph::snapshot_key(
-                        name,
-                        reference,
-                        graph::section(docs[other], "snapshots"),
-                    );
-                    if pin::package_key(&key) != pin::package_key(&pin.key)
-                        || patch::hash_in_key(&key) != patch::hash_in_key(&pin.key)
-                        || !sources.inputs[other].compatibility.accepts(&key)
-                        || docs[other]["packages"][pin::package_key(&key)]
-                            != docs[pin.side]["packages"][pin::package_key(&pin.key)]
-                        || docs[other].get("snapshots")?.get(&key).is_none()
-                    {
-                        return None;
-                    }
-                    if key != pin.key
-                        && !super::preference::ordinary_edges_match(
-                            docs[pin.side],
-                            &pin.key,
-                            docs[other],
-                            &key,
-                            true,
-                        )
-                    {
-                        return None;
-                    }
-                    let same_scope = peer_names(docs[other], &key)
-                        .iter()
-                        .chain(names.iter())
-                        .all(|peer| {
-                            previous_bindings[other].get(peer) == provider_bindings.get(peer)
-                        });
-                    same_scope.then_some((other, key))
-                });
-                let existing = existing.or_else(|| {
-                    if !preferences.contains(id, name) {
-                        return None;
-                    }
-                    let locator = pin::package_key(&pin.key);
-                    let (actual, _) = locator.rsplit_once('@')?;
-                    sources
-                        .candidates()
-                        .get(actual)?
-                        .iter()
-                        .find_map(|&(side, key)| {
-                            (key != pin.key
-                                && pin::package_key(key) == locator
-                                && patch::hash_in_key(key) == patch::hash_in_key(&pin.key)
-                                && docs[side]["packages"][locator]
-                                    == docs[pin.side]["packages"][locator]
-                                && peers.witnesses_scope(
-                                    side,
-                                    (pin.side, &pin.key),
-                                    key,
-                                    &provider_bindings,
-                                )
-                                && super::preference::ordinary_edges_match(
-                                    docs[pin.side],
-                                    &pin.key,
-                                    docs[side],
-                                    key,
-                                    true,
-                                ))
-                            .then(|| (side, key.to_owned()))
-                        })
-                });
-                let (resolved_side, rebound) = if let Some(existing) = existing {
-                    existing
-                } else {
-                    let Some(key) = peers.recontextualize_source(
-                        pin.side,
-                        &pin.key,
-                        changes,
-                        &previous_scopes[pin.side],
-                    ) else {
-                        unresolved.get_or_insert(name);
-                        continue;
-                    };
-                    (pin.side, key)
-                };
-                let hash = sources
-                    .desired_patch(&rebound, output)
-                    .expect("selected patch");
-                let rebound = peers
-                    .repatch(resolved_side, &rebound, hash)
-                    .ok_or_else(|| {
-                        missing(
-                            &["importers", id, name],
-                            "patch identity requires the original peer bindings",
-                        )
-                    })?;
-                let version = reference(name, &rebound);
-                let entry = roots.get_mut(name).unwrap();
-                if entry.reference != version {
-                    unsettled = Some(name);
-                }
-                entry.side = resolved_side;
-                entry.reference = version;
-                entry.key = rebound;
-            }
-            peers.finish_pass(unsettled.is_none() && unresolved.is_none());
-            if unsettled.is_none() {
-                if let Some(name) = unresolved {
-                    return Err(missing(
-                        &["importers", id, name],
-                        "peer bindings cannot be rebuilt from the supplied graphs",
-                    ));
-                }
-                break;
-            }
-        }
-        if let Some(name) = unsettled {
-            return Err(missing(
-                &["importers", id, name],
-                "peer identities do not reach a stable context",
-            ));
-        }
+        selector.repatch_roots(id, &mut roots, peers)?;
+        selector.stabilize_root_bindings(
+            id,
+            &mut roots,
+            &importers,
+            &previous_scopes,
+            &original,
+            preferences,
+            peers,
+        )?;
         for (name, (group, specifier)) in declarations {
             if record.get(group).is_none() {
                 record[group] = json!({});
@@ -405,14 +117,22 @@ pub(super) fn select(
         .collect();
     Ok(SelectedImporters {
         records,
-        configured_sources,
+        configured_sources: configured.sources,
     })
 }
 
+#[derive(Clone, Copy)]
 enum CandidatePass {
     Exact,
     Compatible,
     Rebuild,
+}
+
+#[derive(Clone, Copy)]
+struct ImporterDependency<'a> {
+    id: &'a str,
+    name: &'a str,
+    specifier: &'a str,
 }
 
 struct PinSelector<'a, 'graph> {
@@ -479,7 +199,6 @@ impl PinSelector<'_, '_> {
                 borrowed: false,
             })
         };
-        let mut order = sources.order;
         // A configuration edit elsewhere in the workspace need not displace
         // the mainline's direct pin. Assembly still verifies its entire closure.
         if !alternative
@@ -502,217 +221,682 @@ impl PinSelector<'_, '_> {
                 }));
             }
         }
+        let dependency = ImporterDependency {
+            id,
+            name,
+            specifier,
+        };
+        let selected = self
+            .locked_pin(dependency, local, alternative)
+            .or_else(|| self.published_pin(name, specifier))
+            .ok_or_else(|| {
+                super::published::need_version(
+                    &["importers", id, group, name],
+                    name,
+                    specifier,
+                    configuration,
+                    format!("no locked resolution satisfies {specifier}"),
+                )
+            })?;
+        Ok(preferred_local(&selected.key).unwrap_or(selected))
+    }
+
+    fn locked_pin(
+        &self,
+        dependency: ImporterDependency<'_>,
+        local: Option<&String>,
+        alternative: bool,
+    ) -> Option<Pin> {
+        let mut order = self.sources.order;
+        let other = self.context.target.other_index();
         if alternative {
-            let other = context.target.other_index();
             order.sort_by_key(|side| *side != other);
         }
-        let mut borrowed = false;
-        let mut selected = None;
-        let mut unpatched_selection = None;
+        let mut unpatched = None;
         for pass in [
             CandidatePass::Exact,
             CandidatePass::Compatible,
             CandidatePass::Rebuild,
         ] {
-            if sources.prefer_baseline && matches!(pass, CandidatePass::Exact) {
+            if self.sources.prefer_baseline && matches!(pass, CandidatePass::Exact) {
                 continue;
             }
             for side in order {
-                if !sources.prefer_baseline
-                    && sources.inputs[side].matches_configuration
-                        != matches!(pass, CandidatePass::Exact)
+                if !self.matches_pass(side, pass) {
+                    continue;
+                }
+                if let Some(pin) = self.importer_pin(dependency, local, side, pass, &mut unpatched)
+                {
+                    return Some(pin);
+                }
+                // An alternate branch can witness an artifact through a transitive edge.
+                if alternative
+                    && side == other
+                    && let Some(pin) = self.alternative_pin(dependency, side, pass)
+                {
+                    return Some(pin);
+                }
+            }
+            if let Some(link) = local {
+                return Some(Pin {
+                    side: self.context.target.index(),
+                    key: link.clone(),
+                    reference: link.clone(),
+                    borrowed: false,
+                });
+            }
+            if let Some(pin) = self.transitive_pin(dependency, pass, &mut unpatched) {
+                return Some(pin);
+            }
+        }
+        unpatched
+    }
+
+    fn matches_pass(&self, side: usize, pass: CandidatePass) -> bool {
+        self.sources.prefer_baseline
+            || self.sources.inputs[side].matches_configuration
+                == matches!(pass, CandidatePass::Exact)
+    }
+
+    fn importer_pin(
+        &self,
+        dependency: ImporterDependency<'_>,
+        local: Option<&String>,
+        side: usize,
+        pass: CandidatePass,
+        unpatched: &mut Option<Pin>,
+    ) -> Option<Pin> {
+        let ImporterDependency {
+            id,
+            name,
+            specifier,
+        } = dependency;
+        let source = &self.sources.inputs[side];
+        let importer = source.document.get("importers")?.get(id)?;
+        let snapshots = graph::section(source.document, "snapshots");
+        for group in schema::DEPENDENCY_GROUPS {
+            let Some(dep) = importer.get(group).and_then(|v| v.get(name)) else {
+                continue;
+            };
+            let Some(reference) = dep.get("version").and_then(Value::as_str) else {
+                continue;
+            };
+            if local.map(String::as_str) != Some(reference)
+                && !accepts_pin(
+                    name,
+                    specifier,
+                    reference,
+                    self.output,
+                    Some(self.context.configuration),
+                )
+                && !(dep.get("specifier").and_then(Value::as_str) == Some(specifier)
+                    && opaque(specifier))
+            {
+                continue;
+            }
+            let key = graph::snapshot_key(name, reference, snapshots);
+            if !source.compatibility.accepts(&key)
+                || source.compatibility.unchanged(&key) == matches!(pass, CandidatePass::Rebuild)
+            {
+                continue;
+            }
+            if reference.starts_with("link:") {
+                return Some(Pin {
+                    side,
+                    key,
+                    reference: reference.to_owned(),
+                    borrowed: false,
+                });
+            }
+            if source
+                .document
+                .get("snapshots")
+                .and_then(|records| records.get(&key))
+                .is_some()
+                && self.sources.desired_patch(&key, self.output).is_ok()
+            {
+                let borrowed = !self.sources.prefer_baseline
+                    && !self.sources.authorized_patch(&key, self.output);
+                let pin = Pin {
+                    side,
+                    key,
+                    reference: reference.to_owned(),
+                    borrowed,
+                };
+                if !borrowed {
+                    return Some(pin);
+                }
+                unpatched.get_or_insert(pin);
+            }
+        }
+        None
+    }
+
+    fn alternative_pin(
+        &self,
+        dependency: ImporterDependency<'_>,
+        side: usize,
+        pass: CandidatePass,
+    ) -> Option<Pin> {
+        let ImporterDependency {
+            id,
+            name,
+            specifier,
+        } = dependency;
+        let docs = self.sources.documents();
+        let mainline = docs[self.context.target.index()];
+        let old = super::preference::dependency(mainline, id, name)?;
+        let old_key = graph::snapshot_key(name, old, graph::section(mainline, "snapshots"));
+        let locator = pin::package_key(&old_key);
+        let (actual, _) = locator.rsplit_once('@')?;
+        for &(source, key) in self.sources.candidates().get(actual).into_iter().flatten() {
+            if source != side
+                || pin::package_key(key) != locator
+                || self.sources.inputs[side].compatibility.unchanged(key)
+                    == matches!(pass, CandidatePass::Rebuild)
+                || !self.sources.authorized_patch(key, self.output)
+                || !super::preference::ordinary_edges_match(
+                    mainline, &old_key, docs[side], key, true,
+                )
+            {
+                continue;
+            }
+            let version = reference(name, key);
+            if accepts_pin(
+                name,
+                specifier,
+                &version,
+                self.output,
+                Some(self.context.configuration),
+            ) {
+                return Some(Pin {
+                    side,
+                    key: key.to_owned(),
+                    reference: version,
+                    borrowed: true,
+                });
+            }
+        }
+        None
+    }
+
+    fn transitive_pin(
+        &self,
+        dependency: ImporterDependency<'_>,
+        pass: CandidatePass,
+        unpatched: &mut Option<Pin>,
+    ) -> Option<Pin> {
+        let ImporterDependency {
+            name, specifier, ..
+        } = dependency;
+        let configuration = self.context.configuration;
+        let catalog_specifier = specifier.strip_prefix("catalog:").and_then(|catalog| {
+            self.output
+                .get("catalogs")?
+                .get(if catalog.is_empty() {
+                    "default"
+                } else {
+                    catalog
+                })?
+                .get(name)?
+                .get("specifier")?
+                .as_str()
+        });
+        let (actual, _) =
+            configuration.registry_request(name, catalog_specifier.unwrap_or(specifier));
+        for &(side, key) in self.sources.candidates().get(actual).into_iter().flatten() {
+            if side == super::PUBLISHED
+                || !self.matches_pass(side, pass)
+                || self.sources.inputs[side].compatibility.unchanged(key)
+                    == matches!(pass, CandidatePass::Rebuild)
+            {
+                continue;
+            }
+            let version = reference(name, key);
+            if accepts_pin(name, specifier, &version, self.output, Some(configuration))
+                && self.sources.desired_patch(key, self.output).is_ok()
+            {
+                let pin = Pin {
+                    side,
+                    key: key.to_owned(),
+                    reference: version,
+                    borrowed: true,
+                };
+                if self.sources.authorized_patch(key, self.output) {
+                    return Some(pin);
+                }
+                unpatched.get_or_insert(pin);
+            }
+        }
+        None
+    }
+
+    fn published_pin(&self, name: &str, specifier: &str) -> Option<Pin> {
+        let registry = self.sources.registry?;
+        let configuration = self.context.configuration;
+        let effective = specifier
+            .strip_prefix("catalog:")
+            .and_then(|catalog| {
+                configuration
+                    .catalogs
+                    .get(if catalog.is_empty() {
+                        "default"
+                    } else {
+                        catalog
+                    })?
+                    .get(name)
+            })
+            .map_or(specifier, String::as_str);
+        let (actual, selector) = configuration.registry_request(name, effective);
+        let choice = registry.selected_direct(actual, selector)?;
+        self.sources
+            .candidates()
+            .get(actual)?
+            .iter()
+            .find_map(|&(side, key)| {
+                (side == super::PUBLISHED && choice == pin::package_key(key)).then(|| Pin {
+                    side,
+                    key: key.to_owned(),
+                    reference: reference(name, key),
+                    borrowed: true,
+                })
+            })
+    }
+}
+
+#[derive(Default)]
+struct ConfiguredRoots<'graph> {
+    roots: BTreeMap<(usize, String), Vec<(usize, &'graph str)>>,
+    sources: BTreeMap<String, usize>,
+}
+
+type Providers = BTreeMap<String, String>;
+
+fn workspace_root_providers<'a>(
+    id: &str,
+    importers: &'a Map<String, Value>,
+    context: &MergeContext<'_>,
+) -> impl Iterator<Item = (String, String)> + use<'a> {
+    let root = if id != "." && context.configuration.resolution.workspace_root_peers {
+        importers.get(".")
+    } else {
+        None
+    };
+    schema::DEPENDENCY_GROUPS
+        .into_iter()
+        .flat_map(move |group| {
+            root.and_then(|root| graph::section(root, group))
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|(name, dep)| {
+            let reference = dep.get("version")?.as_str()?;
+            Some((name.clone(), peer::root_provider(".", reference)))
+        })
+}
+
+fn importer_metadata(
+    id: &str,
+    package: &Value,
+    sources: &GraphSources<'_>,
+) -> Result<Value, LockfileError> {
+    let docs = sources.documents();
+    let mut record = sources
+        .order
+        .iter()
+        .find_map(|side| docs[*side].get("importers")?.get(id))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    for group in schema::DEPENDENCY_GROUPS {
+        record
+            .as_object_mut()
+            .ok_or_else(|| missing(&["importers", id], "expected importer mapping"))?
+            .remove(group);
+    }
+    for (field, source) in [
+        ("dependenciesMeta", package.get("dependenciesMeta")),
+        (
+            "linkDirectory",
+            manifest::link_directory(package, sources.configuration),
+        ),
+        (
+            "publishDirectory",
+            package
+                .get("publishConfig")
+                .and_then(|v| v.get("directory")),
+        ),
+    ] {
+        if let Some(value) = source {
+            record[field] = value.clone();
+        } else {
+            record.as_object_mut().unwrap().remove(field);
+        }
+    }
+    Ok(record)
+}
+
+impl<'graph> PinSelector<'_, 'graph> {
+    fn adopt_configured_roots(
+        &self,
+        id: &str,
+        roots: &mut BTreeMap<String, Pin>,
+        importers: &Map<String, Value>,
+        previous_scopes: &[Providers; 4],
+        configured: &mut ConfiguredRoots<'graph>,
+        peers: &mut peer::Merger<'_>,
+    ) {
+        let has_witness = roots.values().any(|pin| {
+            !pin.reference.starts_with("link:")
+                && !self.sources.inputs[pin.side].unchanged_rules
+                && !configured
+                    .roots
+                    .entry((pin.side, pin.key.clone()))
+                    .or_insert_with(|| {
+                        configured_peer_roots(&pin.key, pin.side, self.output, self.sources)
+                    })
+                    .is_empty()
+        });
+        if has_witness {
+            let mut available = roots
+                .iter()
+                .map(|(name, pin)| (name.clone(), peer::root_provider(id, &pin.reference)))
+                .collect::<BTreeMap<_, _>>();
+            for (name, reference) in workspace_root_providers(id, importers, self.context) {
+                available.entry(name).or_insert(reference);
+            }
+            let available = peer::canonical_providers(&available);
+            for (name, pin) in roots {
+                if pin.reference.starts_with("link:")
+                    || self.sources.inputs[pin.side].unchanged_rules
                 {
                     continue;
                 }
-                for source_group in schema::DEPENDENCY_GROUPS {
-                    let Some(dep) = docs[side]
-                        .get("importers")
-                        .and_then(|v| v.get(id))
-                        .and_then(|v| v.get(source_group))
-                        .and_then(|v| v.get(name))
+                let witnesses = configured
+                    .roots
+                    .entry((pin.side, pin.key.clone()))
+                    .or_insert_with(|| {
+                        configured_peer_roots(&pin.key, pin.side, self.output, self.sources)
+                    });
+                if witnesses.is_empty() {
+                    continue;
+                }
+                let Some(before) =
+                    peers.binding_context(pin.side, &pin.key, &previous_scopes[pin.side])
+                else {
+                    continue;
+                };
+                for (source, candidate) in witnesses {
+                    let Some(after) =
+                        peers.binding_context(*source, candidate, &previous_scopes[*source])
                     else {
                         continue;
                     };
-                    let Some(reference) = dep.get("version").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if local.map(String::as_str) == Some(reference)
-                        || accepts_pin(name, specifier, reference, output, Some(configuration))
-                        || (dep.get("specifier").and_then(Value::as_str) == Some(specifier)
-                            && opaque(specifier))
+                    // Preserve bindings outside the final workspace scope. Available
+                    // providers, including newly required peers, are rebound below.
+                    if before.iter().any(|(name, binding)| {
+                        after
+                            .get(name)
+                            .is_none_or(|next| next != binding && !available.contains_key(name))
+                    }) || after
+                        .keys()
+                        .any(|name| !before.contains_key(name) && !available.contains_key(name))
                     {
-                        let key = graph::snapshot_key(
-                            name,
-                            reference,
-                            graph::section(docs[side], "snapshots"),
-                        );
-                        if !sources.inputs[side].compatibility.accepts(&key)
-                            || sources.inputs[side].compatibility.unchanged(&key)
-                                == matches!(pass, CandidatePass::Rebuild)
-                        {
-                            continue;
-                        }
-                        if reference.starts_with("link:") {
-                            selected = Some((side, reference.to_owned(), key));
-                            break;
-                        }
-                        if docs[side]
-                            .get("snapshots")
-                            .and_then(|records| records.get(&key))
-                            .is_some()
-                            && sources.desired_patch(&key, output).is_some()
-                        {
-                            if sources.prefer_baseline || sources.authorized_patch(&key, output) {
-                                selected = Some((side, reference.to_owned(), key));
-                                break;
-                            }
-                            unpatched_selection.get_or_insert((side, reference.to_owned(), key));
-                        }
+                        continue;
                     }
-                }
-                // A newly added direct dependency may exist only transitively on
-                // the other branch. During a local retry, that branch can still
-                // witness the selected artifact under the final configuration.
-                if selected.is_none()
-                    && alternative
-                    && side == context.target.other_index()
-                    && let Some(old) =
-                        super::preference::dependency(docs[context.target.index()], id, name)
-                {
-                    let old_key = graph::snapshot_key(
-                        name,
-                        old,
-                        graph::section(docs[context.target.index()], "snapshots"),
-                    );
-                    let locator = pin::package_key(&old_key);
-                    if let Some((actual, _)) = locator.rsplit_once('@') {
-                        for &(source, key) in sources.candidates().get(actual).into_iter().flatten()
-                        {
-                            if source != side
-                                || pin::package_key(key) != locator
-                                || sources.inputs[side].compatibility.unchanged(key)
-                                    == matches!(pass, CandidatePass::Rebuild)
-                                || !sources.authorized_patch(key, output)
-                                || !super::preference::ordinary_edges_match(
-                                    docs[context.target.index()],
-                                    &old_key,
-                                    docs[side],
-                                    key,
-                                    true,
-                                )
-                            {
-                                continue;
-                            }
-                            let version = reference(name, key);
-                            if accepts_pin(name, specifier, &version, output, Some(configuration)) {
-                                selected = Some((side, version, key.to_owned()));
-                                borrowed = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if selected.is_some() {
+                    configured.sources.insert((*candidate).to_owned(), *source);
+                    pin.side = *source;
+                    pin.reference = reference(name, candidate);
+                    pin.key = (*candidate).to_owned();
+                    pin.borrowed = true;
                     break;
                 }
             }
-            if selected.is_none()
-                && let Some(link) = local
-            {
-                selected = Some((context.target.index(), link.clone(), link.clone()));
+        }
+    }
+
+    fn repatch_roots(
+        &self,
+        id: &str,
+        roots: &mut BTreeMap<String, Pin>,
+        peers: &mut peer::Merger<'_>,
+    ) -> Result<(), LockfileError> {
+        let Self {
+            sources, output, ..
+        } = self;
+        for (name, pin) in roots {
+            if pin.reference.starts_with("link:") || sources.authorized_patch(&pin.key, output) {
+                continue;
             }
-            if selected.is_none() {
-                let catalog_specifier = specifier.strip_prefix("catalog:").and_then(|catalog| {
-                    output
-                        .get("catalogs")?
-                        .get(if catalog.is_empty() {
-                            "default"
-                        } else {
-                            catalog
-                        })?
-                        .get(name)?
-                        .get("specifier")?
-                        .as_str()
-                });
-                let (actual_name, _) = context
-                    .configuration
-                    .registry_request(name, catalog_specifier.unwrap_or(specifier));
-                for (side, key) in sources.candidates().get(actual_name).into_iter().flatten() {
-                    if *side == super::PUBLISHED
-                        || (!sources.prefer_baseline
-                            && sources.inputs[*side].matches_configuration
-                                != matches!(pass, CandidatePass::Exact))
-                        || sources.inputs[*side].compatibility.unchanged(key)
-                            == matches!(pass, CandidatePass::Rebuild)
-                    {
-                        continue;
-                    }
-                    let reference = reference(name, key);
-                    if accepts_pin(name, specifier, &reference, output, Some(configuration))
-                        && sources.desired_patch(key, output).is_some()
-                    {
-                        if sources.authorized_patch(key, output) {
-                            selected = Some((*side, reference, (*key).into()));
-                            borrowed = true;
-                            break;
-                        }
-                        unpatched_selection.get_or_insert((*side, reference, (*key).into()));
-                    }
+            let hash = sources
+                .desired_patch(&pin.key, output)
+                .expect("selected patch");
+            pin.key = peers.repatch(pin.side, &pin.key, hash).ok_or_else(|| {
+                missing(
+                    &["importers", id, name],
+                    "patch identity requires the original peer bindings",
+                )
+            })?;
+            pin.reference = reference(name, &pin.key);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stabilize_root_bindings(
+        &self,
+        id: &str,
+        roots: &mut BTreeMap<String, Pin>,
+        importers: &Map<String, Value>,
+        previous_scopes: &[Providers; 4],
+        original: &BTreeMap<String, Pin>,
+        preferences: &super::preference::Preferences,
+        peers: &mut peer::Merger<'_>,
+    ) -> Result<(), LockfileError> {
+        let Self {
+            sources, output, ..
+        } = self;
+        let docs = sources.documents();
+        let mut used_sources = [false; 4];
+        for pin in original.values().filter(|pin| !pin.borrowed) {
+            used_sources[pin.side] = true;
+        }
+        let previous_bindings = previous_scopes.each_ref().map(peer::canonical_providers);
+        // Provider changes propagate at most one root dependency per pass in an
+        // acyclic peer graph. Existing coherent cycles settle without changes.
+        let mut unsettled = None;
+        for _ in 0..=roots.len() {
+            let mut providers = Providers::new();
+            for (name, reference) in workspace_root_providers(id, importers, self.context) {
+                providers.insert(name, reference);
+            }
+            providers.extend(
+                roots
+                    .iter()
+                    .map(|(name, pin)| (name.clone(), peer::root_provider(id, &pin.reference))),
+            );
+            let provider_bindings = peer::canonical_providers(&providers);
+            // Roots selected from the same input see the same provider changes during this pass.
+            let changed_providers: [BTreeMap<_, _>; 4] = std::array::from_fn(|side| {
+                if !used_sources[side] {
+                    return BTreeMap::new();
                 }
+                let previous = &previous_scopes[side];
+                providers
+                    .iter()
+                    .filter(|(peer, value)| previous.get(*peer) != Some(*value))
+                    .map(|(peer, value)| (peer.clone(), value.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            });
+            unsettled = None;
+            let mut unresolved = None;
+            peers.begin_pass();
+            for (name, pin) in original {
+                if pin.reference.starts_with("link:") {
+                    continue;
+                }
+                let names = peer_names(docs[pin.side], &pin.key);
+                let changes = if pin.borrowed {
+                    &providers
+                } else {
+                    &changed_providers[pin.side]
+                };
+                let needs_rebinding = if pin.borrowed {
+                    match peers.source_context(pin.side, &pin.key, &previous_scopes[pin.side]) {
+                        Some(bindings) => bindings.iter().any(|(peer, old)| {
+                            peer != "patch_hash"
+                                && provider_bindings.get(peer).is_some_and(|new| new != old)
+                        }),
+                        None => names.iter().any(|peer| changes.contains_key(peer)),
+                    }
+                } else {
+                    names.iter().any(|peer| changes.contains_key(peer))
+                };
+                if !needs_rebinding {
+                    continue;
+                }
+                let existing = self
+                    .importer_witness(
+                        id,
+                        name,
+                        pin,
+                        &names,
+                        &previous_bindings,
+                        &provider_bindings,
+                    )
+                    .or_else(|| {
+                        if preferences.contains(id, name) {
+                            self.alternative_witness(pin, &provider_bindings, peers)
+                        } else {
+                            None
+                        }
+                    });
+                let (resolved_side, rebound) = if let Some(existing) = existing {
+                    existing
+                } else {
+                    let Some(key) = peers.recontextualize_source(
+                        pin.side,
+                        &pin.key,
+                        changes,
+                        &previous_scopes[pin.side],
+                    ) else {
+                        unresolved.get_or_insert(name);
+                        continue;
+                    };
+                    (pin.side, key)
+                };
+                let hash = sources
+                    .desired_patch(&rebound, output)
+                    .expect("selected patch");
+                let rebound = peers
+                    .repatch(resolved_side, &rebound, hash)
+                    .ok_or_else(|| {
+                        missing(
+                            &["importers", id, name],
+                            "patch identity requires the original peer bindings",
+                        )
+                    })?;
+                let version = reference(name, &rebound);
+                let entry = roots.get_mut(name).unwrap();
+                if entry.reference != version {
+                    unsettled = Some(name);
+                }
+                entry.side = resolved_side;
+                entry.reference = version;
+                entry.key = rebound;
             }
-            if selected.is_some() {
+            peers.finish_pass(unsettled.is_none() && unresolved.is_none());
+            if unsettled.is_none() {
+                if let Some(name) = unresolved {
+                    return Err(missing(
+                        &["importers", id, name],
+                        "peer bindings cannot be rebuilt from the supplied graphs",
+                    ));
+                }
                 break;
             }
         }
-        if selected.is_none() {
-            selected = unpatched_selection;
-            if selected.is_some() {
-                borrowed = true;
-            }
+        if let Some(name) = unsettled {
+            return Err(missing(
+                &["importers", id, name],
+                "peer identities do not reach a stable context",
+            ));
         }
-        if selected.is_none()
-            && let Some(registry) = sources.registry
-        {
-            let effective = specifier
-                .strip_prefix("catalog:")
-                .and_then(|c| {
-                    context
-                        .configuration
-                        .catalogs
-                        .get(if c.is_empty() { "default" } else { c })?
-                        .get(name)
-                })
-                .map(String::as_str)
-                .unwrap_or(specifier);
-            let (actual, selector) = context.configuration.registry_request(name, effective);
-            if let Some(choice) = registry.selected_direct(actual, selector) {
-                selected = sources
-                    .candidates()
-                    .get(actual)
-                    .into_iter()
-                    .flatten()
-                    .find_map(|&(side, key)| {
-                        (side == super::PUBLISHED && choice == pin::package_key(key))
-                            .then(|| (side, reference(name, key), key.to_owned()))
-                    });
+        Ok(())
+    }
+
+    fn importer_witness(
+        &self,
+        id: &str,
+        name: &str,
+        pin: &Pin,
+        names: &BTreeSet<String>,
+        previous_bindings: &[Cow<'_, Providers>; 4],
+        provider_bindings: &Providers,
+    ) -> Option<(usize, String)> {
+        let docs = self.sources.documents();
+        // Reuse a locked instance of the same artifact when an importer
+        // actually used it under the selected providers. An opaque peer
+        // suffix also has this witness; reconstruct only mixed contexts.
+        self.sources.order.iter().find_map(|&other| {
+            let reference = super::preference::dependency(docs[other], id, name)?;
+            let key =
+                graph::snapshot_key(name, reference, graph::section(docs[other], "snapshots"));
+            if pin::package_key(&key) != pin::package_key(&pin.key)
+                || patch::hash_in_key(&key) != patch::hash_in_key(&pin.key)
+                || !self.sources.inputs[other].compatibility.accepts(&key)
+                || docs[other]["packages"][pin::package_key(&key)]
+                    != docs[pin.side]["packages"][pin::package_key(&pin.key)]
+                || docs[other].get("snapshots")?.get(&key).is_none()
+            {
+                return None;
             }
-            borrowed = selected.is_some();
-        }
-        let (side, version, key) = selected.ok_or_else(|| {
-            super::published::need_version(
-                &["importers", id, group, name],
-                name,
-                specifier,
-                context.configuration,
-                format!("no locked resolution satisfies {specifier}"),
-            )
-        })?;
-        Ok(preferred_local(&key).unwrap_or(Pin {
-            side,
-            reference: version,
-            key,
-            borrowed,
-        }))
+            if key != pin.key
+                && !super::preference::ordinary_edges_match(
+                    docs[pin.side],
+                    &pin.key,
+                    docs[other],
+                    &key,
+                    true,
+                )
+            {
+                return None;
+            }
+            let same_scope = peer_names(docs[other], &key)
+                .iter()
+                .chain(names)
+                .all(|peer| previous_bindings[other].get(peer) == provider_bindings.get(peer));
+            same_scope.then_some((other, key))
+        })
+    }
+
+    fn alternative_witness(
+        &self,
+        pin: &Pin,
+        provider_bindings: &Providers,
+        peers: &mut peer::Merger<'_>,
+    ) -> Option<(usize, String)> {
+        let docs = self.sources.documents();
+        let locator = pin::package_key(&pin.key);
+        let (actual, _) = locator.rsplit_once('@')?;
+        self.sources
+            .candidates()
+            .get(actual)?
+            .iter()
+            .find_map(|&(side, key)| {
+                (key != pin.key
+                    && pin::package_key(key) == locator
+                    && patch::hash_in_key(key) == patch::hash_in_key(&pin.key)
+                    && docs[side]["packages"][locator] == docs[pin.side]["packages"][locator]
+                    && peers.witnesses_scope(side, (pin.side, &pin.key), key, provider_bindings)
+                    && super::preference::ordinary_edges_match(
+                        docs[pin.side],
+                        &pin.key,
+                        docs[side],
+                        key,
+                        true,
+                    ))
+                .then(|| (side, key.to_owned()))
+            })
     }
 }
 

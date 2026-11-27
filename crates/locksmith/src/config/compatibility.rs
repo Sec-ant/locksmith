@@ -116,7 +116,7 @@ const EXTENSION_GROUPS: [&str; 4] = [
     "peerDependencies",
     "peerDependenciesMeta",
 ];
-type ExtensionFields<'a> = [BTreeMap<&'a str, &'a Value>; 4];
+pub(crate) type ExtensionFields<'a> = [BTreeMap<&'a str, &'a Value>; 4];
 type EffectiveExtensions<'a> = [ExtensionFields<'a>; 2];
 type ExtensionRules<'a> = Vec<(&'a str, &'a Value)>;
 

@@ -148,17 +148,17 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         &working.config,
         working.pnpm_version.as_ref().map(|v| v.major()),
         |registry| {
-            locksmith::converge_with_recorded_baselines(
+            locksmith::converge(
                 &baseline,
                 &candidate,
                 &changes,
                 locksmith::ConvergeOptions {
                     baseline_configuration: Some(&base_config),
                     configuration: Some(&config),
+                    patches: Some(&patches),
+                    recorded_baselines: Some(&recorded),
                     registry,
                 },
-                &patches,
-                &recorded,
             )
             .map_err(|e| vec![e])
         },

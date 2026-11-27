@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 override_tie_break: tie_break,
                 ..Default::default()
             }),
-            registry: None,
+            ..Default::default()
         },
     )?;
     let convergence = start.elapsed();

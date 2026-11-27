@@ -15,12 +15,12 @@ fn empty_workspace_rules_stay_absent_in_the_merged_lockfile() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), json!({}))]),
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -44,12 +44,12 @@ fn unmaterialized_releases_use_their_locked_peer_instances() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -77,12 +77,12 @@ fn unmaterialized_releases_use_their_locked_peer_instances() {
         &nested,
         &nested,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -107,18 +107,18 @@ fn final_manifest_and_target_preference_resolve_competing_pins_and_peer_cycles()
         let patches = BTreeMap::new();
         let normalized_config = cfg(&config);
         let context = MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&normalized_config; 3],
             configuration: &normalized_config,
             patches: &patches,
+            registry: None,
         };
         let result = merge(&base, &ours, &theirs, Some(&context)).unwrap();
         result.validate().unwrap();
         let swapped = MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
+            registry: None,
             ..context
         };
         assert_eq!(
@@ -169,12 +169,12 @@ fn unavailable_versions_are_reported_with_the_affected_dependency() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     assert!(
         matches!(merge(&base,&base,&base,Some(&context)),Err(LockfileError::ResolutionRequired {path,..}) if path==["importers",".","dependencies","a"])
@@ -208,12 +208,12 @@ fn final_catalog_decides_the_pin_and_new_consumers_use_that_pin() {
     let normalized_old = cfg(&old);
     let normalized_new = cfg(&new);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_old, &normalized_new, &normalized_old],
         configuration: &normalized_new,
         patches: &patches,
+        registry: None,
     };
     let result = merge(&base, &ours, &theirs, Some(&context)).unwrap();
     result.validate().unwrap();
@@ -247,12 +247,12 @@ fn same_snapshot_regular_dependency_disagreement_uses_the_target_graph() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let result = merge(&base, &ours, &theirs, Some(&context)).unwrap();
     assert_eq!(
@@ -271,12 +271,12 @@ fn new_catalog_alias_uses_an_already_locked_package() {
     let normalized_before = cfg(&before);
     let normalized_after = cfg(&after);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_before; 3],
         configuration: &normalized_after,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&input, &input, &input, Some(&context)).unwrap();
     output.validate().unwrap();
@@ -305,12 +305,12 @@ fn workspace_protocol_with_whitespace_retains_the_existing_link() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&input, &input, &input, Some(&context)).unwrap();
     assert_eq!(
@@ -375,12 +375,12 @@ fn linked_peers_keep_root_relative_edges_when_workspace_paths_change() {
             &make(old, 2),
             &make(new, 1),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -419,12 +419,12 @@ fn changed_resolution_configuration_uses_an_input_with_that_configuration() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&cfg(&before); 3],
                 configuration: &cfg(&after),
-                patches: &patches
+                patches: &patches,
+                registry: None,
             })
         ),
         Err(LockfileError::ResolutionRequired { .. })
@@ -452,12 +452,12 @@ fn new_workspace_links_are_derived_from_final_manifests() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&config); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -499,12 +499,12 @@ fn mainline_pins_survive_unrelated_configuration_edits_until_the_branch_requires
             &topic,
             &mainline,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -552,12 +552,12 @@ fn matching_configuration_candidates_precede_other_configurations_direct_pins() 
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &before, &after],
             configuration: &after,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -581,12 +581,12 @@ fn duplicate_workspace_names_only_block_a_link_that_uses_the_name() {
     let patches = BTreeMap::new();
     let merge = |manifests| {
         let context = MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &patches,
+            registry: None,
         };
         merge(&input, &input, &input, Some(&context))
     };
@@ -627,12 +627,12 @@ fn workspace_sources_and_peer_overrides_follow_the_effective_manifest() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
-            manifests: &manifests,
             target: MergeTarget::Ours,
+            manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -667,12 +667,12 @@ fn final_manager_selects_its_bootstrap_graph_and_runtime_pin() {
         &old,
         &new,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -698,12 +698,12 @@ fn direct_aliases_keep_bare_version_pins_and_prune_stale_publication_times() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -748,12 +748,12 @@ fn numeric_npm_aliases_follow_the_runner_for_direct_and_catalog_pins() {
                 &base,
                 &other,
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Ours,
                     manifests: &manifests,
                     configurations: [&before, &before, &after],
                     configuration: &after,
                     patches: &BTreeMap::new(),
+                    registry: None,
                 }),
             )
             .unwrap();
@@ -784,12 +784,12 @@ fn registry_pin_and_matching_workspace_release_follow_final_link_policy() {
             &lock,
             &lock,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&baseline, &baseline, &config],
                 configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -823,10 +823,10 @@ fn catalog_links_use_the_local_manifest_version_with_context() {
             Some(&MergeContext {
                 target: MergeTarget::Ours,
                 manifests: &manifests,
-                configuration: &config,
                 configurations: [&config; 3],
-                registry: None,
+                configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         );
         if compatible {
@@ -881,12 +881,12 @@ fn bootstrap_follows_the_final_config_dependency_declarations() {
     let before = config("1.0.0");
     let after = config("2.0.0");
     let ctx = MergeContext {
-        registry: None,
         target: MergeTarget::Ours,
         manifests: &manifests,
         configurations: [&before, &before, &after],
         configuration: &after,
         patches: &BTreeMap::new(),
+        registry: None,
     };
     let merged = merge(&old, &old, &new, Some(&ctx)).unwrap();
     assert_eq!(merged.environment(), new.environment());
@@ -1034,12 +1034,12 @@ fn merge_and_repair_validate_bootstrap_settings_for_the_runner() {
             quoted.as_str(),
             plain.as_str(),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
-                configuration: &config,
                 configurations: [&config; 3],
+                configuration: &config,
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();
@@ -1137,11 +1137,11 @@ fn the_selected_bootstrap_manager_controls_the_final_project_settings() {
                 .unwrap();
             let context = MergeContext {
                 target: MergeTarget::Ours,
-                registry: None,
                 manifests: &manifests,
-                patches: &BTreeMap::new(),
-                configuration: &final_config,
                 configurations: branches.each_ref(),
+                configuration: &final_config,
+                patches: &BTreeMap::new(),
+                registry: None,
             };
             let result = prepared.merge(&context).unwrap();
             assert_eq!(result.environment(), expected.environment());
@@ -1185,8 +1185,8 @@ fn check_manager_pin(
     let ctx = MergeContext {
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &config,
         configurations: [&config; 3],
+        configuration: &config,
         patches: &patches,
         registry: None,
     };
@@ -1206,7 +1206,7 @@ fn check_manager_pin(
     let options = locksmith::ConvergeOptions {
         baseline_configuration: Some(&config),
         configuration: Some(&config),
-        registry: None,
+        ..Default::default()
     };
     let project = "lockfileVersion: '9.0'\nimporters: {.: {}}\n";
     let yaml = match recorded {
@@ -1363,8 +1363,8 @@ fn root_importer_peers_apply_to_importers_sorting_before_dot() {
         Some(&MergeContext {
             target: MergeTarget::Theirs,
             manifests: &manifests,
-            configuration: &config,
             configurations: [&config; 3],
+            configuration: &config,
             patches: &BTreeMap::new(),
             registry: None,
         }),

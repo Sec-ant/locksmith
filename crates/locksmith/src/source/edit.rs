@@ -8,7 +8,7 @@ use serde::{
 use serde_json::Map;
 use serde_saphyr::Spanned;
 
-use super::{document_ranges, options, yaml};
+use super::{FLOW_MAP_CLOSE, FLOW_MAP_OPEN, document_ranges, options, standalone_block, yaml};
 use crate::{DocumentKind, Lockfile, LockfileError, Value, schema};
 
 struct Locations(Vec<Spanned<String>>);
@@ -44,13 +44,10 @@ fn blocks(text: &str, level: usize) -> Option<Vec<(String, Range<usize>)>> {
     let mut result = Vec::with_capacity(keys.len());
     let mut end = text.len();
     for key in keys.into_iter().rev() {
-        let line = key.referenced.line() as usize;
+        let line = usize::try_from(key.referenced.line()).ok()?;
         let start = *offsets.get(line.checked_sub(1)?)?;
         let raw = text.get(start..end)?;
-        if raw.is_empty()
-            || raw.bytes().take_while(|b| *b == b' ').count() != level * 2
-            || raw.trim_start().starts_with('{')
-        {
+        if !standalone_block(raw, level * 2) {
             return None;
         }
         result.push((key.value, start..end));
@@ -106,53 +103,7 @@ pub(crate) fn parse_for_repair(
             }
         };
         for (section, field) in fields {
-            if !matches!(section.as_str(), "packages" | "snapshots") {
-                continue;
-            }
-            let field_text = &raw[field.clone()];
-            let Some(header) = header_end(field_text) else {
-                continue;
-            };
-            let body = &field_text[header..];
-            let Some(mut entries) = blocks(body, 1) else {
-                continue;
-            };
-            let reference =
-                reference.filter(|_| section == "snapshots" && kind == Some(DocumentKind::Project));
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for copies in entries
-                .chunk_by(|(a, _), (b, _)| a == b)
-                .filter(|c| c.len() > 1)
-            {
-                let key = &copies[0].0;
-                let values = copies
-                    .iter()
-                    .map(|(_, range)| {
-                        let raw = &body[range.clone()];
-                        serde_saphyr::from_str_with_options::<Value>(raw, options(raw.len()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let keep = if values[1..].iter().all(|value| value == &values[0]) {
-                    0
-                } else {
-                    reference
-                        .and_then(|doc| doc["snapshots"].get(key))
-                        .and_then(|witness| {
-                            values
-                                .iter()
-                                .position(|value| value.get(key) == Some(witness))
-                        })
-                        .ok_or_else(|| LockfileError::ResolutionRequired {
-                            path: vec![section.clone(), key.clone()],
-                            message: "duplicate records have different contents".into(),
-                            request: None,
-                        })?
-                };
-                let offset = start + field.start + header;
-                removals.extend(copies.iter().enumerate().filter_map(|(i, (_, range))| {
-                    (i != keep).then_some(offset + range.start..offset + range.end)
-                }));
-            }
+            duplicate_entries(raw, &section, field, start, kind, reference, &mut removals)?;
         }
     }
     if removals.is_empty() {
@@ -167,6 +118,65 @@ pub(crate) fn parse_for_repair(
     }
     output.push_str(&text[cursor..]);
     Lockfile::try_from(output)
+}
+
+fn duplicate_entries(
+    raw: &str,
+    section: &str,
+    field: Range<usize>,
+    document_start: usize,
+    kind: Option<DocumentKind>,
+    reference: Option<&Value>,
+    removals: &mut Vec<Range<usize>>,
+) -> Result<(), LockfileError> {
+    if !matches!(section, "packages" | "snapshots") {
+        return Ok(());
+    }
+    let field_text = &raw[field.clone()];
+    let Some(header) = header_end(field_text) else {
+        return Ok(());
+    };
+    let body = &field_text[header..];
+    let Some(mut entries) = blocks(body, 1) else {
+        return Ok(());
+    };
+    let reference =
+        reference.filter(|_| section == "snapshots" && kind == Some(DocumentKind::Project));
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for copies in entries
+        .chunk_by(|(a, _), (b, _)| a == b)
+        .filter(|c| c.len() > 1)
+    {
+        let key = &copies[0].0;
+        let values = copies
+            .iter()
+            .map(|(_, range)| {
+                let raw = &body[range.clone()];
+                serde_saphyr::from_str_with_options::<Value>(raw, options(raw.len()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let keep = if values[1..].iter().all(|value| value == &values[0]) {
+            0
+        } else {
+            reference
+                .and_then(|doc| doc["snapshots"].get(key))
+                .and_then(|witness| {
+                    values
+                        .iter()
+                        .position(|value| value.get(key) == Some(witness))
+                })
+                .ok_or_else(|| LockfileError::ResolutionRequired {
+                    path: vec![section.into(), key.clone()],
+                    message: "duplicate records have different contents".into(),
+                    request: None,
+                })?
+        };
+        let offset = document_start + field.start + header;
+        removals.extend(copies.iter().enumerate().filter_map(|(i, (_, range))| {
+            (i != keep).then_some(offset + range.start..offset + range.end)
+        }));
+    }
+    Ok(())
 }
 
 pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, LockfileError> {
@@ -217,7 +227,7 @@ fn edit_map<'a>(
     let (Some(old), Some(new)) = (before.as_object(), after.as_object()) else {
         return false;
     };
-    if raw.trim_start().starts_with('{') {
+    if raw.trim_start().starts_with(FLOW_MAP_OPEN) {
         return edit_flow(out, raw, old, new).is_some();
     }
     let Some(entries) = blocks(raw, path.len()) else {
@@ -255,50 +265,7 @@ fn edit_map<'a>(
         let Some((name, value)) = new.get_key_value(&key) else {
             continue;
         };
-        let source = &raw[range];
-        if old[&key] == *value {
-            out.push_str(source);
-            continue;
-        }
-        if let Some(header) = header_end(source)
-            && !value.as_object().is_none_or(Map::is_empty)
-        {
-            let offset = out.len();
-            out.push_str(&source[..header]);
-            path.push(name);
-            let edited = edit_map(out, &source[header..], &old[&key], value, path, eol);
-            path.pop();
-            if edited {
-                continue;
-            }
-            out.truncate(offset);
-        }
-        if let Some((start, _)) = source.match_indices('{').next()
-            && let (Some(old), Some(new)) = (old[&key].as_object(), value.as_object())
-        {
-            let saved = out.len();
-            out.push_str(&source[..start]);
-            if edit_flow(out, &source[start..], old, new).is_some() {
-                continue;
-            }
-            out.truncate(saved);
-        }
-        if value.is_string()
-            && old[&key].is_string()
-            && let Ok(map) = serde_saphyr::from_str::<BTreeMap<String, Spanned<String>>>(source)
-            && let Some(span) = map.get(&key).map(|v| v.referenced.span())
-            && let (Some(start), Some(len)) = (span.byte_offset(), span.byte_len())
-            && let Some(token) = source.get(start as usize..(start + len) as usize)
-            && serde_saphyr::from_str::<String>(token).is_ok_and(|v| old[&key] == v)
-        {
-            out.push_str(&source[..start as usize]);
-            out.push_str(&yaml::scalar(value.as_str().expect("string pin")));
-            out.push_str(&source[(start + len) as usize..]);
-            continue;
-        }
-        let end = source.trim_end_matches(['\r', '\n']).len();
-        write(out, path, name, value, eol);
-        out.push_str(&source[end..]);
+        edit_entry(out, &raw[range], name, &old[&key], value, path, eol);
     }
     for k in additions {
         if !out.ends_with(eol) {
@@ -312,6 +279,59 @@ fn edit_map<'a>(
     true
 }
 
+fn edit_entry<'a>(
+    out: &mut String,
+    source: &str,
+    name: &'a str,
+    before: &Value,
+    value: &'a Value,
+    path: &mut Vec<&'a str>,
+    eol: &str,
+) {
+    if *before == *value {
+        out.push_str(source);
+        return;
+    }
+    if let Some(header) = header_end(source)
+        && value.as_object().is_some_and(|map| !map.is_empty())
+    {
+        let offset = out.len();
+        out.push_str(&source[..header]);
+        path.push(name);
+        let edited = edit_map(out, &source[header..], before, value, path, eol);
+        path.pop();
+        if edited {
+            return;
+        }
+        out.truncate(offset);
+    }
+    if let Some((start, _)) = source.match_indices(FLOW_MAP_OPEN).next()
+        && let (Some(old), Some(new)) = (before.as_object(), value.as_object())
+    {
+        let saved = out.len();
+        out.push_str(&source[..start]);
+        if edit_flow(out, &source[start..], old, new).is_some() {
+            return;
+        }
+        out.truncate(saved);
+    }
+    if value.is_string()
+        && before.is_string()
+        && let Ok(map) = serde_saphyr::from_str::<BTreeMap<String, Spanned<String>>>(source)
+        && let Some(range) = map.get(name).and_then(span_range)
+        && let Some(token) = source.get(range.clone())
+        && serde_saphyr::from_str::<String>(token).is_ok_and(|v| *before == v)
+    {
+        out.push_str(&source[..range.start]);
+        out.push_str(&yaml::scalar(value.as_str().expect("string pin")));
+        out.push_str(&source[range.end..]);
+        return;
+    }
+    let end = source.trim_end_matches(['\r', '\n']).len();
+    write(out, path, name, value, eol);
+    out.push_str(&source[end..]);
+}
+
 // Flow mappings (including JSON lockfiles) retain each unchanged pair. The
 // parser locates quoted keys, so commas and colons in a key or value are data.
 fn edit_flow(
@@ -321,14 +341,16 @@ fn edit_flow(
     new: &Map<String, Value>,
 ) -> Option<()> {
     let Locations(keys) = serde_saphyr::from_str_with_options(raw, options(raw.len())).ok()?;
-    let close = raw.rfind('}')?;
+    let close = raw.rfind(FLOW_MAP_CLOSE)?;
     let mut entries = Vec::new();
     for key in keys {
-        let span = key.referenced.span();
-        let start = span.byte_offset()? as usize;
-        let end = start + span.byte_len()? as usize;
-        let rest = raw.get(end..)?.trim_start().strip_prefix(':')?.trim_start();
-        entries.push((key.value, start, raw.len() - rest.len()));
+        let range = span_range(&key)?;
+        let rest = raw
+            .get(range.end..)?
+            .trim_start()
+            .strip_prefix(':')?
+            .trim_start();
+        entries.push((key.value, range.start, raw.len() - rest.len()));
     }
     if entries.len() != old.len() {
         return None;
@@ -385,6 +407,13 @@ fn edit_flow(
     result.push_str(raw.get(close..)?);
     out.push_str(&result);
     Some(())
+}
+
+fn span_range<T>(value: &Spanned<T>) -> Option<Range<usize>> {
+    let span = value.referenced.span();
+    let start = usize::try_from(span.byte_offset()?).ok()?;
+    let len = usize::try_from(span.byte_len()?).ok()?;
+    Some(start..start.checked_add(len)?)
 }
 
 fn insert(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str, spaced: bool) {

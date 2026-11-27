@@ -26,12 +26,12 @@ fn composed_extension_checksums_follow_the_verified_input_format() {
         let before = cfg(&before);
         let after = cfg(&after);
         let context = MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before; 3],
             configuration: &after,
             patches: &patches,
+            registry: None,
         };
         let output = merge(&lock, &lock, &lock, Some(&context)).unwrap();
         assert_eq!(
@@ -75,12 +75,12 @@ fn package_extensions_only_restrict_sources_for_matching_packages() {
             &ours,
             &theirs,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &before, &final_config],
                 configuration: &final_config,
                 patches: &patches,
+                registry: None,
             }),
         );
         if compatible {
@@ -165,12 +165,12 @@ fn changed_extensions_rebind_nested_instances_and_propagate_new_peers() {
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&before, &before, &after],
             configuration: &after,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -220,12 +220,12 @@ fn added_extensions_rebuild_parent_instances_with_new_transitive_peers() {
             &source,
             &donor,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&before, &before, &after],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -279,12 +279,12 @@ fn added_extensions_recompute_optional_usage_through_cycles_and_aliases() {
             &source,
             &donor,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&before, &before, &after],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -326,12 +326,12 @@ fn added_extensions_preserve_existing_dependencies_and_apply_qualified_overrides
         &source,
         &donor,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&before, &before, &after],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -387,12 +387,12 @@ fn reconstruction_finds_locked_packages_for_modern_npm_shorthand() {
                 &source,
                 &donor,
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Ours,
                     manifests: &manifests,
                     configurations: [&before, &before, &after],
                     configuration: &after,
                     patches: &BTreeMap::new(),
+                    registry: None,
                 }),
             )
             .unwrap();
@@ -429,12 +429,12 @@ fn added_extensions_prefer_existing_configured_graphs_before_rebuilding_sources(
         &source,
         &donor,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&before, &before, &after],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -482,12 +482,12 @@ fn removed_overrides_recover_extension_declarations_from_unmodified_sources() {
             &source,
             &witness,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&before, &before, &witness_config],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         );
         if removed_in_source {

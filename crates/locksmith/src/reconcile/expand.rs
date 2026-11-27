@@ -242,6 +242,15 @@ struct InputEdge<'a> {
     can_be_full_key: bool,
 }
 
+type AddedPeerEdge<'a> = (&'static str, &'a str, String, bool);
+
+#[derive(Clone, Copy)]
+struct SnapshotEdges<'pass, 'input> {
+    input: &'pass InputSnapshot<'input>,
+    added_edges: &'pass [AddedPeerEdge<'input>],
+    unbound: &'pass BTreeSet<String>,
+}
+
 struct DeferredContext {
     side: usize,
     original: Symbol,
@@ -987,7 +996,6 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
         };
         let original_key = self.peers.origin_key(key).to_owned();
         let original_bindings = self.peers.original_context(side, &original_key, &previous);
-        let own = input.own;
         let unbound = self.bind_providers(key, scope, input, &mut bindings)?;
         // Resolve missing providers before memoization: their concrete context
         // can depend on enclosing peers absent from this node's old identity.
@@ -998,39 +1006,7 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 .filter(|(name, _)| names.contains(*name))
                 .map(|(name, value)| (name.as_str(), value.as_str())),
         );
-        // A release shared by several descendants deliberately has no concrete
-        // instance. Keep its enclosing context in the key until children bind it.
-        let mut indirect = Vec::new();
-        for name in self
-            .required
-            .get(key)
-            .into_iter()
-            .flatten()
-            .map(|(name, _)| name)
-        {
-            let Some(value) = bindings.get(name) else {
-                continue;
-            };
-            if !value.starts_with("link:")
-                && !value.contains('(')
-                && !self.snapshots.contains_key(&graph::snapshot_key(
-                    name,
-                    value,
-                    Some(self.snapshots),
-                ))
-            {
-                indirect.extend(
-                    self.provider_dependencies
-                        .get(&self.environments.symbol(name))
-                        .into_iter()
-                        .flatten()
-                        .copied(),
-                );
-            }
-        }
-        indirect.sort_unstable();
-        indirect.dedup();
-        let indirect = self.environments.project(scope, &indirect);
+        let indirect = self.indirect_context(key, scope, &bindings);
         state.provider_context = self.environments.combine(state.provider_context, indirect);
         if let Some(resolved) = self.traversal.cache.get(&state) {
             self.traversal.input_cache.insert(input_state, *resolved);
@@ -1067,8 +1043,90 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 .remember(state, input_state, instance.identity);
             return Ok(Some(instance.identity));
         }
+        let (mut body, added_edges) =
+            self.prepare_edges(key, side == super::PUBLISHED, input, &bindings, &unbound)?;
+        let edges = SnapshotEdges {
+            input,
+            added_edges: &added_edges,
+            unbound: &unbound,
+        };
+        let (desired, settled) = self.settle_edges(
+            scope,
+            edges,
+            &mut body,
+            &mut bindings,
+            initial.clone(),
+            encode,
+        )?;
+        self.traversal.active.remove(&instance);
+        if !settled || (self.traversal.back_edges.remove(&instance) && desired != initial) {
+            return Err(missing(
+                &["snapshots", key],
+                "new peer identities do not reach a stable cycle",
+            ));
+        }
+        self.finish_snapshot(key, input, &mut body);
+        let resolved = self.publish_instance(
+            side,
+            &original_key,
+            original_bindings.as_deref(),
+            desired,
+            bindings,
+            body,
+        )?;
+        self.traversal.remember(state, input_state, resolved);
+        if self.policy.lock.dedupe_peers {
+            self.traversal.completed.insert(instance, resolved);
+        }
+        Ok(Some(resolved))
+    }
+
+    fn indirect_context(&mut self, key: &str, scope: &Environment, bindings: &Scope) -> Context {
+        // A release shared by several descendants deliberately has no concrete
+        // instance. Keep its enclosing context in the key until children bind it.
+        let mut indirect = Vec::new();
+        for name in self
+            .required
+            .get(key)
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| name)
+        {
+            let Some(value) = bindings.get(name) else {
+                continue;
+            };
+            if !value.starts_with("link:")
+                && !value.contains('(')
+                && !self.snapshots.contains_key(&graph::snapshot_key(
+                    name,
+                    value,
+                    Some(self.snapshots),
+                ))
+            {
+                indirect.extend(
+                    self.provider_dependencies
+                        .get(&self.environments.symbol(name))
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+            }
+        }
+        indirect.sort_unstable();
+        indirect.dedup();
+        self.environments.project(scope, &indirect)
+    }
+
+    fn prepare_edges(
+        &mut self,
+        key: &str,
+        published: bool,
+        input: &InputSnapshot<'a>,
+        bindings: &Scope,
+        unbound: &BTreeSet<String>,
+    ) -> Result<(Cow<'a, Value>, Vec<AddedPeerEdge<'a>>), LockfileError> {
         let edges = &input.edges;
-        let mut body = Cow::Borrowed(original);
+        let mut body = Cow::Borrowed(input.original);
         for edge in edges {
             let (group, name, value, is_peer) = (edge.group, edge.name, edge.reference, edge.peer);
             if is_peer && unbound.contains(name) {
@@ -1079,16 +1137,16 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 continue;
             }
             if is_peer
-                && let Some(bound) = self.bound_reference(name, value, &bindings)?
+                && let Some(bound) = self.bound_reference(name, value, bindings)?
                 && bound != value
             {
                 body.to_mut()[group][name] = Value::String(bound);
             }
         }
-        let mut added_edges: Vec<(&'static str, &str, String, bool)> = Vec::new();
-        if side == super::PUBLISHED {
+        let mut added_edges = Vec::new();
+        if published {
             for (name, requirement) in self.required.get(key).into_iter().flatten() {
-                if own.is_some_and(|peers| peers.contains_key(name))
+                if input.own.is_some_and(|peers| peers.contains_key(name))
                     && let Some(binding) = bindings.get(name)
                     && EDGES.iter().all(|group| body[*group].get(name).is_none())
                 {
@@ -1107,27 +1165,49 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 }
             }
         }
-        let mut desired = initial.clone();
+        Ok((body, added_edges))
+    }
+
+    fn edge_scope(&mut self, scope: &Environment, body: &Value, bindings: &Scope) -> Environment {
+        let inherited = bindings
+            .iter()
+            .filter(|(n, _)| n.as_str() != "patch_hash")
+            .map(|(n, v)| (n.as_str(), v.as_str()));
+        if references(body).any(|(_, n, v)| peer::canonical_binding(n, v).0 != n) {
+            let local = providers(body);
+            self.environments.overlay(
+                scope,
+                inherited.chain(local.iter().map(|(n, v)| (n.as_str(), v.as_str()))),
+            )
+        } else {
+            self.environments.overlay(
+                scope,
+                inherited.chain(references(body).map(|(_, n, v)| (n, v))),
+            )
+        }
+    }
+
+    fn settle_edges(
+        &mut self,
+        scope: &Environment,
+        edges: SnapshotEdges<'_, 'a>,
+        body: &mut Cow<'a, Value>,
+        bindings: &mut Scope,
+        initial: String,
+        encode: impl Fn(&mut peer::Merger<'_>, &Scope) -> Result<String, LockfileError>,
+    ) -> Result<(String, bool), LockfileError> {
+        let SnapshotEdges {
+            input,
+            added_edges,
+            unbound,
+        } = edges;
+        let mut desired = initial;
         let mut settled = false;
-        for _ in 0..=(edges.len() + added_edges.len()) {
-            let inherited = bindings
-                .iter()
-                .filter(|(n, _)| n.as_str() != "patch_hash")
-                .map(|(n, v)| (n.as_str(), v.as_str()));
-            let local = if references(&body).any(|(_, n, v)| peer::canonical_binding(n, v).0 != n) {
-                let local = providers(&body);
-                self.environments.overlay(
-                    scope,
-                    inherited.chain(local.iter().map(|(n, v)| (n.as_str(), v.as_str()))),
-                )
-            } else {
-                self.environments.overlay(
-                    scope,
-                    inherited.chain(references(&body).map(|(_, n, v)| (n, v))),
-                )
-            };
+        for _ in 0..=(input.edges.len() + added_edges.len()) {
+            let local = self.edge_scope(scope, body, bindings);
             let mut changed = false;
-            for (group, name, initial_ref, is_peer, edge_child, unchanged, can_be_full_key) in edges
+            for (group, name, initial_ref, is_peer, edge_child, unchanged, can_be_full_key) in input
+                .edges
                 .iter()
                 .map(|edge| {
                     (
@@ -1160,12 +1240,12 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                     continue;
                 }
                 let bound = if is_peer {
-                    self.bound_reference(name, initial_ref, &bindings)?
+                    self.bound_reference(name, initial_ref, bindings)?
                 } else {
                     None
                 };
                 let mut chosen = bound.as_deref().unwrap_or(initial_ref);
-                let from_scope = if is_peer && names.contains(name) {
+                let from_scope = if is_peer && input.names.contains(name) {
                     self.bound_from_scope(name, chosen, scope)?
                 } else {
                     None
@@ -1216,7 +1296,7 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                     body.to_mut()[group][name] = Value::String(next.into());
                 }
             }
-            let next = encode(self.peers, &bindings)?;
+            let next = encode(self.peers, bindings)?;
             changed |= desired != next;
             desired = next;
             if !changed {
@@ -1224,26 +1304,6 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 break;
             }
         }
-        self.traversal.active.remove(&instance);
-        if !settled || (self.traversal.back_edges.remove(&instance) && desired != initial) {
-            return Err(missing(
-                &["snapshots", key],
-                "new peer identities do not reach a stable cycle",
-            ));
-        }
-        self.finish_snapshot(key, input, &mut body);
-        let resolved = self.publish_instance(
-            side,
-            &original_key,
-            original_bindings.as_deref(),
-            desired,
-            bindings,
-            body,
-        )?;
-        self.traversal.remember(state, input_state, resolved);
-        if self.policy.lock.dedupe_peers {
-            self.traversal.completed.insert(instance, resolved);
-        }
-        Ok(Some(resolved))
+        Ok((desired, settled))
     }
 }

@@ -10,14 +10,15 @@ mod compatibility;
 
 pub(crate) use bootstrap::locked_config_resolution;
 pub(crate) use compatibility::{
-    ExtensionAddition, ResolutionCompatibility, extension_fields, matches_patterns,
-    optional_patterns,
+    ExtensionAddition, ExtensionFields, ResolutionCompatibility, extension_fields,
+    matches_patterns, optional_patterns,
 };
 
 /// Which declaration wins when matching override ranges have equal priority.
 /// pnpm 9–11 prefer the last matching declaration; pnpm 12 prefers the first.
 /// Callers select this explicitly; graph operations do not infer a pnpm version.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OverrideTieBreak {
     /// Prefer the first matching declaration at equal specificity.
     First,
@@ -27,7 +28,8 @@ pub enum OverrideTieBreak {
 }
 
 /// Encoding of linked workspace paths inside peer instance identifiers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum LinkedPeerEncoding {
     /// pnpm 9–10: filename normalization with a 100 UTF-16 code-unit limit.
     #[default]
@@ -37,7 +39,8 @@ pub enum LinkedPeerEncoding {
 }
 
 /// Hash and record format for normalized patch contents.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PatchEncoding {
     /// pnpm 9: MD5/Base32 hash and configured path.
     Md5Base32WithPath,
@@ -49,17 +52,20 @@ pub enum PatchEncoding {
 }
 
 /// Package-extension checksum written by the consuming package manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum ExtensionChecksum {
     /// MD5 checksum used by pnpm 9.
     Md5,
     /// SHA-256 checksum used by pnpm 10 and later.
+    #[default]
     Sha256,
 }
 
 /// Which installed packages may supply a newly required optional peer.
 /// Adapters choose this explicitly when package-manager versions differ.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OptionalPeerScope {
     /// Providers installed by any workspace member can satisfy an optional peer.
     #[default]
@@ -218,6 +224,7 @@ impl WorkspaceConfig {
 
     /// Read the project's pnpm version, using its locked version for a compatible range
     /// or when the manifest leaves the version unspecified.
+    #[must_use]
     pub fn project_pnpm_version(
         manifest: &Value,
         recorded: Option<node_semver::Version>,
@@ -287,15 +294,8 @@ impl WorkspaceConfig {
         self.since((11, 26, 0), (12, 3, 2))
     }
 
-    /// Whether both configurations name pnpm releases in different major versions.
-    pub fn changes_pnpm_major(&self, other: &Self) -> bool {
-        self.pnpm_version
-            .as_ref()
-            .zip(other.pnpm_version.as_ref())
-            .is_some_and(|(a, b)| a.major() != b.major())
-    }
-
     /// Whether convergence must reconcile a changed, newly specified, or removed runner version.
+    #[must_use]
     pub fn changes_pnpm_version(&self, other: &Self) -> bool {
         self.pnpm_version != other.pnpm_version
     }

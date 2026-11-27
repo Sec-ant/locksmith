@@ -1,17 +1,28 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::Arc,
 };
 
 use crate::{LockfileError, Value, graph, manifest, patch, pin, schema, source::Source};
 
 /// The project dependency graph or pnpm's package-manager bootstrap graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum DocumentKind {
     /// Bootstrap dependencies for the package manager itself.
     Environment,
     /// Workspace importers and their package graph.
     Project,
+}
+
+impl fmt::Display for DocumentKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Environment => "environment",
+            Self::Project => "project",
+        })
+    }
 }
 
 /// An immutable, parsed lockfile. Unknown metadata fields are retained.
@@ -36,6 +47,14 @@ impl TryFrom<String> for Lockfile {
     }
 }
 
+impl std::str::FromStr for Lockfile {
+    type Err = LockfileError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::parse(text)
+    }
+}
+
 impl Lockfile {
     /// Parse YAML, rejecting duplicate keys and unsupported format versions.
     ///
@@ -49,21 +68,25 @@ impl Lockfile {
     }
 
     /// Borrow the workspace graph, if the lock contains a project document.
+    #[must_use]
     pub fn project(&self) -> Option<&Value> {
         self.document(DocumentKind::Project)
     }
 
     /// Borrow the package-manager bootstrap graph when present.
+    #[must_use]
     pub fn environment(&self) -> Option<&Value> {
         self.document(DocumentKind::Environment)
     }
 
     /// Borrow the parsed document of the requested kind.
+    #[must_use]
     pub fn document(&self, kind: DocumentKind) -> Option<&Value> {
         self.documents.get(&kind).map(AsRef::as_ref)
     }
 
     /// Package-manager version recorded in pnpm's bootstrap document, when present.
+    #[must_use]
     pub fn recorded_pnpm_version(&self) -> Option<node_semver::Version> {
         self.environment()?["importers"]["."]["packageManagerDependencies"]["pnpm"]["version"]
             .as_str()?
@@ -139,6 +162,7 @@ impl Lockfile {
     }
 
     /// Manifest paths needed to determine linked peer provider versions, including non-member directories.
+    #[must_use]
     pub fn linked_peer_projects(&self) -> BTreeSet<String> {
         let mut ids = BTreeSet::new();
         let Some(doc) = self.project() else {

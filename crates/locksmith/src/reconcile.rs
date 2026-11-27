@@ -53,7 +53,7 @@ struct RepairedSnapshot {
 ///
 /// Each dependency is selected separately. This preference applies to ties
 /// throughout the merge, so a single result can contain pins from both branches.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MergeTarget {
     /// Prefer the first branch over the second for equally suitable pins.
     Ours,
@@ -82,10 +82,8 @@ impl MergeTarget {
 /// Manifests contain every final workspace importer, including the root `.`.
 /// Patch contents are keyed by their workspace-relative configured paths.
 /// Callers expand workspace globs and read files; the library performs no I/O.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MergeContext<'a> {
-    /// Published release data supplied by the caller. Locked graphs take precedence.
-    pub registry: Option<&'a crate::RegistryMetadata>,
     /// Branch with priority when compatible pins tie.
     pub target: MergeTarget,
     /// Final package manifests keyed by importer path, including `.`.
@@ -96,6 +94,8 @@ pub struct MergeContext<'a> {
     pub configuration: &'a crate::WorkspaceConfig,
     /// Final patch contents keyed by their declared workspace-relative paths.
     pub patches: &'a BTreeMap<String, String>,
+    /// Published release data supplied by the caller. Locked graphs take precedence.
+    pub registry: Option<&'a crate::RegistryMetadata>,
 }
 
 /// Merge using final manifests/configuration and an explicit target preference.
@@ -520,10 +520,14 @@ struct GraphSources<'a> {
 
 impl<'a> GraphSources<'a> {
     fn authorized_patch(&self, key: &str, metadata: &Value) -> bool {
-        self.desired_patch(key, metadata) == Some(patch::hash_in_key(key))
+        self.desired_patch(key, metadata) == Ok(patch::hash_in_key(key))
     }
 
-    fn desired_patch<'m>(&self, key: &str, metadata: &'m Value) -> Option<Option<&'m str>> {
+    fn desired_patch<'m>(
+        &self,
+        key: &str,
+        metadata: &'m Value,
+    ) -> Result<Option<&'m str>, patch::CompetingPatches> {
         patch::desired_hash(key, metadata, self.documents())
     }
 

@@ -10,7 +10,7 @@ impl PeerRange {
     pub(crate) fn new(wanted: &str, mode: PeerVersionMatching) -> Self {
         use PeerVersionMatching::*;
         let policies: &[_] = match mode {
-            Unspecified => &[ReleaseCompatible, Pnpm11],
+            Unspecified => &[Pnpm10, Pnpm11],
             _ => std::slice::from_ref(&mode),
         };
         Self(

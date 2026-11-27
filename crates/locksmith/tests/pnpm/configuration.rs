@@ -54,8 +54,8 @@ fn mixed_optional_rules_follow_native_resolution_and_frozen_validation() {
     let context = MergeContext {
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &config,
         configurations: [&config; 3],
+        configuration: &config,
         patches: &patches,
         registry: None,
     };
@@ -119,8 +119,8 @@ fn optional_extension_exclusions_match_a_clean_install_in_merge_and_repair() {
     let ctx = MergeContext {
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &final_config,
         configurations: [&old, &old, &final_config],
+        configuration: &final_config,
         patches: &patches,
         registry: None,
     };
@@ -189,12 +189,12 @@ fn changed_peer_overrides_match_fresh_resolution() {
             &locks[1],
             &locks[2],
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &BTreeMap::from([(".".into(), manifest)]),
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -250,12 +250,12 @@ fn peer_consumers_keep_provider_extensions_after_configuration_changes() {
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -332,12 +332,12 @@ fn removed_transitive_patch_reuses_the_original_package_artifact() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&old; 3],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -396,7 +396,7 @@ fn generated_override_specifiers_match_raw_manifests() {
                 override_tie_break: override_tie_break(),
                 ..Default::default()
             }),
-            registry: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -493,12 +493,12 @@ fn unrelated_package_extensions_preserve_both_branches_changes() {
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&before), &cfg(&after)],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -563,12 +563,12 @@ fn independently_added_package_extensions_pass_frozen_install() {
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&ours), &cfg(&theirs)],
             configuration: &cfg(&final_config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -608,6 +608,7 @@ fn reordered_overrides_merge_without_a_frozen_install_rewrite() {
     let (base_version, ours_version) = match override_tie_break() {
         locksmith::OverrideTieBreak::Last => ("6.0.0", "5.0.0"),
         locksmith::OverrideTieBreak::First => ("5.0.0", "6.0.0"),
+        other => panic!("unexpected override tie break: {other:?}"),
     };
     assert_eq!(
         base.project().unwrap()["importers"]["."]["dependencies"]["is-number"]["version"],
@@ -638,7 +639,7 @@ fn reordered_overrides_merge_without_a_frozen_install_rewrite() {
                 override_tie_break: override_tie_break(),
                 ..Default::default()
             }),
-            registry: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -650,12 +651,12 @@ fn reordered_overrides_merge_without_a_frozen_install_rewrite() {
         &ours,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&after), &cfg(&before)],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -703,12 +704,12 @@ fn override_upgrade_introduces_a_transitive_peer_under_the_final_provider() {
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -791,12 +792,12 @@ fn new_override_peers_propagate_through_an_injected_workspace_without_a_parent_w
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -899,12 +900,12 @@ fn new_and_changed_patches_match_fresh_resolution_and_installed_contents() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &BTreeMap::from([(".".into(), manifest)]),
                 configurations: [&before; 3],
                 configuration: &configuration,
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();
@@ -988,12 +989,12 @@ fn added_extensions_match_fresh_resolution_with_transitive_peers() {
             &locks[1],
             &locks[2],
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &BTreeMap::from([(".".into(), manifest)]),
                 configurations: [&old, &old, &final_config],
                 configuration: &final_config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -1062,12 +1063,12 @@ fn added_extensions_replace_enclosing_peers_with_local_providers() {
         &locks[0],
         &locks[1],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&old, &old, &final_config],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1131,12 +1132,12 @@ fn removed_overrides_recover_extensions_before_rebinding_new_peers() {
         &locks[0],
         &locks[1],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&old, &old, &witness],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1252,8 +1253,8 @@ fn catalog_range_overrides_and_publish_directory_match_a_fresh_install() {
         Some(&MergeContext {
             target: MergeTarget::Ours,
             manifests: &manifests,
-            configuration: &config,
             configurations: [&config; 3],
+            configuration: &config,
             patches: &patches,
             registry: None,
         }),
@@ -1275,7 +1276,7 @@ fn catalog_range_overrides_and_publish_directory_match_a_fresh_install() {
         ConvergeOptions {
             baseline_configuration: Some(&config),
             configuration: Some(&config),
-            registry: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1341,11 +1342,11 @@ fn merged_bootstrap_config_dependencies_pass_a_clean_frozen_install() {
     let patches = BTreeMap::new();
     let ctx = MergeContext {
         target: MergeTarget::Ours,
-        registry: None,
         manifests: &manifests,
-        configuration: &after,
         configurations: [&before, &before, &after],
+        configuration: &after,
         patches: &patches,
+        registry: None,
     };
     let merged = merge(&base, &ours, &theirs, Some(&ctx)).unwrap();
     merged

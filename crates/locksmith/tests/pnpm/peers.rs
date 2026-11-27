@@ -58,12 +58,12 @@ fn newly_required_peers_keep_each_workspace_provider_context() {
         &locks[1],
         &locks[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -143,12 +143,12 @@ fn reconstructed_opaque_peer_context_installs_the_selected_provider() {
         &ours,
         &opaque,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -348,12 +348,12 @@ fn check_contextual_alias_peers(max_suffix: Option<usize>, duplicate_aliases: bo
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&config); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -462,12 +462,12 @@ fn contextual_peer_prereleases_follow_the_package_manager_policy() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     );
     fs::write(
@@ -530,7 +530,7 @@ fn contextual_peer_prereleases_follow_the_package_manager_policy() {
     }
     let output = output.unwrap();
     let rules = PeerRules {
-        version_matching: PeerVersionMatching::ReleaseCompatible,
+        version_matching: PeerVersionMatching::Pnpm10,
         ..PeerRules::default()
     };
     assert!(inspect_peers(&output, &rules, None).is_empty());
@@ -637,12 +637,12 @@ fn deduplicated_descendant_peers_keep_the_ancestor_identity() {
             &locks[1],
             &locks[2],
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&configuration; 3],
                 configuration: &configuration,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -757,12 +757,12 @@ fn linked_workspace_peers_install_after_a_provider_move() {
             &locks[1],
             &locks[2],
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -851,12 +851,12 @@ fn newly_introduced_optional_peers_follow_workspace_sharing_settings() {
             &locks[1],
             &locks[2],
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();

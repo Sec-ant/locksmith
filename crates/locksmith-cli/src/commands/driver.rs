@@ -155,12 +155,12 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     }
     drop(blobs);
     let context = MergeContext {
-        registry: None,
         target,
         manifests: &manifests,
-        configuration: &config,
         configurations: configurations.each_ref(),
+        configuration: &config,
         patches: &patches,
+        registry: None,
     };
     let network = allow_network.then_some(crate::registry::ProjectRc::Git {
         settings: settings.as_deref(),

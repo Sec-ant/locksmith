@@ -246,6 +246,7 @@ impl WorkspaceConfig {
     }
 
     /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
+    #[must_use]
     pub fn requires_bootstrap_reconciliation(
         &self,
         after: &Self,

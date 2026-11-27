@@ -2,6 +2,74 @@ use locksmith::{ConflictKind, DocumentKind, Lockfile, LockfileError, Value, merg
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[test]
+fn public_library_types_are_send_and_sync() {
+    use locksmith::{
+        Conflict, ContextualMerge, ConvergeOptions, DependencyClosure, Disposition,
+        ExtensionChecksum, ExternalLink, Inspection, InspectionSummary, LinkSource,
+        LinkedPeerEncoding, LockSettings, LockedRelease, ManifestChange, MergeContext, MergeInput,
+        MergeTarget, OptionalPeerScope, OverrideTieBreak, PackageInstances, PatchEncoding,
+        PeerBinding, PeerGroup, PeerIssue, PeerRequirement, PeerRules, PeerStatus,
+        PeerVersionMatching, RegistryMetadata, RegistryRequest, RepairContext, RepairInput,
+        ResolutionSettings, UnknownReason, ValidationIssue, WorkspaceConfig,
+    };
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<(
+        Lockfile,
+        LockfileError,
+        DocumentKind,
+        Conflict,
+        ConflictKind,
+        ValidationIssue,
+    )>();
+    assert_send_sync::<(
+        MergeInput<'static>,
+        ContextualMerge<'static>,
+        MergeContext<'static>,
+        MergeTarget,
+        RepairInput,
+        RepairContext<'static>,
+        ConvergeOptions<'static>,
+        ManifestChange<'static>,
+    )>();
+    assert_send_sync::<(
+        WorkspaceConfig,
+        LockSettings,
+        ResolutionSettings,
+        LinkedPeerEncoding,
+        OverrideTieBreak,
+        OptionalPeerScope,
+        PatchEncoding,
+        ExtensionChecksum,
+        RegistryRequest,
+        RegistryMetadata,
+    )>();
+    assert_send_sync::<(
+        PeerRules,
+        PeerIssue,
+        PeerVersionMatching,
+        PeerStatus,
+        Disposition,
+        UnknownReason,
+        PeerRequirement,
+        PeerBinding,
+        PeerGroup,
+    )>();
+    assert_send_sync::<(
+        Inspection,
+        InspectionSummary,
+        ExternalLink,
+        LinkSource,
+        PackageInstances,
+        LockedRelease,
+        DependencyClosure,
+    )>();
+    #[cfg(feature = "bench-profile")]
+    assert_send_sync::<locksmith::profile::Span>();
+}
+
 fn lock(value: Value) -> Lockfile {
     Lockfile::parse(&serde_json::to_string(&value).unwrap()).unwrap()
 }
@@ -116,8 +184,8 @@ fn both_merge_modes_make_shared_snapshots_required_along_a_new_required_path() {
     let context = locksmith::MergeContext {
         target: locksmith::MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &config,
         configurations: [&config; 3],
+        configuration: &config,
         patches: &Default::default(),
         registry: None,
     };
@@ -866,12 +934,12 @@ fn contextual_output_renders_unsorted_importers_and_expanded_resolutions_in_pnpm
         &lock,
         &lock,
         Some(&locksmith::MergeContext {
-            configuration: &cfg,
-            configurations: [&cfg; 3],
             target: locksmith::MergeTarget::Ours,
-            registry: None,
             manifests: &manifests,
+            configurations: [&cfg; 3],
+            configuration: &cfg,
             patches: &std::collections::BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap()
@@ -942,12 +1010,12 @@ fn self_workspace_link_records_dot_path() {
         &base,
         &base,
         Some(&locksmith::MergeContext {
-            configuration: &cfg,
-            configurations: [&cfg; 3],
             target: locksmith::MergeTarget::Ours,
-            registry: None,
             manifests: &manifests,
+            configurations: [&cfg; 3],
+            configuration: &cfg,
             patches: &std::collections::BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();

@@ -18,6 +18,7 @@ pub(crate) const DEPENDENCIES: [&str; 5] = [
 /// Records reachable from one or more importers. Snapshot identities retain
 /// complete peer and patch suffixes; linked workspace projects are included.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DependencyClosure {
     /// Reachable workspace project paths, including the starting importers.
     pub importers: BTreeSet<String>,
@@ -31,6 +32,7 @@ impl DependencyClosure {
     /// Packages installed as multiple distinct peer/patch instances in this
     /// closure. Multiple instances can be legitimate; this is inspection data,
     /// not an automatic error or permission to collapse them.
+    #[must_use]
     pub fn variants(&self) -> BTreeMap<&str, Vec<&str>> {
         let mut variants: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for snapshot in &self.snapshots {
@@ -381,7 +383,7 @@ fn check_snapshot(
         Ok(actual)
             if (actual.is_some() || document.get("patchedDependencies").is_some())
                 && patch::desired_hash_with_index(key, document, [document; 4], Some(patches))
-                    != Some(actual) =>
+                    != Ok(actual) =>
         {
             "snapshot patch hash differs from the applicable patchedDependencies selector"
         }

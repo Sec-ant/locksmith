@@ -383,7 +383,7 @@ pub(crate) fn records(
             let value = reference(name, key);
             (accepts_pin(name, spec, &value, metadata, Some(config))
                 && desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
-                    == Some(patch::hash_in_key(key)))
+                    == Ok(patch::hash_in_key(key)))
             .then_some(value)
         })
     };
@@ -444,7 +444,8 @@ pub(crate) fn records(
                     })
                 })?;
                 let hash =
-                    desired_hash(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
+                    desired_hash(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])
+                        .ok()?;
                 let locator =
                     hash.map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
                 Some(reference(name, &locator))
@@ -490,7 +491,7 @@ pub(crate) fn records(
             body[field][name] = value.into();
         }
         let hash = desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
-            .ok_or_else(|| missing(&["patchedDependencies", key], "competing patch selectors"))?;
+            .map_err(|_| missing(&["patchedDependencies", key], "competing patch selectors"))?;
         let instance = hash.map_or_else(|| key.clone(), |h| format!("{key}(patch_hash={h})"));
         output["packages"][key] = package;
         output["snapshots"][instance] = body;

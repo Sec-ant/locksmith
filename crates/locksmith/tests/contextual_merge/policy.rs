@@ -24,12 +24,12 @@ fn peer_diagnostics_do_not_decide_acceptance_or_change_the_graph() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let mut context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&base, &changed, &base, Some(&context)).unwrap();
     let issues = inspect_peers(&output, &PeerRules::default(), None);
@@ -65,12 +65,12 @@ fn configured_peer_exceptions_apply_before_strict_policy() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&cfg(&before); 3],
                 configuration: &cfg(&config),
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();
@@ -137,17 +137,17 @@ fn strict_peer_policy_uses_pnpm_prerelease_matching() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&cfg(&config); 3],
                 configuration: &cfg(&config),
                 patches: &patches,
+                registry: None,
             }),
         );
         let output = result.unwrap();
         let rules = PeerRules {
-            version_matching: PeerVersionMatching::ReleaseCompatible,
+            version_matching: PeerVersionMatching::Pnpm10,
             ..PeerRules::default()
         };
         assert_eq!(
@@ -187,12 +187,12 @@ fn contextual_merge_requires_recorded_settings_matching_the_final_workspace() {
     let manifests = BTreeMap::from([(".".into(), json!({}))]);
     let final_config = config(opts(true, false));
     let mut context = MergeContext {
-        registry: None,
         target: MergeTarget::Ours,
         manifests: &manifests,
         configurations: configurations.each_ref(),
         configuration: &final_config,
         patches: &BTreeMap::new(),
+        registry: None,
     };
     assert!(matches!(
         merge(&base, &ours, &theirs, Some(&context)),
@@ -250,12 +250,12 @@ fn contextual_merge_matches_peer_suffix_limit_for_older_and_unknown_pnpm() {
         };
         let matching = input(&matching_settings);
         let context = MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         };
 
         for (preferred, other) in [(&matching, &stale), (&stale, &matching)] {

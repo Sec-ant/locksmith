@@ -28,12 +28,12 @@ impl<'a> Evidence<'a> {
         configurations: [&'a WorkspaceConfig; 3],
     ) -> MergeContext<'a> {
         MergeContext {
+            target: MergeTarget::Ours,
             manifests: self.context.manifests,
+            configurations,
             configuration: self.context.configuration,
             patches: self.context.patches,
             registry: self.context.registry,
-            configurations,
-            target: MergeTarget::Ours,
         }
     }
 

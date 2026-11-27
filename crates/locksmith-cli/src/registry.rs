@@ -651,6 +651,7 @@ impl Registry {
         let selected = match req {
             RegistryRequest::Manifest { version, .. } => version.as_str(),
             RegistryRequest::Version { selector, .. } => self.select(doc, selector, direct)?,
+            _ => return Err(format!("unsupported registry request: {req}").into()),
         };
         let raw = doc
             .versions

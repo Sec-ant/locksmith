@@ -187,7 +187,7 @@ The result is one `lib@1.0.0(a@3.0.0)(b@2.0.0)` snapshot. The app's importer ent
 
 `converge` starts from an installed candidate and removes the changes the edit did not require. It is the operation behind "edit one dependency, keep the rest of the lockfile".
 
-For a cross-major pnpm upgrade, declare the exact pnpm version in each root manifest. Convergence checks the installed candidate against the final workspace and patch contents, prefers compatible baseline pins and peer bindings, and takes the bootstrap graph from the new pnpm version. Rust callers supply all final manifests, both versioned configurations, and the patch contents through `converge_with_patches` for a patched workspace.
+For a cross-major pnpm upgrade, declare the exact pnpm version in each root manifest. Convergence checks the installed candidate against the final workspace and patch contents, prefers compatible baseline pins and peer bindings, and takes the bootstrap graph from the new pnpm version. Rust callers pass all final manifests and both versioned configurations to `converge`. For a patched workspace, set `ConvergeOptions::patches` to the final patch contents.
 
 ### Inputs
 

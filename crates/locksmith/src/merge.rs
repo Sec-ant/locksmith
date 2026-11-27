@@ -5,7 +5,7 @@ use serde_json::{Map, json};
 use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, graph, schema};
 
 /// A parsed lockfile or its original YAML text.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum MergeInput<'a> {
     /// Reuse an already parsed lockfile.
     Parsed(&'a Lockfile),
@@ -24,6 +24,7 @@ impl<'a> MergeInput<'a> {
     }
 
     /// Read the recorded runner from the bootstrap document, including recoverable YAML inputs.
+    #[must_use]
     pub fn recorded_pnpm_version(self) -> Option<node_semver::Version> {
         self.bootstrap()
             .0
@@ -33,6 +34,7 @@ impl<'a> MergeInput<'a> {
 
     /// Return explicitly declared tarballs whose matching bootstrap release omits its URL.
     /// Adapters need registry settings only for these packages.
+    #[must_use]
     pub fn implicit_config_tarballs(self, declarations: &Map<String, Value>) -> Vec<&str> {
         let (lock, _) = self.bootstrap();
         let Some(env) = lock.as_deref().and_then(Lockfile::environment) else {
@@ -76,6 +78,7 @@ impl<'a> From<&'a str> for MergeInput<'a> {
 
 /// The three inputs of a contextual merge, including the bootstrap graph selected
 /// while loading the final workspace. Reuse this value when adding registry evidence.
+#[derive(Debug, Clone, Copy)]
 pub struct ContextualMerge<'a> {
     pub(crate) inputs: [MergeInput<'a>; 3],
     pub(crate) bootstrap: Option<usize>,

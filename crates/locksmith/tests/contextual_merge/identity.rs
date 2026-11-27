@@ -79,12 +79,12 @@ fn converging_peer_contexts_prefer_the_existing_instance_and_keep_required_usage
             &make(1, true),
             &make(2, false),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -156,12 +156,12 @@ fn compatible_source_instances_replace_generated_instances_from_older_configurat
             &make(1, donor_provider, true),
             &make(2, 1, false),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -213,12 +213,12 @@ fn workspace_context_recovers_hashes_with_shadowed_transitive_peers() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&base, &ours, &theirs, Some(&context)).unwrap();
     assert_eq!(
@@ -296,12 +296,12 @@ fn hashed_parents_recover_peers_bound_only_in_deduplicated_descendants() {
             &make(2, 1),
             &make(1, 2),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();
@@ -344,12 +344,12 @@ fn aliased_peer_providers_update_both_identity_and_dependency_edge() {
     let patches = BTreeMap::new();
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&base, &ours, &theirs, Some(&context)).unwrap();
     let doc = output.project().unwrap();
@@ -424,12 +424,12 @@ fn distinct_aliases_of_one_peer_package_keep_independent_bindings() {
                 &make(4, 1),
                 &make(1, 5),
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Theirs,
                     manifests: &manifests,
                     configurations: [&config; 3],
                     configuration: &config,
                     patches: &patches,
+                    registry: None,
                 }),
             )
             .unwrap();
@@ -482,12 +482,12 @@ fn a_local_provider_replaces_an_inherited_alias_by_its_declared_peer_name() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -536,12 +536,12 @@ fn consumers_converging_to_one_peer_identity_use_target_regular_dependencies() {
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&config); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -613,12 +613,12 @@ fn flat_transitive_hashes_preserve_distinct_nested_provider_contexts() {
     let config = cfg(&json!({}));
     let patches = BTreeMap::new();
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&config; 3],
         configuration: &config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&make(1, 1), &make(2, 1), &make(1, 2), Some(&context)).unwrap();
     output.validate().unwrap();
@@ -678,12 +678,12 @@ fn explicit_peer_deduplication_coalesces_nested_contexts() {
             &input,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &patches,
+                registry: None,
             }),
         )
     };
@@ -745,12 +745,12 @@ fn an_existing_opaque_instance_is_reused_in_its_unchanged_provider_context() {
         &ours,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -821,12 +821,12 @@ fn opaque_context_candidates_are_selected_separately_for_each_workspace() {
         &ours,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -901,12 +901,12 @@ fn opaque_children_require_edge_or_enclosing_context_evidence() {
             &ours,
             &input,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&config; 3],
                 configuration: &config,
                 patches: &patches,
+                registry: None,
             }),
         );
         if child_peer == "unbound" {
@@ -1005,12 +1005,12 @@ fn unchanged_opaque_descendants_survive_new_peer_requirements() {
         &make(1, 2),
         &make(2, 1),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1112,12 +1112,12 @@ fn converging_instances_prefer_the_source_with_fewer_new_peer_requirements() {
         &make(1, true),
         &make(2, false),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1196,12 +1196,12 @@ fn converging_instances_preserve_the_closest_existing_provider_versions() {
         &make(1, true),
         &make(2, false),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1253,12 +1253,12 @@ fn opaque_flat_contexts_accept_enclosing_providers_absent_from_descendant_bindin
         &make(2),
         &make(1),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -1318,12 +1318,12 @@ fn cyclic_peers_keep_their_back_edges_short_and_their_shared_provider_qualified(
         &make("2.0.0", "1.0.0"),
         &make("1.0.0", "2.0.0"),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
+            manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
-            manifests: &manifests,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();

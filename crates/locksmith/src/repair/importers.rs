@@ -123,49 +123,16 @@ pub(super) fn repair<'a>(
             });
             if let Some(catalog) = catalog {
                 used_catalogs.insert((catalog.to_owned(), name.to_owned()));
-                // pnpm accepts a satisfied importer even when the lock contains
-                // no snapshot for this catalog entry.
-                let current = result["catalogs"][catalog].get(name);
-                let entry_fits = |entry: &Value| {
-                    if workspace_link.is_some() {
-                        catalog::link_entry_fits(range, entry)
-                    } else {
-                        catalog_fits(range, entry)
-                    }
-                };
-                if retained.is_none() || current.is_some_and(|entry| !entry_fits(entry)) {
-                    let proposed = metadata["catalogs"][catalog].get(name);
-                    let entry = if let Some(entry) = proposed.filter(|e| entry_fits(e)) {
-                        entry.clone()
-                    } else if let Some(pin) = retained {
-                        let version = if let Some((_, pkg)) = &workspace_link {
-                            pkg.and_then(|p| p["version"].as_str())
-                                .filter(|v| catalog::version_fits(range, v, Some(range)))
-                                .unwrap_or(range)
-                                .to_owned()
-                        } else {
-                            let base = pin::package_key(pin);
-                            let effective =
-                                pin::pinned_specifier(range, pin, Some(context.configuration));
-                            let target = pin::alias(effective).map_or(name, |(target, _)| target);
-                            pin::version_from_pin(name, target, base)
-                                .unwrap_or(base)
-                                .to_owned()
-                        };
-                        json!({"specifier":range,"version":version})
-                    } else {
-                        return Err(reconcile::published::need_version(
-                            &["catalogs", catalog, name],
-                            name,
-                            range,
-                            context.configuration,
-                            "missing catalog resolution".into(),
-                        ));
-                    };
-                    if current != Some(&entry) {
-                        result.to_mut()["catalogs"][catalog][name] = entry;
-                    }
-                }
+                update_catalog(
+                    &mut result,
+                    metadata,
+                    context.configuration,
+                    catalog,
+                    name,
+                    range,
+                    retained,
+                    workspace_link.as_ref(),
+                )?;
             }
             let dangling = retained.filter(|pin| pin.contains('(')).is_some_and(|pin| {
                 let key = graph::snapshot_key(name, pin, graph::section(doc, "snapshots"));
@@ -242,6 +209,72 @@ pub(super) fn repair<'a>(
             result.to_mut()["importers"][id] = next.into_owned();
         }
     }
+    prune_catalogs(doc, &mut result, context, &used_catalogs)?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_catalog(
+    result: &mut Cow<'_, Value>,
+    metadata: &Value,
+    config: &crate::WorkspaceConfig,
+    catalog: &str,
+    name: &str,
+    range: &str,
+    retained: Option<&str>,
+    workspace_link: Option<&(String, Option<&Value>)>,
+) -> Result<(), LockfileError> {
+    // pnpm accepts a satisfied importer even when the lock contains
+    // no snapshot for this catalog entry.
+    let current = result["catalogs"][catalog].get(name);
+    let entry_fits = |entry: &Value| {
+        if workspace_link.is_some() {
+            catalog::link_entry_fits(range, entry)
+        } else {
+            catalog_fits(range, entry)
+        }
+    };
+    if retained.is_none() || current.is_some_and(|entry| !entry_fits(entry)) {
+        let proposed = metadata["catalogs"][catalog].get(name);
+        let entry = if let Some(entry) = proposed.filter(|e| entry_fits(e)) {
+            entry.clone()
+        } else if let Some(pin) = retained {
+            let version = if let Some((_, pkg)) = workspace_link {
+                pkg.and_then(|p| p["version"].as_str())
+                    .filter(|v| catalog::version_fits(range, v, Some(range)))
+                    .unwrap_or(range)
+                    .to_owned()
+            } else {
+                let base = pin::package_key(pin);
+                let effective = pin::pinned_specifier(range, pin, Some(config));
+                let target = pin::alias(effective).map_or(name, |(target, _)| target);
+                pin::version_from_pin(name, target, base)
+                    .unwrap_or(base)
+                    .to_owned()
+            };
+            json!({"specifier":range,"version":version})
+        } else {
+            return Err(reconcile::published::need_version(
+                &["catalogs", catalog, name],
+                name,
+                range,
+                config,
+                "missing catalog resolution".into(),
+            ));
+        };
+        if current != Some(&entry) {
+            result.to_mut()["catalogs"][catalog][name] = entry;
+        }
+    }
+    Ok(())
+}
+
+fn prune_catalogs(
+    doc: &Value,
+    result: &mut Cow<'_, Value>,
+    context: &super::RepairContext<'_>,
+    used_catalogs: &BTreeSet<(String, String)>,
+) -> Result<(), LockfileError> {
     // pnpm compares every catalog snapshot in the lock with the workspace,
     // including entries left behind by a removed importer.
     for (catalog, entries) in graph::section(doc, "catalogs").into_iter().flatten() {
@@ -256,8 +289,8 @@ pub(super) fn repair<'a>(
                     .get(catalog)
                     .and_then(|m| m.get(name))
                     .is_none_or(|r| {
-                        !catalog_fits(r, entry)
-                            && !(catalog::link_entry_fits(r, entry)
+                        !(catalog_fits(r, entry)
+                            || catalog::link_entry_fits(r, entry)
                                 && context
                                     .manifests
                                     .values()
@@ -278,7 +311,7 @@ pub(super) fn repair<'a>(
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 fn catalog_fits(spec: &str, entry: &Value) -> bool {

@@ -21,6 +21,7 @@ use crate::{
 /// Final workspace inputs and optional evidence for missing records.
 /// Parents are (lock, effective configuration) pairs. Their order does not
 /// authorize replacing a valid pin in the current lock.
+#[derive(Debug, Clone, Copy)]
 pub struct RepairContext<'a> {
     /// Final manifests keyed by importer path, including the root at `.`.
     pub manifests: &'a BTreeMap<String, Value>,
@@ -35,6 +36,7 @@ pub struct RepairContext<'a> {
 }
 
 /// A parsed repair source that can be reused when more evidence becomes available.
+#[derive(Debug, Clone)]
 pub struct RepairInput(Lockfile);
 
 /// Repair the supplied YAML against the final workspace. A healthy input is
@@ -50,9 +52,18 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
     RepairInput::parse(text)?.apply(context)
 }
 
+impl std::str::FromStr for RepairInput {
+    type Err = LockfileError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::parse(text)
+    }
+}
+
 impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
+    #[must_use]
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
         crate::recovery::bootstrap_lockfile(text)?
             .0

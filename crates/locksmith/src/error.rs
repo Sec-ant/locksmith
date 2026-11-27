@@ -1,7 +1,10 @@
+use std::fmt;
+
 use crate::{DocumentKind, Value};
 
 /// A disagreement requiring the caller to select a coherent dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Conflict {
     /// Document in which the records disagree.
     pub document: DocumentKind,
@@ -18,7 +21,8 @@ pub struct Conflict {
 }
 
 /// Reason a three-way graph merge requires a decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConflictKind {
     /// Both branches supplied incompatible values.
     BothChanged,
@@ -30,6 +34,7 @@ pub enum ConflictKind {
 
 /// An invalid reference or malformed lockfile field.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationIssue {
     /// Document containing the invalid record.
     pub document: DocumentKind,
@@ -37,6 +42,54 @@ pub struct ValidationIssue {
     pub path: Vec<String>,
     /// Description of the invalid field or reference.
     pub message: String,
+}
+
+impl fmt::Display for ConflictKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::BothChanged => "incompatible changes",
+            Self::DeleteModify => "deletion conflicts with a modification",
+            Self::SharedDependency => "incompatible shared dependency",
+        })
+    }
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} at {}: {}",
+            self.document,
+            display_path(&self.path),
+            self.kind
+        )
+    }
+}
+
+impl fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} at {}: {}",
+            self.document,
+            display_path(&self.path),
+            self.message
+        )
+    }
+}
+
+fn display_path(path: &[String]) -> String {
+    if path.is_empty() {
+        "<root>".into()
+    } else {
+        path.join(" / ")
+    }
+}
+
+fn first_issue<T: fmt::Display>(issues: &[T]) -> String {
+    issues
+        .first()
+        .map_or_else(|| "none".into(), ToString::to_string)
 }
 
 pub(crate) fn issue(
@@ -53,12 +106,13 @@ pub(crate) fn issue(
 
 /// Input, resolution and output failures reported by lockfile operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LockfileError {
     /// Optional acceptance-layer rejection. Graph operations do not emit this.
-    #[error("peer policy rejects {} issues; first: {:?}", .0.len(), .0.first())]
+    #[error("peer policy rejects {} issues; first: {}", .0.len(), first_issue(.0))]
     UnmetPeers(Vec<crate::PeerIssue>),
     /// No unique compatible resolution follows from the available evidence.
-    #[error("resolution requires additional input at {path:?}: {message}")]
+    #[error("resolution requires additional input at {}: {message}", display_path(.path))]
     ResolutionRequired {
         /// Mapping keys identifying the unresolved dependency or record.
         path: Vec<String>,
@@ -71,7 +125,7 @@ pub enum LockfileError {
     #[error("invalid YAML: {0}")]
     Parse(#[source] Box<serde_saphyr::Error>),
     /// The document uses an unsupported lockfile format.
-    #[error("unsupported lockfileVersion {version:?}; expected 9.0 (pnpm 9–12 default format)")]
+    #[error("unsupported lockfileVersion {version}; expected 9.0 (pnpm 9–12 default format)")]
     UnsupportedVersion {
         /// Value of the unsupported lockfileVersion field.
         version: Value,
@@ -80,10 +134,10 @@ pub enum LockfileError {
     #[error("invalid lockfile: {0}")]
     InvalidDocument(String),
     /// Recorded dependency edges or package metadata failed validation.
-    #[error("invalid dependency graph ({} issues); first: {:?}", .0.len(), .0.first())]
+    #[error("invalid dependency graph ({} issues); first: {}", .0.len(), first_issue(.0))]
     InvalidGraph(Vec<ValidationIssue>),
     /// The branches have incompatible changes that affect the result.
-    #[error("lockfile merge has {} conflicts; first path: {:?}", .0.len(), .0.first().map(|conflict| &conflict.path))]
+    #[error("lockfile merge has {} conflicts; first: {}", .0.len(), first_issue(.0))]
     Conflicts(Vec<Conflict>),
     /// A supplied workspace manifest is absent where required or has an invalid shape.
     #[error("expected package.json objects before and/or after the change to {0:?}")]
@@ -109,9 +163,6 @@ pub enum LockfileError {
     /// The caller could not read a workspace input needed for validation.
     #[error("could not read workspace input: {0}")]
     WorkspaceInput(String),
-    /// The YAML serializer failed while rendering the result.
-    #[error("could not serialize lockfile: {0}")]
-    Serialize(#[source] serde_saphyr::SerializeError),
     /// Rendered bytes did not reproduce the intended lockfile data.
     #[error("serialized lockfile does not reproduce its data")]
     OutputMismatch,

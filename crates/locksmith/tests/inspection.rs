@@ -134,7 +134,7 @@ fn reports_distinct_policy_exceptions_and_unknown_link_versions() {
     }
     let impossible_exception = PeerRules::from_pnpm(
         &json!({"peerDependencyRules":{"allowedVersions":{"host":">=2.0.0 <1.0.0"}}}),
-        PeerVersionMatching::ReleaseCompatible,
+        PeerVersionMatching::Pnpm10,
     )
     .unwrap();
     assert_eq!(
@@ -267,7 +267,7 @@ fn rejects_malformed_peer_declarations_with_their_location() {
 fn comparator_intersections_wildcards_and_prerelease_bounds_hold_in_every_policy() {
     for policy in [
         PeerVersionMatching::Pnpm9,
-        PeerVersionMatching::ReleaseCompatible,
+        PeerVersionMatching::Pnpm10,
         PeerVersionMatching::Pnpm11,
         PeerVersionMatching::Pnpm12,
         PeerVersionMatching::Unspecified,

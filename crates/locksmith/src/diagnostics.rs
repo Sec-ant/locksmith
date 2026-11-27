@@ -6,10 +6,11 @@ use crate::{Lockfile, LockfileError, Value, graph, pin, schema};
 use node_semver::Version;
 pub(crate) use range::PeerRange;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 /// Package-manager policy for comparing a peer declaration with its provider.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Hash)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum PeerVersionMatching {
     /// Standard npm semver, including its prerelease filtering.
@@ -17,7 +18,7 @@ pub enum PeerVersionMatching {
     Semver,
     /// Yarn-compatible peer comparison used by the pnpm 10 resolver.
     #[serde(rename = "pnpm10")]
-    ReleaseCompatible,
+    Pnpm10,
     /// pnpm 9 applies configured exceptions to displayed warnings only.
     Pnpm9,
     /// JS resolver with scheme ranges.
@@ -29,10 +30,11 @@ pub enum PeerVersionMatching {
 }
 impl PeerVersionMatching {
     /// Select the matching policy for a pnpm release, or compare across supported policies when unspecified.
+    #[must_use]
     pub fn for_pnpm(version: Option<&node_semver::Version>) -> Self {
         match version.map(|v| v.major()) {
             Some(9) => Self::Pnpm9,
-            Some(10) => Self::ReleaseCompatible,
+            Some(10) => Self::Pnpm10,
             Some(11) => Self::Pnpm11,
             Some(12) => Self::Pnpm12,
             _ => Self::Unspecified,
@@ -85,6 +87,7 @@ impl PeerRules {
 
 /// An unmet peer requirement. The caller decides whether this rejects a result.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct PeerIssue {
     /// Requester snapshot ID, including its peer suffix.
     pub snapshot: String,
@@ -96,10 +99,25 @@ pub struct PeerIssue {
     pub resolved: Option<String>,
 }
 
+impl fmt::Display for PeerIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} requires {}@{}",
+            self.snapshot, self.peer, self.wanted
+        )?;
+        match &self.resolved {
+            Some(reference) => write!(f, " (locked to {reference})"),
+            None => f.write_str(" (no provider)"),
+        }
+    }
+}
+
 /// Inspect peer requirements without changing the lockfile or accepting/rejecting
 /// it. A lockfile containing only an environment document has no workspace peers.
 /// Workspace manifests, keyed by importer path, supply versions for linked peers.
 /// Without that data, linked peer versions remain unresolved diagnostics.
+#[must_use]
 pub fn inspect_peers(
     lockfile: &Lockfile,
     rules: &PeerRules,
@@ -115,7 +133,8 @@ pub fn inspect_peers(
 }
 
 /// What the lock and configured exceptions say about a peer binding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum PeerStatus {
     /// The requester has no binding for a required peer.
@@ -130,7 +149,8 @@ pub enum PeerStatus {
 
 /// Whether the selected peer policy accepts this binding. Unknown evidence
 /// (for example, an external link without its manifest) stays explicit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum Disposition {
     /// The selected package-manager policy accepts the binding.
@@ -142,7 +162,8 @@ pub enum Disposition {
 }
 
 /// Evidence missing for a definitive version comparison.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum UnknownReason {
     /// The linked or otherwise opaque provider has no known version.

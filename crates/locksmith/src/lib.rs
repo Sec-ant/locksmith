@@ -21,7 +21,7 @@
 //! # Ok::<(), locksmith::LockfileError>(())
 //! ```
 
-#![warn(missing_docs)]
+#![warn(missing_docs, missing_debug_implementations)]
 
 // Layer 0: Foundation
 #[cfg(feature = "bench-profile")]
@@ -72,10 +72,7 @@ pub use config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
     PatchEncoding, ResolutionSettings, WorkspaceConfig,
 };
-pub use converge::{
-    ConvergeOptions, ManifestChange, converge, converge_with_patches,
-    converge_with_recorded_baselines,
-};
+pub use converge::{ConvergeOptions, ManifestChange, converge};
 pub use diagnostics::{
     Disposition, PeerIssue, PeerRules, PeerStatus, PeerVersionMatching, UnknownReason,
     inspect_peers,
@@ -88,7 +85,8 @@ pub use inspect::{
 };
 pub use lockfile::{DocumentKind, Lockfile};
 pub use merge::{ContextualMerge, MergeInput, merge};
+pub use node_semver::Version;
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
 pub use repair::{RepairContext, RepairInput, repair};
-pub use serde_json::Value;
+pub use serde_json::{Map, Value};

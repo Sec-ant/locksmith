@@ -48,7 +48,7 @@ fn manifest_driven_convergence_installs_and_removes_unrelated_workspace_drift() 
                 override_tie_break: override_tie_break(),
                 ..Default::default()
             }),
-            registry: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -159,7 +159,7 @@ fn generated_workspace_converges_peer_and_injected_packages_without_sibling_upgr
                 override_tie_break: override_tie_break(),
                 ..Default::default()
             }),
-            registry: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -275,7 +275,7 @@ fn extension_edits_keep_baseline_pins_and_match_native_peer_instances() {
         let options = ConvergeOptions {
             baseline_configuration: Some(&before.0),
             configuration: Some(&after.0),
-            registry: None,
+            ..Default::default()
         };
         let result = converge(&before.2, &after.2, &changes, options).unwrap();
         assert_eq!(result.project(), expected.2.project());
@@ -358,7 +358,7 @@ fn workspace_rules_converge_to_the_native_graph_in_each_consumer() {
         let options = ConvergeOptions {
             baseline_configuration: Some(&before.0),
             configuration: Some(&after.0),
-            registry: None,
+            ..Default::default()
         };
         let result = converge(&before.2, &after.2, &changes, options).unwrap();
         assert_eq!(result.project(), expected.2.project());
@@ -437,7 +437,7 @@ fn adding_a_peer_preserves_the_consumers_other_binding_in_a_new_hashed_instance(
     let opts = ConvergeOptions {
         baseline_configuration: Some(&base.0),
         configuration: Some(&fresh.0),
-        registry: None,
+        ..Default::default()
     };
     let changes = [ManifestChange {
         importer: ".",

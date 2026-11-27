@@ -83,21 +83,8 @@ pub(super) fn apply(
         .ok_or_else(|| missing(&[], "missing installed project lockfile"))?;
     let manifests = inputs.manifests;
     let root = manifests.iter().find(|m| m.importer == ".");
-    let root_reference_changed = after
-        .overrides
-        .iter()
-        .flatten()
-        .filter_map(|(_, v)| v.strip_prefix('$'))
-        .any(|name| {
-            root.is_some_and(|root| {
-                schema::DEPENDENCY_GROUPS.iter().any(|g| {
-                    root.before.and_then(|r| r.get(g)?.get(name))
-                        != root.after.and_then(|r| r.get(g)?.get(name))
-                })
-            })
-        });
     let changes_overrides = before.overrides != after.overrides
-        || root_reference_changed
+        || override_reference_changed(after, root)
         || !schema::same_override_order(base, donor);
     let changes_extensions = !rules(before)
         .into_iter()
@@ -128,61 +115,14 @@ pub(super) fn apply(
     checked_checksum(donor, after)?;
     let docs = [base, donor];
     let configs = [before, after];
-    let header = if changes_overrides
-        || before.catalogs != after.catalogs
-            && after
-                .overrides
-                .iter()
-                .flatten()
-                .any(|(_, v)| v.starts_with("catalog:"))
-    {
-        rules::checked_overrides(base, before, root.and_then(|m| m.before))?;
-        Some(rules::checked_overrides(
-            donor,
-            after,
-            root.and_then(|m| m.after),
-        )?)
-    } else {
-        None
-    };
+    let header = override_header(docs, configs, root, changes_overrides)?;
     let names = if changes_overrides {
         rules::override_names(docs)
     } else {
         BTreeSet::new()
     };
     let overrides = manifest::Overrides::new(donor, after);
-    let mut override_edits = BTreeMap::<&str, BTreeSet<&str>>::new();
-    if !names.is_empty() {
-        let previous = manifest::Overrides::new(base, before);
-        for doc in docs {
-            for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
-                let pkg = pin::package_key(key);
-                if !pkg.contains('@') {
-                    continue;
-                }
-                for name in edges(body).map(|(_, n, _)| n.as_str()).chain(
-                    graph::section(&doc["packages"][pkg], "peerDependencies")
-                        .into_iter()
-                        .flatten()
-                        .map(|(n, _)| n.as_str()),
-                ) {
-                    if names.contains(name) {
-                        override_edits.entry(pkg).or_default().insert(name);
-                    }
-                }
-            }
-        }
-        // One release can have many peer instances in both locks. Match each
-        // parent/child selector once, independent of the number of instances.
-        override_edits.retain(|pkg, children| {
-            let (parent, version) = pkg.rsplit_once('@').expect("versioned package");
-            children.retain(|name| {
-                previous.relevant(name, parent, version)
-                    != overrides.relevant(name, parent, version)
-            });
-            !children.is_empty()
-        });
-    }
+    let override_edits = changed_override_edges(docs, before, &names, &overrides);
     let policy = config::ResolutionCompatibility::new(&before.resolution, &after.resolution, base);
     let affected = if changes_extensions || !override_edits.is_empty() {
         super::affected_by(base, |key| {
@@ -212,11 +152,14 @@ pub(super) fn apply(
         } else {
             RootChoices::new()
         };
-    if let Some(header) = header {
-        if let Some(v) = header {
-            output["overrides"] = v;
-        } else {
-            output.as_object_mut().unwrap().remove("overrides");
+    match header {
+        OverrideHeader::Keep => {}
+        OverrideHeader::Replace(value) => output["overrides"] = value,
+        OverrideHeader::Remove => {
+            output
+                .as_object_mut()
+                .expect("project mapping")
+                .remove("overrides");
         }
     }
     let roots = rules::importer_choices(docs, configs, &output, &names, catalog_roots)?;
@@ -252,74 +195,7 @@ pub(super) fn apply(
             after.resolution.lock.dedupe_peers,
             after.linked_peer_encoding,
         );
-        for (id, root) in graph::section(base, "importers").into_iter().flatten() {
-            for group in schema::DEPENDENCY_GROUPS {
-                for (name, dep) in graph::section(root, group).into_iter().flatten() {
-                    let Some(pin) = dep["version"].as_str() else {
-                        return Err(
-                            missing(&["importers", id, name], "missing baseline pin").into()
-                        );
-                    };
-                    let old = graph::snapshot_key(name, pin, graph::section(base, "snapshots"));
-                    if roots
-                        .get(id)
-                        .and_then(|r| r.get(name))
-                        .is_some_and(|r| *r != RootChoice::Baseline)
-                        || !walk.affected.contains(&old)
-                    {
-                        continue;
-                    }
-                    let current = &donor["importers"][id][group][name];
-                    if current.is_null() {
-                        let removed =
-                            manifests
-                                .iter()
-                                .find(|m| m.importer == id)
-                                .is_some_and(|m| {
-                                    m.after.is_none_or(|v| {
-                                        v.get(group).and_then(|deps| deps.get(name)).is_none()
-                                            && v.get("peerDependencies")
-                                                .and_then(|deps| deps.get(name))
-                                                .is_none()
-                                    })
-                                });
-                        if removed {
-                            continue;
-                        }
-                        return Err(missing(
-                            &["importers", id, group, name],
-                            "installed lock is missing the affected dependency",
-                        )
-                        .into());
-                    }
-                    if current.get("specifier") != dep.get("specifier")
-                        && (inputs.recorded.contains(id)
-                            || manifests
-                                .iter()
-                                .any(|m| m.importer == id && m.before != m.after))
-                    {
-                        let fits = current["specifier"].as_str().is_some_and(|s| {
-                            catalog::accepts_pin(name, s, pin, &output, Some(after))
-                        });
-                        if !fits {
-                            continue;
-                        }
-                    }
-                    let next = walk.witness(name, &old, current.get("version"))?;
-                    let selected = walk.visit(&old, &next)?;
-                    output["importers"][id][group][name]["version"] =
-                        pin::reference(name, &selected.key).into();
-                    if !selected.peers.is_empty() {
-                        bindings.push(bindings::Root {
-                            id: id.clone(),
-                            group,
-                            name: name.clone(),
-                            instance: selected,
-                        });
-                    }
-                }
-            }
-        }
+        bindings = walk.project_roots(&mut output, &roots, inputs)?;
         unprojected = walk.materialize(&mut output)?;
     }
     Ok(Some((
@@ -330,6 +206,99 @@ pub(super) fn apply(
             unprojected,
         },
     )))
+}
+
+fn override_reference_changed(
+    after: &WorkspaceConfig,
+    root: Option<&super::ManifestChange<'_>>,
+) -> bool {
+    after
+        .overrides
+        .iter()
+        .flatten()
+        .filter_map(|(_, v)| v.strip_prefix('$'))
+        .any(|name| {
+            root.is_some_and(|root| {
+                schema::DEPENDENCY_GROUPS.iter().any(|g| {
+                    root.before.and_then(|r| r.get(g)?.get(name))
+                        != root.after.and_then(|r| r.get(g)?.get(name))
+                })
+            })
+        })
+}
+
+enum OverrideHeader {
+    Keep,
+    Replace(Value),
+    Remove,
+}
+
+fn override_header(
+    [base, donor]: [&Value; 2],
+    [before, after]: [&WorkspaceConfig; 2],
+    root: Option<&super::ManifestChange<'_>>,
+    changes_overrides: bool,
+) -> Result<OverrideHeader, LockfileError> {
+    if changes_overrides
+        || before.catalogs != after.catalogs
+            && after
+                .overrides
+                .iter()
+                .flatten()
+                .any(|(_, v)| v.starts_with("catalog:"))
+    {
+        rules::checked_overrides(base, before, root.and_then(|m| m.before))?;
+        Ok(
+            match rules::checked_overrides(donor, after, root.and_then(|m| m.after))? {
+                Some(value) => OverrideHeader::Replace(value),
+                None => OverrideHeader::Remove,
+            },
+        )
+    } else {
+        Ok(OverrideHeader::Keep)
+    }
+}
+
+fn changed_override_edges<'a>(
+    docs: [&'a Value; 2],
+    before: &WorkspaceConfig,
+    names: &BTreeSet<&str>,
+    overrides: &manifest::Overrides<'_>,
+) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
+    let base = docs[0];
+    let mut override_edits = BTreeMap::<&str, BTreeSet<&str>>::new();
+    if !names.is_empty() {
+        let previous = manifest::Overrides::new(base, before);
+        for doc in docs {
+            for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
+                let pkg = pin::package_key(key);
+                if !pkg.contains('@') {
+                    continue;
+                }
+                for name in edges(body).map(|(_, n, _)| n.as_str()).chain(
+                    graph::section(&doc["packages"][pkg], "peerDependencies")
+                        .into_iter()
+                        .flatten()
+                        .map(|(n, _)| n.as_str()),
+                ) {
+                    if names.contains(name) {
+                        override_edits.entry(pkg).or_default().insert(name);
+                    }
+                }
+            }
+        }
+        // One release can have many peer instances in both locks. Match each
+        // parent/child selector once, independent of the number of instances.
+        override_edits.retain(|pkg, children| {
+            let (parent, version) = pkg.rsplit_once('@').expect("versioned package");
+            children.retain(|name| {
+                previous.relevant(name, parent, version)
+                    != overrides.relevant(name, parent, version)
+            });
+            !children.is_empty()
+        });
+    }
+    override_edits
 }
 
 struct SnapshotEdit {
@@ -515,6 +484,58 @@ impl Projector<'_> {
                     .filter(|n| before.get(n) != after.get(n)),
             );
         }
+        let mut peer_names =
+            Self::changed_peer_declarations(pkg, [old_pkg, new_pkg], &rules, &overridden)?;
+        // A changed ordinary dependency or override can supply an existing peer
+        // without changing the peer range published in the package record.
+        for &name in &changed {
+            if (old_pkg["peerDependencies"].get(name).is_some()
+                || new_pkg["peerDependencies"].get(name).is_some())
+                && dependency(&base["snapshots"][old], name)
+                    != dependency(&donor["snapshots"][next], name)
+            {
+                peer_names.insert(name);
+            }
+        }
+        if !peer_names.is_empty() {
+            let package = self
+                .packages
+                .entry(pkg.into())
+                .or_insert_with(|| old_pkg.clone());
+            for field in ["peerDependencies", "peerDependenciesMeta"] {
+                if let Some(v) = new_pkg.get(field) {
+                    package[field] = v.clone();
+                } else {
+                    package.as_object_mut().unwrap().remove(field);
+                }
+            }
+            let mut original = self.interface(0, old)?;
+            let mut installed = self.interface(1, next)?;
+            for &name in &peer_names {
+                let before = original.remove(name).unwrap_or_default();
+                let after = installed.remove(name).unwrap_or_default();
+                if before != after {
+                    edit.declared.insert(name.to_owned(), (before, after));
+                }
+            }
+            changed.extend(peer_names.iter().copied());
+        }
+        self.apply_rule_edges(
+            [old, next],
+            &rules[1],
+            &overridden,
+            &peer_names,
+            changed,
+            edit,
+        )
+    }
+
+    fn changed_peer_declarations<'a>(
+        pkg: &str,
+        [old_pkg, new_pkg]: [&'a Value; 2],
+        rules: &[config::ExtensionFields<'_>; 2],
+        overridden: &BTreeSet<&str>,
+    ) -> Result<BTreeSet<&'a str>, LockfileError> {
         let mut peer_names = BTreeSet::new();
         for (index, field) in ["peerDependencies", "peerDependenciesMeta"]
             .into_iter()
@@ -551,53 +572,34 @@ impl Projector<'_> {
                 }
             }
         }
-        // A changed ordinary dependency or override can supply an existing peer
-        // without changing the peer range published in the package record.
-        for &name in &changed {
-            if (old_pkg["peerDependencies"].get(name).is_some()
-                || new_pkg["peerDependencies"].get(name).is_some())
-                && dependency(&base["snapshots"][old], name)
-                    != dependency(&donor["snapshots"][next], name)
-            {
-                peer_names.insert(name);
-            }
-        }
-        if !peer_names.is_empty() {
-            let package = self
-                .packages
-                .entry(pkg.into())
-                .or_insert_with(|| old_pkg.clone());
-            for field in ["peerDependencies", "peerDependenciesMeta"] {
-                if let Some(v) = new_pkg.get(field) {
-                    package[field] = v.clone();
-                } else {
-                    package.as_object_mut().unwrap().remove(field);
-                }
-            }
-            let mut original = self.interface(0, old)?;
-            let mut installed = self.interface(1, next)?;
-            for &name in &peer_names {
-                let before = original.remove(name).unwrap_or_default();
-                let after = installed.remove(name).unwrap_or_default();
-                if before != after {
-                    edit.declared.insert(name.to_owned(), (before, after));
-                }
-            }
-            changed.extend(peer_names.iter().copied());
-        }
+        Ok(peer_names)
+    }
+
+    fn apply_rule_edges(
+        &mut self,
+        [old, next]: [&str; 2],
+        rules: &config::ExtensionFields<'_>,
+        overridden: &BTreeSet<&str>,
+        peer_names: &BTreeSet<&str>,
+        changed: BTreeSet<&str>,
+        edit: &mut SnapshotEdit,
+    ) -> Result<(), LockfileError> {
         if changed.is_empty() {
             return Ok(());
         }
+        let [base, donor] = self.docs;
+        let pkg = pin::package_key(old);
+        let new_pkg = &donor["packages"][pkg];
         let previous = &base["snapshots"][old];
         let installed = &donor["snapshots"][next];
-        let (parent, version) = pkg
+        let (parent_name, version) = pkg
             .rsplit_once('@')
             .ok_or_else(|| missing(&["packages", pkg], "expected a package identity"))?;
-        let parent = serde_json::json!({"name":parent,"version":version});
+        let parent = serde_json::json!({"name":parent_name,"version":version});
         for name in changed {
-            let declaration = rules[1][1]
+            let declaration = rules[1]
                 .get(name)
-                .or_else(|| rules[1][0].get(name))
+                .or_else(|| rules[0].get(name))
                 .map(|value| {
                     value.as_str().ok_or_else(|| {
                         missing(
@@ -609,9 +611,7 @@ impl Projector<'_> {
                 .transpose()?;
             let old_edge = dependency(previous, name);
             let installed_edge = dependency(installed, name);
-            let relevant = self
-                .overrides
-                .relevant(name, parent["name"].as_str().unwrap(), version);
+            let relevant = self.overrides.relevant(name, parent_name, version);
             let unconditional = overridden.contains(name)
                 && !relevant.is_empty()
                 && relevant
@@ -658,8 +658,8 @@ impl Projector<'_> {
             let recovered;
             if let Some(spec) = constraint.as_deref() {
                 let required_missing = installed_edge.is_none()
-                    && rules[1][0].contains_key(name)
-                    && !rules[1][1].contains_key(name);
+                    && rules[0].contains_key(name)
+                    && !rules[1].contains_key(name);
                 let wrong_pin = (old_edge.is_none() || unconditional)
                     && !peer_names.contains(name)
                     && installed_edge.is_some_and(|(_, pin)| {
@@ -677,8 +677,8 @@ impl Projector<'_> {
                         && self.config.resolution.pnpmfile_checksum.is_none()
                         && patch::hash_in_key(old).is_none()
                         && declaration.is_some_and(|d| d != spec)
-                        && rules[1][0].contains_key(name)
-                        && !rules[1][1].contains_key(name)
+                        && rules[0].contains_key(name)
+                        && !rules[1].contains_key(name)
                         && new_pkg["peerDependencies"].get(name).is_none()
                         && let Some(pin) =
                             self.peers
@@ -719,50 +719,141 @@ impl Projector<'_> {
             if old_edge == new_edge {
                 continue;
             }
-            let body = &mut edit.body;
-            if let Some((g, _)) = old_edge {
-                let map = body[g].as_object_mut().expect("existing dependency group");
-                map.remove(name);
-                if map.is_empty() {
-                    body.as_object_mut().unwrap().remove(g);
-                }
+            self.replace_edge(edit, name, old_edge, new_edge)?;
+        }
+        Ok(())
+    }
+
+    fn replace_edge(
+        &mut self,
+        edit: &mut SnapshotEdit,
+        name: &str,
+        old_edge: Option<(&str, &str)>,
+        new_edge: Option<(&str, &str)>,
+    ) -> Result<(), LockfileError> {
+        let body = &mut edit.body;
+        if let Some((g, _)) = old_edge {
+            let map = body[g].as_object_mut().expect("existing dependency group");
+            map.remove(name);
+            if map.is_empty() {
+                body.as_object_mut().unwrap().remove(g);
             }
-            if let Some((g, pin)) = new_edge {
-                body[g][name] = pin.into();
-            }
-            if old_edge.map(|e| e.1) != new_edge.map(|e| e.1) {
-                edit.touched.insert(name.to_owned());
-                let mut interfaces = [Interface::new(), Interface::new()];
-                for (side, edge) in [old_edge, new_edge].into_iter().enumerate() {
-                    if let Some((_, pin)) = edge {
-                        let key = graph::snapshot_key(
-                            name,
-                            pin,
-                            graph::section(self.docs[side], "snapshots"),
-                        );
-                        if self.docs[side]["snapshots"].get(&key).is_none() {
-                            return Err(missing(
-                                &["snapshots", &key],
-                                "missing locked extension dependency",
-                            ));
-                        }
-                        interfaces[side] = self.interface(side, &key)?;
-                        if side == 1 {
-                            self.new_children.insert(key);
-                        }
+        }
+        if let Some((g, pin)) = new_edge {
+            body[g][name] = pin.into();
+        }
+        if old_edge.map(|e| e.1) != new_edge.map(|e| e.1) {
+            edit.touched.insert(name.to_owned());
+            let mut interfaces = [Interface::new(), Interface::new()];
+            for (side, edge) in [old_edge, new_edge].into_iter().enumerate() {
+                if let Some((_, pin)) = edge {
+                    let key = graph::snapshot_key(
+                        name,
+                        pin,
+                        graph::section(self.docs[side], "snapshots"),
+                    );
+                    if self.docs[side]["snapshots"].get(&key).is_none() {
+                        return Err(missing(
+                            &["snapshots", &key],
+                            "missing locked extension dependency",
+                        ));
+                    }
+                    interfaces[side] = self.interface(side, &key)?;
+                    if side == 1 {
+                        self.new_children.insert(key);
                     }
                 }
-                for n in interfaces[0].keys().chain(interfaces[1].keys()) {
-                    edit.peer_change(
-                        name,
-                        n,
-                        interfaces[0].get(n).unwrap_or(&Binding::Absent),
-                        interfaces[1].get(n).unwrap_or(&Binding::Absent),
-                    );
-                }
+            }
+            for n in interfaces[0].keys().chain(interfaces[1].keys()) {
+                edit.peer_change(
+                    name,
+                    n,
+                    interfaces[0].get(n).unwrap_or(&Binding::Absent),
+                    interfaces[1].get(n).unwrap_or(&Binding::Absent),
+                );
             }
         }
         Ok(())
+    }
+
+    fn project_roots(
+        &mut self,
+        output: &mut Value,
+        roots: &RootChoices,
+        inputs: super::ChangeSet<'_>,
+    ) -> Result<Vec<bindings::Root>, ProjectionError> {
+        let [base, donor] = self.docs;
+        let mut bindings = Vec::new();
+        let manifests = inputs.manifests;
+        for (id, root) in graph::section(base, "importers").into_iter().flatten() {
+            for group in schema::DEPENDENCY_GROUPS {
+                for (name, dep) in graph::section(root, group).into_iter().flatten() {
+                    let Some(pin) = dep["version"].as_str() else {
+                        return Err(
+                            missing(&["importers", id, name], "missing baseline pin").into()
+                        );
+                    };
+                    let old = graph::snapshot_key(name, pin, graph::section(base, "snapshots"));
+                    if roots
+                        .get(id)
+                        .and_then(|r| r.get(name))
+                        .is_some_and(|r| *r != RootChoice::Baseline)
+                        || !self.affected.contains(&old)
+                    {
+                        continue;
+                    }
+                    let current = &donor["importers"][id][group][name];
+                    if current.is_null() {
+                        let removed =
+                            manifests
+                                .iter()
+                                .find(|m| m.importer == id)
+                                .is_some_and(|m| {
+                                    m.after.is_none_or(|v| {
+                                        v.get(group).and_then(|deps| deps.get(name)).is_none()
+                                            && v.get("peerDependencies")
+                                                .and_then(|deps| deps.get(name))
+                                                .is_none()
+                                    })
+                                });
+                        if removed {
+                            continue;
+                        }
+                        return Err(missing(
+                            &["importers", id, group, name],
+                            "installed lock is missing the affected dependency",
+                        )
+                        .into());
+                    }
+                    if current.get("specifier") != dep.get("specifier")
+                        && (inputs.recorded.contains(id)
+                            || manifests
+                                .iter()
+                                .any(|m| m.importer == id && m.before != m.after))
+                    {
+                        let fits = current["specifier"].as_str().is_some_and(|s| {
+                            catalog::accepts_pin(name, s, pin, output, Some(self.config))
+                        });
+                        if !fits {
+                            continue;
+                        }
+                    }
+                    let next = self.witness(name, &old, current.get("version"))?;
+                    let selected = self.visit(&old, &next)?;
+                    output["importers"][id][group][name]["version"] =
+                        pin::reference(name, &selected.key).into();
+                    if !selected.peers.is_empty() {
+                        bindings.push(bindings::Root {
+                            id: id.clone(),
+                            group,
+                            name: name.clone(),
+                            instance: selected,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(bindings)
     }
 
     fn materialize(mut self, output: &mut Value) -> Result<BTreeSet<String>, ProjectionError> {
