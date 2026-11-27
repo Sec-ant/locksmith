@@ -316,7 +316,10 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
         original_roots: &BTreeMap<String, Vec<(String, String)>>,
         workspace_root_peers: bool,
     ) -> Result<(), LockfileError> {
-        let ids: Vec<_> = importers.keys().cloned().collect();
+        let mut ids: Vec<_> = importers.keys().cloned().collect();
+        if let Some(pos) = ids.iter().position(|id| id == ".") {
+            ids[..=pos].rotate_right(1);
+        }
         for id in ids {
             if self.policy.optional_peer_scope != crate::OptionalPeerScope::Workspace {
                 self.scope_id += 1;
@@ -1082,6 +1085,7 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 body.to_mut()[group][name] = Value::String(bound);
             }
         }
+        let mut added_edges: Vec<(&'static str, &str, String, bool)> = Vec::new();
         if side == super::PUBLISHED {
             for (name, requirement) in self.required.get(key).into_iter().flatten() {
                 if own.is_some_and(|peers| peers.contains_key(name))
@@ -1094,12 +1098,18 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                         "dependencies"
                     };
                     body.to_mut()[group][name] = binding.clone().into();
+                    added_edges.push((
+                        group,
+                        name.as_str(),
+                        binding.clone(),
+                        self.peers.has_release(package_key(binding)),
+                    ));
                 }
             }
         }
         let mut desired = initial.clone();
         let mut settled = false;
-        for _ in 0..=edges.len() {
+        for _ in 0..=(edges.len() + added_edges.len()) {
             let inherited = bindings
                 .iter()
                 .filter(|(n, _)| n.as_str() != "patch_hash")
@@ -1117,9 +1127,35 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                 )
             };
             let mut changed = false;
-            for edge in edges {
-                let (group, name, initial_ref, is_peer) =
-                    (edge.group, edge.name, edge.reference, edge.peer);
+            for (group, name, initial_ref, is_peer, edge_child, unchanged, can_be_full_key) in edges
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.group,
+                        edge.name,
+                        edge.reference,
+                        edge.peer,
+                        Some(edge.child.as_ref()),
+                        edge.unchanged,
+                        edge.can_be_full_key,
+                    )
+                })
+                .chain(
+                    added_edges
+                        .iter()
+                        .map(|(group, name, initial_ref, can_be_full_key)| {
+                            (
+                                *group,
+                                *name,
+                                initial_ref.as_str(),
+                                true,
+                                None,
+                                false,
+                                *can_be_full_key,
+                            )
+                        }),
+                )
+            {
                 if is_peer && unbound.contains(name) {
                     continue;
                 }
@@ -1144,17 +1180,21 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
                     chosen
                 } else {
                     let unchanged_input = chosen == initial_ref;
-                    child = if (!unchanged_input || edge.can_be_full_key)
+                    child = if (!unchanged_input || can_be_full_key)
                         && (self.written.contains_key(chosen)
-                            || self.peers.origin_side(chosen).is_some())
+                            || self.peers.origin_side(chosen).is_some()
+                            || self.packages.contains_key(package_key(chosen))
+                            || self.peers.has_release(package_key(chosen)))
                     {
                         Cow::Borrowed(chosen)
-                    } else if unchanged_input {
-                        Cow::Borrowed(edge.child.as_ref())
+                    } else if let Some(edge_child) = edge_child.filter(|_| unchanged_input) {
+                        Cow::Borrowed(edge_child)
                     } else {
                         Cow::Owned(graph::snapshot_key(name, chosen, Some(self.snapshots)))
                     };
-                    let unchanged = unchanged_input && edge.unchanged && child == edge.child;
+                    let unchanged = unchanged_input
+                        && unchanged
+                        && edge_child.is_some_and(|c| c == child.as_ref());
                     let rebound = if unchanged {
                         None
                     } else {

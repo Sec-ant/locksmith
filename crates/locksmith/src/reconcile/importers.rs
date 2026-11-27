@@ -42,7 +42,12 @@ pub(super) fn select(
     let mut configured_sources = BTreeMap::new();
     let overrides = manifest::Overrides::new(output, context.configuration);
     let mut missing_requests = super::MissingRequests::new(additional);
-    for (id, package) in context.manifests {
+    for (id, package) in context.manifests.get_key_value(".").into_iter().chain(
+        context
+            .manifests
+            .iter()
+            .filter(|(id, _)| id.as_str() != "."),
+    ) {
         let mut record = sources
             .order
             .iter()
@@ -393,8 +398,13 @@ pub(super) fn select(
         importers.insert(id.clone(), record);
     }
     missing_requests.finish()?;
+    let records = context
+        .manifests
+        .keys()
+        .filter_map(|id| importers.remove(id).map(|record| (id.clone(), record)))
+        .collect();
     Ok(SelectedImporters {
-        records: importers,
+        records,
         configured_sources,
     })
 }

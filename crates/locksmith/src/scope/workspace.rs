@@ -103,7 +103,11 @@ pub(super) fn apply(
         .into_iter()
         .flatten()
         .eq(rules(after).into_iter().flatten());
-    if before == after && !changes_overrides && !changes_extensions {
+    if before == after
+        && !changes_overrides
+        && !changes_extensions
+        && base.get("catalogs") == donor.get("catalogs")
+    {
         return Ok(None);
     }
     let mut expected = before.clone();

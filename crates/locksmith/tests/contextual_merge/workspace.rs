@@ -1322,3 +1322,105 @@ fn dev_engines_selects_the_bootstrap_package_manager_and_its_policy() {
         );
     }
 }
+
+#[test]
+fn root_importer_peers_apply_to_importers_sorting_before_dot() {
+    let make = |peer_version: &str, lib_pin: &str| {
+        let mut doc = json!({
+            "lockfileVersion": "9.0",
+            "importers": {
+                "!app": {"dependencies": {"lib": {"specifier": "1.0.0", "version": lib_pin}}},
+                ".": {"dependencies": {"peer": {"specifier": peer_version, "version": peer_version}}}
+            },
+            "packages": {
+                "lib@1.0.0": {"resolution": {"integrity": "sha512-lib"}, "peerDependencies": {"peer": "^1 || ^2"}},
+                format!("peer@{peer_version}"): {"resolution": {"integrity": "sha512-peer"}}
+            },
+            "snapshots": {
+                format!("lib@1.0.0(peer@{peer_version})"): {"dependencies": {"peer": peer_version}},
+                format!("peer@{peer_version}"): {}
+            }
+        });
+        doc["importers"]
+            .as_object_mut()
+            .unwrap()
+            .get_mut("!app")
+            .unwrap()["dependencies"]["lib"]["version"] = json!(lib_pin);
+        Lockfile::parse(&doc.to_string()).unwrap()
+    };
+    let base = make("1.0.0", "1.0.0(peer@1.0.0)");
+    let ours = make("2.0.0", "1.0.0(peer@2.0.0)");
+
+    let manifests = BTreeMap::from([
+        ("!app".into(), json!({"dependencies": {"lib": "1.0.0"}})),
+        (".".into(), json!({"dependencies": {"peer": "2.0.0"}})),
+    ]);
+    let config = WorkspaceConfig::default();
+    let merged = merge(
+        &base,
+        &ours,
+        &base,
+        Some(&MergeContext {
+            target: MergeTarget::Theirs,
+            manifests: &manifests,
+            configuration: &config,
+            configurations: [&config; 3],
+            patches: &BTreeMap::new(),
+            registry: None,
+        }),
+    )
+    .unwrap();
+    let doc = merged.project().unwrap();
+    assert_eq!(
+        doc["importers"]["!app"]["dependencies"]["lib"]["version"],
+        "1.0.0(peer@2.0.0)"
+    );
+    let keys: Vec<_> = doc["importers"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["!app", "."]);
+}
+
+#[test]
+fn failing_all_bootstraps_returns_target_branch_error() {
+    let make = |version: &str| {
+        format!(
+            "lockfileVersion: '9.0'\nimporters:\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: {version}\n        version: {version}\n---\nlockfileVersion: '9.0'\nimporters:\n  .: {{}}\n"
+        )
+    };
+    let base = make("10.0.0");
+    let ours = make("11.0.0");
+    let theirs = make("12.0.0");
+    let inputs = [
+        locksmith::MergeInput::from(base.as_str()),
+        ours.as_str().into(),
+        theirs.as_str().into(),
+    ];
+    for (target, expected) in [
+        (MergeTarget::Ours, "ours-err: 11.0.0"),
+        (MergeTarget::Theirs, "theirs-err: 12.0.0"),
+    ] {
+        let err = target
+            .workspace_for_candidate(
+                None,
+                inputs,
+                |lock| -> Result<((), WorkspaceConfig), LockfileError> {
+                    let ver = lock
+                        .and_then(Lockfile::recorded_pnpm_version)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    let label = match ver.as_str() {
+                        "10.0.0" => "base-err",
+                        "11.0.0" => "ours-err",
+                        "12.0.0" => "theirs-err",
+                        _ => "unknown",
+                    };
+                    Err(LockfileError::WorkspaceInput(format!("{label}: {ver}")))
+                },
+            )
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&err, LockfileError::WorkspaceInput(msg) if msg == expected),
+            "expected {expected}, got {err}"
+        );
+    }
+}

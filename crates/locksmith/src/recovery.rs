@@ -304,9 +304,11 @@ fn select_workspace<T, E: From<LockfileError> + Display>(
         Ok(side) => side,
         Err(mut error) => {
             // An older runner can reject settings valid for a newer candidate.
-            let candidates = candidates.map(OnceCell::into_inner);
-            if let [Some(Err(first)), Some(Err(_)), Some(Err(_))] = candidates {
-                return Err(first);
+            let mut candidates = candidates.map(OnceCell::into_inner);
+            if candidates.iter().all(|c| matches!(c, Some(Err(_))))
+                && let Some(Err(target_error)) = candidates[target.index()].take()
+            {
+                return Err(target_error);
             }
             let failures: String = ["base", "ours", "theirs"]
                 .into_iter()

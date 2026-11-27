@@ -1567,3 +1567,54 @@ fn an_unchanged_override_keeps_the_installed_correction_and_its_required_subtree
         result.to_yaml().unwrap()
     );
 }
+
+#[test]
+fn converge_adds_and_removes_catalog_entries_when_workspace_config_is_unchanged() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"catalogs":{"tools":{"pkg":"^1.0.0"}}})).unwrap();
+    let options = ConvergeOptions {
+        baseline_configuration: Some(&config),
+        configuration: Some(&config),
+        registry: None,
+    };
+
+    let without_consumer = parse(json!({
+        "lockfileVersion": "9.0",
+        "importers": {".": {}, "app": {}},
+        "packages": {},
+        "snapshots": {}
+    }));
+    let with_consumer = parse(json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}},
+        "importers": {".": {}, "app": {"dependencies": {"pkg": {"specifier": "catalog:tools", "version": "1.0.1"}}}},
+        "packages": {"pkg@1.0.1": {"resolution": {"integrity": "sha512-pkg"}}},
+        "snapshots": {"pkg@1.0.1": {}}
+    }));
+
+    let unused_manifest = json!({});
+    let consumer_manifest = json!({"dependencies": {"pkg": "catalog:tools"}});
+
+    let added = converge(
+        &without_consumer,
+        &with_consumer,
+        &[change("app", &unused_manifest, &consumer_manifest)],
+        options,
+    )
+    .unwrap();
+    assert_eq!(
+        added.project().unwrap()["catalogs"],
+        json!({"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}})
+    );
+
+    let removed = converge(
+        &with_consumer,
+        &without_consumer,
+        &[change("app", &consumer_manifest, &unused_manifest)],
+        options,
+    )
+    .unwrap();
+    assert!(removed.project().unwrap().get("catalogs").is_none());
+}

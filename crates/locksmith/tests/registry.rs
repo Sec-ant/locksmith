@@ -530,3 +530,82 @@ fn terminal_peer_errors_take_precedence_over_pending_registry_requests() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn published_optional_peer_rebinds_and_alias_full_keys_survive_expansion() {
+    let mut registry = RegistryMetadata::default();
+    let request = RegistryRequest::Version {
+        name: "widget".into(),
+        selector: "1.0.0".into(),
+    };
+    registry
+        .insert(
+            &request,
+            json!({
+                "name": "widget",
+                "version": "1.0.0",
+                "peerDependencies": {"plugin": "^1"},
+                "peerDependenciesMeta": {"plugin": {"optional": true}},
+                "dist": {
+                    "shasum": "0123456789abcdef0123456789abcdef01234567",
+                    "tarball": "https://example.org/widget/-/widget-1.0.0.tgz"
+                }
+            }),
+            "https://example.org",
+            false,
+        )
+        .unwrap();
+    let make = |helper_version: &str| {
+        let plugin_key = format!("plugin@1.0.0(helper@{helper_version})");
+        Lockfile::parse(
+            &json!({
+                "lockfileVersion": "9.0",
+                "importers": {
+                    ".": {
+                        "dependencies": {
+                            "helper": {"specifier": helper_version, "version": helper_version},
+                            "plugin": {"specifier": "1.0.0", "version": format!("1.0.0(helper@{helper_version})")}
+                        }
+                    }
+                },
+                "packages": {
+                    format!("helper@{helper_version}"): {"resolution": {"integrity": "sha512-helper"}},
+                    "plugin@1.0.0": {"resolution": {"integrity": "sha512-plugin"}, "peerDependencies": {"helper": "^1 || ^2"}}
+                },
+                "snapshots": {
+                    format!("helper@{helper_version}"): {},
+                    plugin_key: {"dependencies": {"helper": helper_version}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    let base = make("1.0.0");
+    let ours = make("2.0.0");
+    let config = WorkspaceConfig::default();
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"dependencies": {"helper": "2.0.0", "plugin": "1.0.0", "widget": "1.0.0"}}),
+    )]);
+    let result = merge(
+        &base,
+        &ours,
+        &base,
+        Some(&MergeContext {
+            registry: Some(&registry),
+            target: MergeTarget::Theirs,
+            manifests: &manifests,
+            configuration: &config,
+            configurations: [&config; 3],
+            patches: &BTreeMap::new(),
+        }),
+    )
+    .unwrap();
+    result.validate().unwrap();
+    let doc = result.project().unwrap();
+    assert_eq!(
+        doc["snapshots"]["widget@1.0.0(plugin@1.0.0(helper@2.0.0))"]["optionalDependencies"]["plugin"],
+        "1.0.0(helper@2.0.0)"
+    );
+}

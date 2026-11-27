@@ -10,7 +10,8 @@ pub(crate) mod published;
 mod repair;
 
 use crate::{
-    DocumentKind, Lockfile, LockfileError, Value, error::missing, graph, manifest, patch, peer, pin,
+    DocumentKind, Lockfile, LockfileError, Value, error::missing, graph, manifest, patch, peer,
+    pin, schema,
 };
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -67,7 +68,7 @@ impl MergeTarget {
         }
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::Ours => Source::Ours as usize,
             Self::Theirs => Source::Theirs as usize,
@@ -349,7 +350,7 @@ fn resolve_sources(
             ),
             matches_configuration,
             unchanged_rules: same_overrides
-                && doc.get("patchedDependencies") == metadata.get("patchedDependencies"),
+                && patch::records_match(doc, schema::rule_map(&metadata, "patchedDependencies")),
             tie_break: config.override_tie_break,
         }
     });

@@ -579,7 +579,7 @@ pub(super) fn repair_snapshot(
             providers.remove("patch_hash");
             let canonical = peer::canonical_providers(&providers);
             let mut selected = None;
-            let mut deferred = None;
+            let mut deferred = Vec::new();
             // Patch content changes preserve the locked artifact and edges.
             if needs_patch
                 && !needs_override
@@ -656,15 +656,13 @@ pub(super) fn repair_snapshot(
                             .cloned()
                             .collect();
                         if !required.is_empty() {
-                            if deferred.is_none() {
-                                deferred = Some((
-                                    *candidate_side,
-                                    *candidate,
-                                    required,
-                                    affected,
-                                    bindings,
-                                ));
-                            }
+                            deferred.push((
+                                *candidate_side,
+                                *candidate,
+                                required,
+                                affected,
+                                bindings,
+                            ));
                             continue;
                         }
                         if let Some(original) = peers
@@ -684,25 +682,34 @@ pub(super) fn repair_snapshot(
                             break;
                         }
                     }
-                    if selected.is_none()
-                        && let Some((candidate_side, candidate, required, affected, bindings)) =
-                            deferred.take()
-                        && let Some(original) = peers
-                            .recontextualize_source(candidate_side, candidate, &bindings, previous)
-                            .and_then(|key| {
-                                peers.repatch(
+                    if selected.is_none() {
+                        for (candidate_side, candidate, required, affected, bindings) in
+                            deferred.drain(..)
+                        {
+                            if let Some(original) = peers
+                                .recontextualize_source(
                                     candidate_side,
-                                    &key,
-                                    sources.desired_patch(candidate, metadata)?,
+                                    candidate,
+                                    &bindings,
+                                    previous,
                                 )
-                            })
-                    {
-                        selected = Some(pin::reference(name, &original));
-                        if !affected.is_empty() {
-                            changed_contexts.insert(name.clone(), affected);
-                        }
-                        if !required.is_empty() {
-                            added_peers.insert(name.clone(), required);
+                                .and_then(|key| {
+                                    peers.repatch(
+                                        candidate_side,
+                                        &key,
+                                        sources.desired_patch(candidate, metadata)?,
+                                    )
+                                })
+                            {
+                                selected = Some(pin::reference(name, &original));
+                                if !affected.is_empty() {
+                                    changed_contexts.insert(name.clone(), affected);
+                                }
+                                if !required.is_empty() {
+                                    added_peers.insert(name.clone(), required);
+                                }
+                                break;
+                            }
                         }
                     }
                     if selected.is_some() {

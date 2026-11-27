@@ -958,3 +958,107 @@ fn only_effective_direct_catalog_references_have_catalog_snapshots() {
         json!({"default":{"b":{"specifier":"1.0.0","version":"1.0.0"}}})
     );
 }
+
+#[test]
+fn override_repair_tries_all_deferred_candidates_when_earlier_fails() {
+    // Both ours and theirs provide `child@2.0.0` with a newly required peer (`extra`),
+    // where ours binds `shared` to `1.0.0` (which cannot recontextualize to `shared@2.0.0`
+    // in parent's scope) while theirs binds `shared` to `2.0.0`.
+    let base = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@2.0.0)"},
+                "shared": {"specifier": "2.0.0", "version": "2.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@1.0.0": {"resolution": {"integrity": "sha512-child1"}},
+                "shared@2.0.0": {"resolution": {"integrity": "sha512-shared2"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@2.0.0)": {"dependencies": {"child": "1.0.0", "shared": "2.0.0"}},
+                "child@1.0.0": {},
+                "shared@2.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let ours = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "overrides": {"parent>child": "2.0.0"},
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@1.0.0)"},
+                "shared": {"specifier": "1.0.0", "version": "1.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@2.0.0": {"resolution": {"integrity": "sha512-child2"}, "peerDependencies": {"extra": "*", "shared": "*"}},
+                "extra@1.0.0": {"resolution": {"integrity": "sha512-extra1"}},
+                "shared@1.0.0": {"resolution": {"integrity": "sha512-shared1"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@1.0.0)": {"dependencies": {"child": "2.0.0(extra@1.0.0)(shared@1.0.0)", "shared": "1.0.0"}},
+                "child@2.0.0(extra@1.0.0)(shared@1.0.0)": {"dependencies": {"extra": "1.0.0", "shared": "1.0.0"}},
+                "extra@1.0.0": {},
+                "shared@1.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let theirs = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "overrides": {"parent>child": "2.0.0"},
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@2.0.0)"},
+                "shared": {"specifier": "2.0.0", "version": "2.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@2.0.0": {"resolution": {"integrity": "sha512-child2"}, "peerDependencies": {"extra": "*", "shared": "*"}},
+                "extra@2.0.0": {"resolution": {"integrity": "sha512-extra2"}},
+                "shared@2.0.0": {"resolution": {"integrity": "sha512-shared2"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@2.0.0)": {"dependencies": {"child": "2.0.0(extra@2.0.0)(shared@2.0.0)", "shared": "2.0.0"}},
+                "child@2.0.0(extra@2.0.0)(shared@2.0.0)": {"dependencies": {"extra": "2.0.0", "shared": "2.0.0"}},
+                "extra@2.0.0": {},
+                "shared@2.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let before = cfg(&json!({}));
+    let after = cfg(&json!({"overrides": {"parent>child": "2.0.0"}}));
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"dependencies": {"parent": "1.0.0", "shared": "2.0.0"}}),
+    )]);
+    let result = merge(
+        &base,
+        &ours,
+        &theirs,
+        Some(&MergeContext {
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configuration: &after,
+            configurations: [&before, &after, &after],
+            patches: &BTreeMap::new(),
+            registry: None,
+        }),
+    )
+    .unwrap();
+    result.validate().unwrap();
+    assert_eq!(
+        result.project().unwrap()["snapshots"]["parent@1.0.0(shared@2.0.0)"]["dependencies"]["child"],
+        "2.0.0(extra@2.0.0)(shared@2.0.0)"
+    );
+}
