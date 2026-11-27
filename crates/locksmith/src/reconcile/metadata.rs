@@ -95,7 +95,14 @@ pub(super) fn check_merge_settings(
     if doc.get("settings").is_some_and(|value| !value.is_object()) {
         return Err(missing(&["settings"], "expected mapping"));
     }
-    check_recorded_settings(doc, config)?;
+    // For older runners, supplied settings can include values from files that pnpm ignores.
+    if config
+        .pnpm_version
+        .as_ref()
+        .is_some_and(|version| version >= &node_semver::Version::from((12, 15, 0)))
+    {
+        check_recorded_settings(doc, config)?;
+    }
     if let Some(field) = config.frozen_settings_mismatch(doc) {
         return Err(missing(
             &["settings", field],

@@ -126,7 +126,7 @@ impl ContextualMerge<'_> {
 ///
 /// # Errors
 /// Returns [`LockfileError::Conflicts`] for incompatible branch edits, or
-/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select a pin.
+/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select compatible pins or settings.
 /// Malformed inputs and invalid dependency graphs also return errors.
 pub fn merge<'a>(
     base: impl Into<MergeInput<'a>>,
