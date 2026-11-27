@@ -162,6 +162,7 @@ impl RepairInput {
         let metadata = reconcile::metadata::resolve(
             [d?, a?, b?],
             [0, 1, 2],
+            0,
             &evidence.merge_context(sources.map(|(_, cfg)| cfg)),
         )?;
         reconcile::metadata::check_repair_configuration(doc, &metadata, context.configuration)?;

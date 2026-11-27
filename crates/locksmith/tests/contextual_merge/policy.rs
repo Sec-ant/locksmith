@@ -204,6 +204,12 @@ fn contextual_merge_requires_recorded_settings_matching_the_final_workspace() {
     let settings = &merged.project().unwrap()["settings"];
     assert_eq!(settings["autoDedupe"], false);
     assert_eq!(settings["dedupePeerDependents"], false);
+
+    context.target = MergeTarget::Theirs;
+    context.configurations = [&configurations[0], &configurations[1], &configurations[0]];
+    context.configuration = &configurations[1];
+    let merged = merge(&base, &ours, &base, Some(&context)).unwrap();
+    assert_eq!(merged.project().unwrap()["settings"]["autoDedupe"], true);
 }
 
 #[test]

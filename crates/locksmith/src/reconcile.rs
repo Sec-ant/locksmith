@@ -285,17 +285,25 @@ fn resolve_sources(
             !context.configurations[side].matches_pnpm(context.configuration),
         )
     });
-    let metadata = metadata::resolve(docs, order, context)?;
+    let preferred = order[0];
+    let settings_source = if prefer_baseline {
+        preferred
+    } else {
+        // A compatible header can come from a different source than the preferred pins.
+        match metadata::check_merge_settings(docs[preferred], context.configuration) {
+            Ok(()) => preferred,
+            Err(error) => order[1..]
+                .iter()
+                .copied()
+                .find(|&side| {
+                    metadata::check_merge_settings(docs[side], context.configuration).is_ok()
+                })
+                .ok_or(error)?,
+        }
+    };
+    let metadata = metadata::resolve(docs, order, settings_source, context)?;
     if prefer_baseline {
         metadata::check_repair_configuration(docs[2], &metadata, context.configuration)?;
-    } else {
-        metadata::check_recorded_settings(&metadata, context.configuration)?;
-        if let Some(field) = context.configuration.frozen_settings_mismatch(&metadata) {
-            return Err(missing(
-                &["settings", field],
-                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
-            ));
-        }
     }
     let environment = match bootstrap {
         Bootstrap::Select(selected) => Some(bootstrap::environment_source(

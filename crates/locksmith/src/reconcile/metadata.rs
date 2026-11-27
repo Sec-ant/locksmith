@@ -88,6 +88,23 @@ pub(crate) fn check_recorded_settings(
     Ok(())
 }
 
+pub(super) fn check_merge_settings(
+    doc: &Value,
+    config: &WorkspaceConfig,
+) -> Result<(), LockfileError> {
+    if doc.get("settings").is_some_and(|value| !value.is_object()) {
+        return Err(missing(&["settings"], "expected mapping"));
+    }
+    check_recorded_settings(doc, config)?;
+    if let Some(field) = config.frozen_settings_mismatch(doc) {
+        return Err(missing(
+            &["settings", field],
+            "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn check_repair_configuration(
     doc: &Value,
     metadata: &Value,
@@ -131,6 +148,7 @@ pub(crate) fn check_repair_configuration(
 pub(crate) fn resolve(
     docs: [&Value; 3],
     order: [usize; 3],
+    settings_source: usize,
     context: &MergeContext<'_>,
 ) -> Result<Value, LockfileError> {
     let structural = [
@@ -152,34 +170,38 @@ pub(crate) fn resolve(
             .collect(),
     );
     let config = context.configuration;
-    if output
-        .get("settings")
-        .is_some_and(|value| !value.is_object())
-    {
-        return Err(missing(&["settings"], "expected mapping"));
+    if settings_source != order[0] {
+        output["settings"] = docs[settings_source]
+            .get("settings")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
     }
-    if output.get("settings").is_none() {
-        output["settings"] = json!({});
-    }
-    let settings = config.recorded_settings();
-    output["settings"]["autoInstallPeers"] = json!(settings.auto_install_peers);
-    if settings.project_scoped_optional_peers {
-        output["settings"]["projectScopedOptionalPeers"] = json!(true);
+    let settings = output
+        .as_object_mut()
+        .expect("project metadata")
+        .entry("settings")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| missing(&["settings"], "expected mapping"))?;
+    let recorded = config.recorded_settings();
+    settings.insert(
+        "autoInstallPeers".into(),
+        json!(recorded.auto_install_peers),
+    );
+    if recorded.project_scoped_optional_peers {
+        settings.insert("projectScopedOptionalPeers".into(), json!(true));
     } else {
-        output["settings"]
-            .as_object_mut()
-            .unwrap()
-            .remove("projectScopedOptionalPeers");
+        settings.remove("projectScopedOptionalPeers");
     }
-    if settings.dedupe_peers {
-        output["settings"]["dedupePeers"] = json!(true);
+    if recorded.dedupe_peers {
+        settings.insert("dedupePeers".into(), json!(true));
     } else {
-        output["settings"]
-            .as_object_mut()
-            .unwrap()
-            .remove("dedupePeers");
+        settings.remove("dedupePeers");
     }
-    output["settings"]["excludeLinksFromLockfile"] = json!(settings.exclude_links_from_lockfile);
+    settings.insert(
+        "excludeLinksFromLockfile".into(),
+        json!(recorded.exclude_links_from_lockfile),
+    );
     for (field, lock_field, value, source_values) in [
         (
             "packageExtensions",
