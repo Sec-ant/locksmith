@@ -321,17 +321,17 @@ impl PinSelector<'_, '_> {
             let Some(reference) = dep.get("version").and_then(Value::as_str) else {
                 continue;
             };
-            if !local.is_some_and(|pin| same_link_pin(pin, reference))
-                && !accepts_pin(
+            let matches_specifier = local.is_some_and(|pin| same_link_pin(pin, reference))
+                || accepts_pin(
                     name,
                     specifier,
                     reference,
                     self.output,
                     Some(self.context.configuration),
                 )
-                && !(dep.get("specifier").and_then(Value::as_str) == Some(specifier)
-                    && opaque(specifier))
-            {
+                || dep.get("specifier").and_then(Value::as_str) == Some(specifier)
+                    && opaque(specifier);
+            if !matches_specifier {
                 continue;
             }
             let key = graph::snapshot_key(name, reference, snapshots);
