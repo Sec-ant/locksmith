@@ -2077,6 +2077,44 @@ fn validate_reads_pnpm9_peer_suffix_limit_from_npmrc() {
 }
 
 #[test]
+fn validate_reads_peer_suffix_limit_from_supported_sources() {
+    for (version, limit) in [
+        ("9.2.0", None),
+        ("9.3.0", Some(64)),
+        ("10.5.2", Some(64)),
+        ("10.6.0", Some(48)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_input(
+            root,
+            "package.json",
+            json!({
+                "packageManager": format!("pnpm@{version}"),
+                "pnpm": {"peersSuffixMaxLength": 32}
+            }),
+        );
+        let mut lock = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
+        write_input(root, "pnpm-lock.yaml", &lock);
+        check_workspace(root, 0, version);
+
+        write_input(root, ".npmrc", "peers-suffix-max-length=64\n");
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
+            "packages: []\npeersSuffixMaxLength: 48\n",
+        );
+        let result = check_workspace(root, i32::from(limit.is_some()), version);
+        if let Some(limit) = limit {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("peersSuffixMaxLength"));
+            lock["settings"] = json!({"peersSuffixMaxLength": limit});
+            write_input(root, "pnpm-lock.yaml", &lock);
+            check_workspace(root, 0, version);
+        }
+    }
+}
+
+#[test]
 fn validate_rejects_mismatched_recorded_resolution_settings() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

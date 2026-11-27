@@ -722,6 +722,15 @@ fn linked_workspace_peers_install_after_a_provider_move() {
                 serde_saphyr::to_string(&config).unwrap(),
             )
             .unwrap();
+            if pnpm_version() < &node_semver::Version::from((10, 6, 0))
+                && let Some(limit) = max_suffix
+            {
+                fs::write(
+                    dir.join(".npmrc"),
+                    format!("peers-suffix-max-length={limit}\n"),
+                )
+                .unwrap();
+            }
             (dir, manifests)
         };
         let mut locks = Vec::new();

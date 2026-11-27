@@ -232,8 +232,8 @@ pub fn settings(
     manifest_settings.remove("packages");
     // Read this hook setting only from the configuration files supported by pnpm.
     manifest_settings.remove("ignorePnpmfile");
-    if pnpm9 {
-        // pnpm 9 reads the peer suffix limit from .npmrc.
+    if version.is_some() {
+        // The peer suffix limit is a config file setting.
         manifest_settings.remove("peersSuffixMaxLength");
     }
     if legacy && let Some(resolutions) = root.get("resolutions") {
@@ -252,7 +252,7 @@ pub fn settings(
         config["overrides"] = overrides.into();
     }
     if legacy && let Some(text) = read(".npmrc")? {
-        legacy_settings(&text, &mut config).map_err(|e| format!(".npmrc: {e}"))?;
+        legacy_settings(&text, &mut config, version).map_err(|e| format!(".npmrc: {e}"))?;
     }
     let workspace = read("pnpm-workspace.yaml")?;
     if let Some(text) = &workspace {
@@ -268,11 +268,11 @@ pub fn settings(
             // pnpm 10.6 added .npmrc options to pnpm-workspace.yaml.
             if version.is_some_and(|v| v < &node_semver::Version::from((10, 6, 0))) {
                 settings.remove("ignorePnpmfile");
+                settings.remove("peersSuffixMaxLength");
             }
             if pnpm9 {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [
-                    "peersSuffixMaxLength",
                     "injectWorkspacePackages",
                     "autoInstallPeers",
                     "addMissingPeerTypes",
@@ -405,7 +405,11 @@ pub fn file_inputs(config: &Value) -> Result<Vec<String>> {
 }
 
 // pnpm 9 and 10 also read these resolver and peer settings from project .npmrc.
-fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
+fn legacy_settings(
+    text: &str,
+    config: &mut Value,
+    version: Option<&node_semver::Version>,
+) -> Result<()> {
     const FLAGS: &[(&str, &str)] = &[
         ("auto-install-peers", "autoInstallPeers"),
         ("ignore-pnpmfile", "ignorePnpmfile"),
@@ -442,7 +446,9 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
                         _ => json!(unquoted.parse::<bool>()?),
                     }
                 }
-                "peers-suffix-max-length" => {
+                "peers-suffix-max-length"
+                    if version.is_none_or(|v| v >= &node_semver::Version::from((9, 3, 0))) =>
+                {
                     config["peersSuffixMaxLength"] = json!(ini_value(value).parse::<usize>()?)
                 }
                 "pnpmfile" => config["pnpmfile"] = json!(unquoted),

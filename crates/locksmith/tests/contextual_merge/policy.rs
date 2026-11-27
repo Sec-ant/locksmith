@@ -213,24 +213,41 @@ fn contextual_merge_requires_recorded_settings_matching_the_final_workspace() {
 }
 
 #[test]
-fn contextual_merge_matches_peer_suffix_limit_without_a_pnpm_version() {
+fn contextual_merge_matches_peer_suffix_limit_for_older_and_unknown_pnpm() {
     let input = |settings: &Value| {
         let document = json!({
             "lockfileVersion": "9.0", "importers": {".": {}}, "settings": settings,
         });
         Lockfile::parse(&document.to_string()).unwrap()
     };
-    let preferred = input(&json!({"peersSuffixMaxLength": 32}));
+    let stale = input(&json!({"peersSuffixMaxLength": 32}));
     let manifests = BTreeMap::from([(".".into(), json!({}))]);
-    for (configuration, matching_settings) in [
+    for (version, configuration, matching_settings) in [
         (
-            // These two switches still depend on a known runner during merge.
+            None,
             json!({"peersSuffixMaxLength": 64, "injectWorkspacePackages": true, "addMissingPeerTypes": true}),
             json!({"peersSuffixMaxLength": 64}),
         ),
-        (json!({}), json!({})),
+        (None, json!({}), json!({})),
+        (
+            Some("9.15.9"),
+            json!({"peersSuffixMaxLength": 64}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
+        (Some("10.34.9"), json!({}), json!({})),
+        (
+            Some("12.14.0"),
+            json!({"peersSuffixMaxLength": 64, "injectWorkspacePackages": true, "addMissingPeerTypes": true}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
     ] {
-        let config = cfg(&configuration);
+        let config = match version {
+            Some(version) => {
+                WorkspaceConfig::from_pnpm_version(&configuration, &version.parse().unwrap())
+                    .unwrap()
+            }
+            None => cfg(&configuration),
+        };
         let matching = input(&matching_settings);
         let context = MergeContext {
             registry: None,
@@ -241,16 +258,22 @@ fn contextual_merge_matches_peer_suffix_limit_without_a_pnpm_version() {
             patches: &BTreeMap::new(),
         };
 
-        let merged = merge(&preferred, &preferred, &matching, Some(&context)).unwrap();
-        assert_eq!(
-            merged.project().unwrap()["settings"].get("peersSuffixMaxLength"),
-            matching_settings.get("peersSuffixMaxLength")
+        for (preferred, other) in [(&matching, &stale), (&stale, &matching)] {
+            let merged = merge(&stale, preferred, other, Some(&context)).unwrap();
+            assert_eq!(
+                merged.project().unwrap()["settings"].get("peersSuffixMaxLength"),
+                matching_settings.get("peersSuffixMaxLength"),
+                "pnpm version: {version:?}",
+            );
+        }
+        assert!(
+            matches!(
+                merge(&stale, &stale, &stale, Some(&context)),
+                Err(LockfileError::ResolutionRequired { path, .. })
+                    if path == ["settings", "peersSuffixMaxLength"]
+            ),
+            "pnpm version: {version:?}"
         );
-        assert!(matches!(
-            merge(&preferred, &preferred, &preferred, Some(&context)),
-            Err(LockfileError::ResolutionRequired { path, .. })
-                if path == ["settings", "peersSuffixMaxLength"]
-        ));
     }
 }
 

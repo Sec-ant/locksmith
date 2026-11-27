@@ -12,12 +12,10 @@ pub(super) fn check_merge_settings(
         return Err(missing(&["settings"], "expected mapping"));
     }
     match config.pnpm_version.as_ref() {
-        None => config.check_recorded_peer_suffix(doc)?,
         Some(version) if version >= &node_semver::Version::from((12, 15, 0)) => {
             config.check_recorded_settings(doc)?;
         }
-        // For older runners, supplied settings can include values from files that pnpm ignores.
-        Some(_) => {}
+        _ => config.check_recorded_peer_suffix(doc)?,
     }
     if let Some(field) = config.frozen_settings_mismatch(doc) {
         return Err(missing(
