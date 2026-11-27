@@ -4,6 +4,8 @@ use std::{
     env, fs,
     io::{BufReader, ErrorKind},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
     time::Duration,
 };
 
@@ -41,16 +43,22 @@ struct Packument {
 struct Registry {
     agent: Agent,
     settings: RegistrySettings,
-    packages: BTreeMap<String, std::result::Result<Packument, String>>,
+    packages: BTreeMap<String, std::result::Result<(String, Packument), String>>,
+    age_exclusions: selection::Exclusions,
+    trust_exclusions: selection::Exclusions,
     min_age: u64,
     now: i64,
 }
 
+type Routes = BTreeMap<String, (String, bool)>;
+
 struct RegistrySettings {
     rc: BTreeMap<String, String>,
     config: Value,
+    routes: std::result::Result<Routes, String>,
     global_auth_routes: BTreeMap<String, String>,
     env_auth_routes: BTreeMap<String, String>,
+    env_registry: Option<String>,
 }
 
 /// Resolve only the registry routes needed to verify explicitly declared bootstrap tarballs.
@@ -165,13 +173,6 @@ pub fn resolve(
     };
     let mut data = RegistryMetadata::default();
     let mut registry = None;
-    let mut fetch = |request: &RegistryRequest, data: &mut RegistryMetadata, direct| {
-        let client = match &mut registry {
-            Some(client) => client,
-            None => registry.insert(Registry::new(config, pnpm_major, project)?),
-        };
-        client.satisfy(request, data, direct)
-    };
     let mut attempts = BTreeMap::new();
     loop {
         let errors = match solve(Some(&data)) {
@@ -180,7 +181,9 @@ pub fn resolve(
         };
         let mut progress = false;
         let mut unresolved = None;
-        for mut error in errors {
+        let mut errors = errors.into_iter();
+        let mut prefetched = false;
+        while let Some(mut error) = errors.next() {
             let locksmith::LockfileError::ResolutionRequired {
                 request: Some(ref request),
                 ref path,
@@ -193,20 +196,37 @@ pub fn resolve(
             let failure = attempts
                 .entry((request.as_ref().clone(), direct))
                 .or_insert_with(|| {
-                    let fetched = fetch(request, &mut data, direct);
-                if let Err(reason) = fetched {
-                    if purpose == Lookup::Converge
-                        && let RegistryRequest::Manifest { name, version } = request.as_ref()
-                    {
-                        data.skip_manifest(name, version);
-                        eprintln!("locksmith: keeping installed dependency pins for {name}@{version}: {reason}");
-                    } else {
-                        return Some(reason.to_string());
+                    let fetched = (|| -> Result<()> {
+                        let client = match &mut registry {
+                            Some(client) => client,
+                            None => registry.insert(Registry::new(config, pnpm_major, project)?),
+                        };
+                        if !prefetched {
+                            let remaining = errors.as_slice().iter().map_while(|error| match error {
+                                locksmith::LockfileError::ResolutionRequired {
+                                    request: Some(request),
+                                    ..
+                                } => Some(request.name()),
+                                _ => None,
+                            });
+                            client.prefetch(std::iter::once(request.name()).chain(remaining));
+                            prefetched = true;
+                        }
+                        client.satisfy(request, &mut data, direct)
+                    })();
+                    if let Err(reason) = fetched {
+                        if purpose == Lookup::Converge
+                            && let RegistryRequest::Manifest { name, version } = request.as_ref()
+                        {
+                            data.skip_manifest(name, version);
+                            eprintln!("locksmith: keeping installed dependency pins for {name}@{version}: {reason}");
+                        } else {
+                            return Some(reason.to_string());
+                        }
                     }
-                }
-                progress = true;
-                None
-            });
+                    progress = true;
+                    None
+                });
             if let Some(reason) = failure {
                 message.clone_from(reason);
             }
@@ -297,23 +317,24 @@ impl RegistrySettings {
             None => BTreeMap::new(),
         };
         Ok(Self {
+            routes: Self::routes(&config).map_err(|error| error.to_string()),
             rc,
             config,
             global_auth_routes,
             env_auth_routes,
+            env_registry: env_config("pnpm", "registry").or_else(|| env_config("npm", "registry")),
         })
     }
 
-    fn registry(&self, name: &str) -> Result<String> {
-        let scope = name.split_once('/').map(|(scope, _)| scope);
+    fn routes(config: &Value) -> Result<Routes> {
         let mut routes = BTreeMap::new();
-        if let Some(registries) = self.config.get("registries") {
+        if let Some(registries) = config.get("registries") {
             for (key, entry) in registries
                 .as_object()
                 .ok_or("registries must be a mapping")?
             {
                 if let Some(url) = entry.as_str() {
-                    routes.insert(key.as_str(), (url, false));
+                    routes.insert(key.to_owned(), (url.to_owned(), false));
                 } else {
                     let scopes = entry
                         .get("scopes")
@@ -323,7 +344,10 @@ impl RegistrySettings {
                         let route = route.as_str().ok_or("invalid registry scope")?;
                         let route = if route == "@" { "default" } else { route };
                         if routes
-                            .insert(route, (key, entry.get("prefix").is_some()))
+                            .insert(
+                                route.to_owned(),
+                                (key.to_owned(), entry.get("prefix").is_some()),
+                            )
                             .is_some()
                         {
                             return Err(
@@ -334,14 +358,24 @@ impl RegistrySettings {
                 }
             }
         }
+        Ok(routes)
+    }
+
+    fn registry(&self, name: &str) -> Result<String> {
+        let scope = name.split_once('/').map(|(scope, _)| scope);
+        let routes = self.routes.as_ref().map_err(String::as_str)?;
+        let route = |key| {
+            routes
+                .get(key)
+                .map(|(url, qualified)| (url.as_str(), *qualified))
+        };
         let scoped = scope.and_then(|scope| {
-            routes.get(scope).copied().or_else(|| {
+            route(scope).or_else(|| {
                 self.rc
                     .get(&format!("{scope}:registry"))
                     .map(|url| (url.as_str(), false))
             })
         });
-        let registry_env = env_config("pnpm", "registry").or_else(|| env_config("npm", "registry"));
         let environment_route = scope
             .and_then(|scope| self.env_auth_routes.get(scope))
             .or_else(|| self.env_auth_routes.get("default"));
@@ -353,8 +387,8 @@ impl RegistrySettings {
                     .and_then(|s| self.global_auth_routes.get(s))
                     .map(|v| (v.as_str(), false))
             })
-            .or_else(|| registry_env.as_deref().map(|v| (v, false)))
-            .or_else(|| routes.get("default").copied())
+            .or_else(|| self.env_registry.as_deref().map(|v| (v, false)))
+            .or_else(|| route("default"))
             .or_else(|| self.config["registry"].as_str().map(|v| (v, false)))
             .or_else(|| self.rc.get("registry").map(|v| (v.as_str(), false)))
             .or_else(|| {
@@ -494,6 +528,12 @@ impl Registry {
         }
         Ok(Self {
             agent: Agent::new_with_config(builder.build()),
+            age_exclusions: selection::Exclusions::compile(
+                &settings.config["minimumReleaseAgeExclude"],
+            ),
+            trust_exclusions: selection::Exclusions::compile(
+                &settings.config["trustPolicyExclude"],
+            ),
             settings,
             packages: BTreeMap::new(),
             min_age,
@@ -501,9 +541,21 @@ impl Registry {
         })
     }
 
-    fn fetch_package(&self, name: &str, base: &str) -> Result<Packument> {
+    fn package_base(&self, name: &str) -> Result<String> {
+        if self
+            .settings
+            .config
+            .get("pnprServer")
+            .is_some_and(|value| !value.is_null() && value != false)
+        {
+            return Err("registry metadata lookup requires the configured pnprServer".into());
+        }
+        self.settings.registry(name)
+    }
+
+    fn fetch_package(&self, agent: &Agent, name: &str, base: &str) -> Result<Packument> {
         let url = format!("{base}{}", name.replace('/', "%2f"));
-        let mut request = self.agent.get(&url).header(
+        let mut request = agent.get(&url).header(
             "Accept",
             if self.min_age > 0 {
                 "application/json"
@@ -528,6 +580,56 @@ impl Registry {
         Ok(doc)
     }
 
+    fn prefetch<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
+        let mut requests: Vec<_> = names
+            .filter(|name| !self.packages.contains_key(*name))
+            .collect();
+        requests.sort_unstable();
+        requests.dedup();
+        if requests.len() <= 1 {
+            return;
+        }
+
+        // Release idle connections before starting a batch. Each worker holds
+        // only its current route's pool and drops it before switching routes or
+        // exiting, so a registry serving one connection at a time can advance.
+        let config = self.agent.config().clone();
+        self.agent = Agent::new_with_config(config.clone());
+        let client = &*self;
+        let next = AtomicUsize::new(0);
+        let fetched = thread::scope(|scope| {
+            let workers: Vec<_> = (0..requests.len().min(4))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut fetched = Vec::new();
+                        let mut agent = Agent::new_with_config(config.clone());
+                        let mut route = String::new();
+                        while let Some(&name) = requests.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            let result = client
+                                .package_base(name)
+                                .and_then(|base| {
+                                    if !route.is_empty() && route != base {
+                                        agent = Agent::new_with_config(config.clone());
+                                    }
+                                    route.clone_from(&base);
+                                    let packument = client.fetch_package(&agent, name, &base)?;
+                                    Ok((base, packument))
+                                })
+                                .map_err(|error| error.to_string());
+                            fetched.push((name.to_owned(), result));
+                        }
+                        fetched
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("registry fetch worker"))
+                .collect::<Vec<_>>()
+        });
+        self.packages.extend(fetched);
+    }
+
     fn satisfy(
         &mut self,
         req: &RegistryRequest,
@@ -535,22 +637,17 @@ impl Registry {
         direct: bool,
     ) -> Result<()> {
         let name = req.name();
-        if self
-            .settings
-            .config
-            .get("pnprServer")
-            .is_some_and(|value| !value.is_null() && value != false)
-        {
-            return Err("registry metadata lookup requires the configured pnprServer".into());
-        }
-        let base = self.settings.registry(name)?;
         if !self.packages.contains_key(name) {
             let result = self
-                .fetch_package(name, &base)
+                .package_base(name)
+                .and_then(|base| {
+                    let packument = self.fetch_package(&self.agent, name, &base)?;
+                    Ok((base, packument))
+                })
                 .map_err(|error| error.to_string());
             self.packages.insert(name.to_owned(), result);
         }
-        let doc = self.packages[name].as_ref().map_err(String::as_str)?;
+        let (base, doc) = self.packages[name].as_ref().map_err(String::as_str)?;
         let selected = match req {
             RegistryRequest::Manifest { version, .. } => version.as_str(),
             RegistryRequest::Version { selector, .. } => self.select(doc, selector, direct)?,
@@ -559,14 +656,15 @@ impl Registry {
             .versions
             .get(selected)
             .ok_or_else(|| format!("registry has no release {name}@{selected}"))?;
-        data.insert(
-            req,
-            serde_json::from_str(raw.get())?,
-            &base,
-            self.settings.config["lockfileIncludeTarballUrl"]
-                .as_bool()
-                .unwrap_or(false),
-        )?;
+        let manifest = serde_json::from_str(raw.get())?;
+        let include_tarball = self.settings.config["lockfileIncludeTarballUrl"]
+            .as_bool()
+            .unwrap_or(false);
+        if self.settings.config["resolutionMode"] == "lowest-direct" {
+            data.insert_for_dependency(req, manifest, base, include_tarball, direct)?;
+        } else {
+            data.insert(req, manifest, base, include_tarball)?;
+        }
         Ok(())
     }
 }

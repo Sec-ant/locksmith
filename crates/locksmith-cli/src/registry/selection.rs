@@ -18,39 +18,69 @@ fn deprecated(publication: &serde_json::value::RawValue) -> Result<bool> {
     }
 }
 
-fn excluded(policy: &Value, name: &str, version: &str) -> Result<bool> {
-    if policy.is_null() {
-        return Ok(false);
+struct Exclusion {
+    package: glob::Pattern,
+    versions: Option<Vec<String>>,
+}
+
+pub(super) struct Exclusions {
+    rules: Vec<Exclusion>,
+    error: Option<String>,
+}
+
+impl Exclusions {
+    pub(super) fn compile(policy: &Value) -> Self {
+        let mut rules = Vec::new();
+        let error = (|| -> Result<()> {
+            if policy.is_null() {
+                return Ok(());
+            }
+            for item in policy
+                .as_array()
+                .ok_or("registry policy exclusions must be a list")?
+            {
+                let pattern = item
+                    .as_str()
+                    .ok_or("expected a package selector in registry policy")?;
+                let (package, versions) = pattern
+                    .rsplit_once('@')
+                    .filter(|(package, _)| !package.is_empty())
+                    .map_or((pattern, None), |(package, range)| (package, Some(range)));
+                rules.push(Exclusion {
+                    package: glob::Pattern::new(package)?,
+                    versions: versions
+                        .map(|v| v.split("||").map(|v| v.trim().to_owned()).collect()),
+                });
+            }
+            Ok(())
+        })()
+        .err()
+        .map(|error| error.to_string());
+        Self { rules, error }
     }
-    for item in policy
-        .as_array()
-        .ok_or("registry policy exclusions must be a list")?
-    {
-        let pattern = item
-            .as_str()
-            .ok_or("expected a package selector in registry policy")?;
-        let (package, versions) = pattern
-            .rsplit_once('@')
-            .filter(|(package, _)| !package.is_empty())
-            .map_or((pattern, None), |(package, range)| (package, Some(range)));
-        if glob::Pattern::new(package)?.matches(name)
-            && versions.is_none_or(|v| v.split("||").any(|v| v.trim() == version))
-        {
-            return Ok(true);
+
+    fn matches(&self, name: &str, version: &str) -> Result<bool> {
+        for rule in &self.rules {
+            if rule.package.matches(name)
+                && rule
+                    .versions
+                    .as_ref()
+                    .is_none_or(|versions| versions.iter().any(|v| v == version))
+            {
+                return Ok(true);
+            }
         }
+        // An earlier match takes precedence over a later invalid selector.
+        if let Some(error) = &self.error {
+            return Err(error.as_str().into());
+        }
+        Ok(false)
     }
-    Ok(false)
 }
 
 impl Registry {
     fn old_enough(&self, doc: &Packument, version: &str) -> Result<bool> {
-        if self.min_age == 0
-            || excluded(
-                &self.settings.config["minimumReleaseAgeExclude"],
-                &doc.name,
-                version,
-            )?
-        {
+        if self.min_age == 0 || self.age_exclusions.matches(&doc.name, version)? {
             return Ok(true);
         }
         let Some(date) = doc.time.get(version).and_then(Value::as_str) else {
@@ -147,11 +177,7 @@ impl Registry {
         })?;
         if let Some(policy) = self.settings.config["trustPolicy"].as_str()
             && policy != "off"
-            && !excluded(
-                &self.settings.config["trustPolicyExclude"],
-                &doc.name,
-                selected,
-            )?
+            && !self.trust_exclusions.matches(&doc.name, selected)?
         {
             return Err(format!(
                 "{}@{selected} requires publication trust evidence for trustPolicy {policy}",

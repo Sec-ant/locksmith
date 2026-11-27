@@ -685,7 +685,7 @@ impl PinSelector<'_, '_> {
                 .map(String::as_str)
                 .unwrap_or(specifier);
             let (actual, selector) = context.configuration.registry_request(name, effective);
-            if let Some(choice) = registry.selected(actual, selector) {
+            if let Some(choice) = registry.selected_direct(actual, selector) {
                 selected = sources
                     .candidates()
                     .get(actual)
