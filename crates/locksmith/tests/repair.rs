@@ -740,9 +740,38 @@ fn unreachable_extension_dependencies_are_preserved_with_or_without_a_donor() {
 }
 
 #[test]
-fn repair_preserves_unused_workspace_link_catalog_entries_and_normalizes_patch_paths() {
-    use sha2::{Digest, Sha256};
+fn repair_preserves_legacy_catalog_self_link_without_registry_evidence() {
+    let manifests = BTreeMap::from([
+        (".".into(), json!({})),
+        (
+            "app".into(),
+            json!({"name":"app","version":"1.2.0","dependencies":{"app":"catalog:"}}),
+        ),
+    ]);
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"catalog":{"app":"^1"}, "linkWorkspacePackages":true}))
+            .unwrap();
+    let lock = json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"default": {"app": {"specifier": "^1", "version": "^1"}}},
+        "importers": {".": {}, "app": {"dependencies": {"app": {"specifier": "catalog:", "version": "link:"}}}}
+    });
+    let result = repair(
+        &lock.to_string(),
+        &RepairContext {
+            manifests: &manifests,
+            configuration: &config,
+            patches: &BTreeMap::new(),
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.project().unwrap(), &lock);
+}
 
+#[test]
+fn repair_preserves_unused_workspace_link_catalog_entries() {
     let manifests = BTreeMap::from([
         (".".into(), json!({})),
         ("sdk".into(), json!({"name": "sdk", "version": "1.2.0"})),
@@ -771,6 +800,11 @@ fn repair_preserves_unused_workspace_link_catalog_entries_and_normalizes_patch_p
         repaired.project().unwrap()["catalogs"]["default"]["sdk"],
         json!({"specifier": "^1", "version": "^1"})
     );
+}
+
+#[test]
+fn repair_recovers_patched_snapshot_with_normalized_patch_path() {
+    use sha2::{Digest, Sha256};
 
     let patch_body = "diff --git a/index.js b/index.js\n";
     let hash = format!("{:x}", Sha256::digest(patch_body.as_bytes()));

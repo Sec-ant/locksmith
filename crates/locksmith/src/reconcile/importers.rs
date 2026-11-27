@@ -353,10 +353,9 @@ impl PinSelector<'_, '_> {
                 .get("snapshots")
                 .and_then(|records| records.get(&key))
                 .is_some()
-                && self.sources.desired_patch(&key, self.output).is_ok()
+                && let Ok(desired) = self.sources.desired_patch(&key, self.output)
             {
-                let borrowed = !self.sources.prefer_baseline
-                    && !self.sources.authorized_patch(&key, self.output);
+                let borrowed = !self.sources.prefer_baseline && desired != patch::hash_in_key(&key);
                 let pin = Pin {
                     side,
                     key,
@@ -454,7 +453,7 @@ impl PinSelector<'_, '_> {
             }
             let version = reference(name, key);
             if accepts_pin(name, specifier, &version, self.output, Some(configuration))
-                && self.sources.desired_patch(key, self.output).is_ok()
+                && let Ok(desired) = self.sources.desired_patch(key, self.output)
             {
                 let pin = Pin {
                     side,
@@ -462,7 +461,7 @@ impl PinSelector<'_, '_> {
                     reference: version,
                     borrowed: true,
                 };
-                if self.sources.authorized_patch(key, self.output) {
+                if desired == patch::hash_in_key(key) {
                     return Some(pin);
                 }
                 unpatched.get_or_insert(pin);

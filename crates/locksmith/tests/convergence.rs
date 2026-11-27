@@ -1575,11 +1575,6 @@ fn converge_adds_and_removes_catalog_entries_when_workspace_config_is_unchanged(
 
     let config =
         WorkspaceConfig::from_pnpm(&json!({"catalogs":{"tools":{"pkg":"^1.0.0"}}})).unwrap();
-    let options = ConvergeOptions {
-        baseline_configuration: Some(&config),
-        configuration: Some(&config),
-        ..Default::default()
-    };
 
     let without_consumer = parse(json!({
         "lockfileVersion": "9.0",
@@ -1598,24 +1593,68 @@ fn converge_adds_and_removes_catalog_entries_when_workspace_config_is_unchanged(
     let unused_manifest = json!({});
     let consumer_manifest = json!({"dependencies": {"pkg": "catalog:tools"}});
 
-    let added = converge(
-        &without_consumer,
-        &with_consumer,
-        &[change("app", &unused_manifest, &consumer_manifest)],
-        options,
-    )
-    .unwrap();
-    assert_eq!(
-        added.project().unwrap()["catalogs"],
-        json!({"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}})
-    );
+    for baseline_configuration in [Some(&config), None] {
+        let options = ConvergeOptions {
+            baseline_configuration,
+            configuration: Some(&config),
+            ..Default::default()
+        };
+        let added = converge(
+            &without_consumer,
+            &with_consumer,
+            &[change("app", &unused_manifest, &consumer_manifest)],
+            options,
+        )
+        .unwrap();
+        assert_eq!(
+            added.project().unwrap()["catalogs"],
+            json!({"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}})
+        );
 
-    let removed = converge(
-        &with_consumer,
-        &without_consumer,
-        &[change("app", &consumer_manifest, &unused_manifest)],
-        options,
+        let removed = converge(
+            &with_consumer,
+            &without_consumer,
+            &[change("app", &consumer_manifest, &unused_manifest)],
+            options,
+        )
+        .unwrap();
+        assert!(removed.project().unwrap().get("catalogs").is_none());
+    }
+}
+
+#[test]
+fn converge_adds_a_catalog_consumer_linked_to_another_importer() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+
+    let config = WorkspaceConfig::from_pnpm(
+        &json!({"catalogs":{"tools":{"pkg":"^1.0.0"}}, "linkWorkspacePackages":true}),
     )
     .unwrap();
-    assert!(removed.project().unwrap().get("catalogs").is_none());
+    let options = ConvergeOptions {
+        configuration: Some(&config),
+        ..Default::default()
+    };
+    let baseline = parse(json!({
+        "lockfileVersion": "9.0", "importers": {".": {}, "app": {}, "packages/pkg": {}}
+    }));
+    let mut installed = json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}},
+        "importers": {".": {}, "packages/pkg": {}, "app": {"dependencies": {
+            "pkg": {"specifier": "catalog:tools", "version": "link:../packages/pkg"}
+        }}}
+    });
+    let before = json!({});
+    let after = json!({"dependencies":{"pkg":"catalog:tools"}});
+    let changes = [change("app", &before, &after)];
+    let linked = converge(&baseline, &parse(installed.clone()), &changes, options).unwrap();
+    assert_eq!(
+        linked.project().unwrap()["importers"]["app"]["dependencies"]["pkg"]["version"],
+        "link:../packages/pkg"
+    );
+    assert_eq!(linked.project().unwrap()["catalogs"], installed["catalogs"]);
+    linked.validate().unwrap();
+
+    installed["importers"]["app"]["dependencies"]["pkg"]["version"] = "link:../missing".into();
+    assert!(converge(&baseline, &parse(installed), &changes, options).is_err());
 }

@@ -147,6 +147,11 @@ impl<'a> LinkedProjects<'a> {
         }
     }
 
+    pub(crate) fn contains_target(&self, from: &str, path: &str) -> bool {
+        self.importers
+            .is_some_and(|members| members.contains_key(&self.resolve(from, path)))
+    }
+
     pub(crate) fn resolve(&self, from: &str, path: &str) -> String {
         let target = linked_importer(from, path);
         let Some(importers) = self.importers else {
@@ -434,8 +439,7 @@ fn check_catalogs(
             };
             let pin = dependency["version"].as_str();
             let fits = if let Some(path) = pin.and_then(|v| v.strip_prefix("link:")) {
-                let target = links.resolve(key, path);
-                document["importers"].get(&target).is_some()
+                links.contains_target(key, path)
                     && match (spec, entry) {
                         (Some(spec), Some(entry)) => catalog::link_entry_fits(spec, entry),
                         (Some(_), None) => true,

@@ -107,7 +107,7 @@ pub(super) fn repair<'a>(
             };
             let retained = prior.and_then(|dep| dep["version"].as_str()).filter(|v| {
                 if let Some((link, _)) = &workspace_link {
-                    return link == v;
+                    return link == v || link == "link:." && *v == "link:";
                 }
                 if (spec.starts_with("workspace:") || catalog.is_some()) && v.starts_with("link:") {
                     return false;

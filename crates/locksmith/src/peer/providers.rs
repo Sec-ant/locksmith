@@ -54,18 +54,23 @@ pub(crate) fn canonical_providers(
     result
 }
 
-pub(crate) fn bound_reference(
+pub(crate) fn bound_reference<'a>(
     name: &str,
     actual: &str,
-    bindings: &BTreeMap<String, String>,
+    lookup: impl Fn(&str) -> Option<&'a str>,
 ) -> Option<String> {
-    if let Some(value) = bindings.get(name) {
-        return Some(value.clone());
+    if let Some(value) = lookup(name) {
+        return Some(value.into());
     }
     let (target, _) = pin::package_key(actual).rsplit_once('@')?;
-    bindings
-        .get(target)
-        .map(|value| format!("{target}@{value}"))
+    let value = lookup(target)?;
+    Some(
+        if value.starts_with("link:") || pin::package_key(value).contains('@') {
+            value.into()
+        } else {
+            format!("{target}@{value}")
+        },
+    )
 }
 
 pub(crate) fn canonical_binding<'a>(name: &'a str, reference: &'a str) -> (&'a str, &'a str) {
@@ -76,5 +81,24 @@ pub(crate) fn canonical_binding<'a>(name: &'a str, reference: &'a str) -> (&'a s
         (actual, &reference[actual.len() + 1..])
     } else {
         (name, reference)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bound_reference;
+
+    #[test]
+    fn aliased_peer_fallback_preserves_the_selected_package_reference() {
+        for (binding, expected) in [
+            ("2.0.0", "@org/real@2.0.0"),
+            ("replacement@2.0.0", "replacement@2.0.0"),
+            ("link:packages/real", "link:packages/real"),
+        ] {
+            let reference = bound_reference("compat", "@org/real@1.0.0", |name| {
+                (name == "@org/real").then_some(binding)
+            });
+            assert_eq!(reference.as_deref(), Some(expected));
+        }
     }
 }

@@ -22,6 +22,23 @@ fn catalog_name(spec: &str) -> Option<&str> {
         .map(|s| if s.is_empty() { "default" } else { s })
 }
 
+fn catalog_pin_fits(
+    links: &graph::LinkedProjects<'_>,
+    importer: &str,
+    name: &str,
+    spec: &str,
+    pin: &str,
+    entry: Option<&Value>,
+    config: &WorkspaceConfig,
+) -> bool {
+    if let Some(path) = pin.strip_prefix("link:") {
+        links.contains_target(importer, path)
+            && entry.is_none_or(|entry| catalog::link_entry_fits(spec, entry))
+    } else {
+        catalog::consumer_fits(name, spec, pin, entry, Some(config))
+    }
+}
+
 pub(in crate::converge) fn checked_overrides(
     doc: &Value,
     config: &WorkspaceConfig,
@@ -49,6 +66,7 @@ pub(super) fn catalogs(
     affected: &BTreeSet<String>,
 ) -> Result<RootChoices, LockfileError> {
     let mut choices = RootChoices::new();
+    let links = docs.map(|doc| graph::LinkedProjects::new(doc.get("importers")));
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
     for (id, root) in graph::section(docs[1], "importers").into_iter().flatten() {
         for group in schema::DEPENDENCY_GROUPS {
@@ -84,11 +102,7 @@ pub(super) fn catalogs(
                     let Some(spec) = spec else {
                         return Err(error());
                     };
-                    if v["specifier"].as_str() != Some(spec)
-                        || !v["version"]
-                            .as_str()
-                            .is_some_and(|pin| catalog::version_fits(spec, pin, Some(spec)))
-                    {
+                    if !catalog::link_entry_fits(spec, v) {
                         return Err(error());
                     }
                 }
@@ -101,7 +115,15 @@ pub(super) fn catalogs(
                     .flatten();
                 for (id, group, dep) in users.clone() {
                     if !dep["version"].as_str().is_some_and(|pin| {
-                        catalog::consumer_fits(name, spec, pin, Some(installed), Some(configs[1]))
+                        catalog_pin_fits(
+                            &links[1],
+                            id,
+                            name,
+                            spec,
+                            pin,
+                            Some(installed),
+                            configs[1],
+                        )
                     }) {
                         return Err(missing(
                             &["importers", id, group, name],
@@ -144,12 +166,14 @@ pub(super) fn catalogs(
                         importer_dependency(docs[0], id, name)
                             .and_then(|(_, dep)| dep["version"].as_str())
                             .is_some_and(|p| {
-                                catalog::consumer_fits(
+                                catalog_pin_fits(
+                                    &links[0],
+                                    id,
                                     name,
                                     spec,
                                     p,
                                     Some(installed),
-                                    Some(configs[1]),
+                                    configs[1],
                                 )
                             })
                     };
@@ -228,6 +252,8 @@ pub(super) fn importer_choices(
     {
         return Ok(choices);
     }
+    let [base_links, installed_links] =
+        docs.map(|doc| graph::LinkedProjects::new(doc.get("importers")));
     for (id, root) in graph::section(docs[0], "importers").into_iter().flatten() {
         let Some(current) = docs[1]["importers"].get(id) else {
             continue;
@@ -280,15 +306,20 @@ pub(super) fn importer_choices(
                     } else {
                         spec
                     };
-                    let accepts = |dep: &Value, doc: &Value| {
+                    let accepts = |dep: &Value, doc: &Value, links: &graph::LinkedProjects<'_>| {
                         dep["version"].as_str().is_some_and(|pin| {
+                            if catalog.is_some() && pin.starts_with("link:") {
+                                return catalog_pin_fits(
+                                    links, id, name, effective, pin, entry, configs[1],
+                                );
+                            }
                             catalog::accepts_pin(name, effective, pin, doc, Some(configs[1]))
                                 || (effective.parse::<node_semver::Range>().is_err()
                                     && pin::alias(effective).is_none()
                                     && dep == right)
                         })
                     };
-                    if !accepts(right, docs[1]) {
+                    if !accepts(right, docs[1], &installed_links) {
                         return Err(missing(
                             &["importers", id, found[1].expect("installed edge").0, name],
                             "installed pin does not satisfy the final declaration",
@@ -296,9 +327,9 @@ pub(super) fn importer_choices(
                     }
                     let fits_catalog = entry.is_none()
                         || left["version"].as_str().is_some_and(|p| {
-                            catalog::consumer_fits(name, effective, p, entry, Some(configs[1]))
+                            catalog_pin_fits(&base_links, id, name, effective, p, entry, configs[1])
                         });
-                    if accepts(left, docs[0]) && fits_catalog {
+                    if accepts(left, docs[0], &base_links) && fits_catalog {
                         RootChoice::Baseline
                     } else {
                         RootChoice::Installed

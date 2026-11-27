@@ -79,11 +79,15 @@ impl<'a> Merger<'a> {
     }
 
     pub(crate) fn finish_pass(&mut self, settled: bool) {
-        let records = self.provisional.take().expect("active importer pass");
-        if settled {
-            return;
+        if !settled {
+            self.rollback_to(0);
         }
-        for SavedRecord { key, body, origin } in records.into_iter().rev() {
+        self.provisional.take().expect("active importer pass");
+    }
+
+    fn rollback_to(&mut self, checkpoint: usize) {
+        let records = self.provisional.as_mut().expect("active rebound journal");
+        for SavedRecord { key, body, origin } in records.drain(checkpoint..).rev() {
             if let Some(body) = body {
                 self.generated.insert(key.clone(), body);
             } else {
@@ -155,8 +159,8 @@ impl<'a> Merger<'a> {
         );
     }
 
-    // A release upgrade keeps that release's regular dependency resolutions.
-    // Only inherited peer bindings are propagated through its existing graph.
+    /// Propagate inherited peer bindings through a locked release's graph.
+    /// A failed attempt leaves previously generated records intact.
     pub(crate) fn rebind(
         &mut self,
         side: usize,
@@ -169,10 +173,20 @@ impl<'a> Merger<'a> {
             .bindings
             .get(&(side, key.to_owned()))
             .is_some_and(Option::is_some);
+        let encoding = self
+            .linked_peer_encoding
+            .unwrap_or(source.linked_peer_encoding);
         if verified && source.peers.as_ref() == target {
+            let desired = if encoding != source.linked_peer_encoding
+                && target.values().any(|value| value.starts_with("link:"))
+            {
+                source.identity(key, target, self.dedupe_peers, encoding)
+            } else {
+                key.into()
+            };
             let body = self.documents[side]?.get("snapshots")?.get(key)?;
-            self.save_rebound(side, key, target, key, body.clone())?;
-            return Some(key.into());
+            self.save_rebound(side, key, target, &desired, body.clone())?;
+            return Some(desired);
         }
         if source
             .peers
@@ -182,20 +196,22 @@ impl<'a> Merger<'a> {
         {
             return None;
         }
-        let desired = source.identity(
-            key,
-            target,
-            self.dedupe_peers,
-            self.linked_peer_encoding
-                .unwrap_or(source.linked_peer_encoding),
-        );
+        let desired = source.identity(key, target, self.dedupe_peers, encoding);
         if !self.rebinding.insert(desired.clone()) {
             // The identity is determined before traversing the body. A back
             // edge can reference it while the owning frame finishes the node.
             return Some(desired);
         }
+        let owns_journal = self.provisional.is_none();
+        let checkpoint = self.provisional.get_or_insert_with(Vec::new).len();
         let result = self.rebind_body(side, key, &source, target, &desired, previous_providers);
         self.rebinding.remove(&desired);
+        if result.is_none() {
+            self.rollback_to(checkpoint);
+        }
+        if owns_journal {
+            self.provisional = None;
+        }
         result.map(|()| desired)
     }
 
@@ -232,7 +248,9 @@ impl<'a> Merger<'a> {
             if let Some(deps) = body.get_mut(group).and_then(Value::as_object_mut) {
                 for (name, value) in deps {
                     if own_peers.is_some_and(|m| m.contains_key(name)) {
-                        if let Some(mut binding) = bound_reference(name, value.as_str()?, &target) {
+                        if let Some(mut binding) = bound_reference(name, value.as_str()?, |name| {
+                            target.get(name).map(String::as_str)
+                        }) {
                             if flat && !binding.contains('(') && !binding.starts_with("link:") {
                                 binding = self.concrete_provider(
                                     side,
@@ -439,11 +457,9 @@ impl<'a> Merger<'a> {
                             .and_then(|d| d.get(name))
                     })
                     .and_then(Value::as_str);
-                let Some(binding) = bindings
-                    .get(name)
-                    .cloned()
-                    .or_else(|| actual.and_then(|actual| bound_reference(name, actual, bindings)))
-                else {
+                let Some(binding) = bound_reference(name, actual.unwrap_or_default(), |name| {
+                    bindings.get(name).map(String::as_str)
+                }) else {
                     continue;
                 };
                 let actual = actual?;
@@ -582,4 +598,66 @@ fn affected_by(doc: &Value, key: &str, changed: &BTreeSet<&str>) -> bool {
             .flatten()
             .filter_map(Value::as_str)
             .any(affected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn verified_linked_bindings_use_the_configured_encoding() {
+        let doc = json!({
+            "importers": {".": {"dependencies": {
+                "local": {"version": "link:con"},
+                "lib": {"version": "1.0.0(local@con+)"}
+            }}, "con": {}},
+            "packages": {"lib@1.0.0": {"peerDependencies": {"local": "*"}}},
+            "snapshots": {"lib@1.0.0(local@con+)": {"dependencies": {"local": "link:con"}}}
+        });
+        let mut merger = Merger::new([Some(&doc), None, None]);
+        merger.configure_context([0, 1, 2, 3], false, LinkedPeerEncoding::Path);
+        let bindings = BTreeMap::from([("local".into(), "link:con".into())]);
+        let key = merger.rebind(0, "lib@1.0.0(local@con+)", &bindings, &bindings);
+        assert_eq!(key.as_deref(), Some("lib@1.0.0(local@con)"));
+        let (_, body) = merger.rebound_snapshot("lib@1.0.0(local@con)").unwrap();
+        assert_eq!(body["dependencies"]["local"], "link:con");
+    }
+
+    #[test]
+    fn conflicting_rebind_preserves_only_previously_generated_snapshots() {
+        let doc = json!({
+            "packages": {
+                "a@1.0.0": {"peerDependencies": {"x": "*"}},
+                "parent@1.0.0": {"peerDependencies": {"x": "*"}},
+                "z@1.0.0": {"peerDependencies": {"x": "*"}},
+                "leaf@1.0.0": {}, "leaf@2.0.0": {}, "x@1.0.0": {}, "x@2.0.0": {}
+            },
+            "snapshots": {
+                "a@1.0.0(x@1.0.0)": {"dependencies": {"x": "1.0.0"}},
+                "parent@1.0.0(x@1.0.0)": {"dependencies": {
+                    "a": "1.0.0(x@1.0.0)", "x": "1.0.0", "z": "1.0.0(x@1.0.0)"
+                }},
+                "z@1.0.0(x@1.0.0)": {"dependencies": {"leaf": "1.0.0", "x": "1.0.0"}},
+                "z@1.0.0(x@2.0.0)": {"dependencies": {"leaf": "2.0.0", "x": "2.0.0"}},
+                "leaf@1.0.0": {}, "leaf@2.0.0": {}, "x@1.0.0": {}, "x@2.0.0": {}
+            }
+        });
+        let mut merger = Merger::new([Some(&doc), None, None]);
+        let old = BTreeMap::from([("x".into(), "1.0.0".into())]);
+        let new = BTreeMap::from([("x".into(), "2.0.0".into())]);
+        let existing = "z@1.0.0(x@2.0.0)";
+        assert_eq!(
+            merger.rebind(0, existing, &new, &new).as_deref(),
+            Some(existing)
+        );
+        assert!(
+            merger
+                .rebind(0, "parent@1.0.0(x@1.0.0)", &new, &old)
+                .is_none()
+        );
+        assert!(merger.rebound_snapshot("a@1.0.0(x@2.0.0)").is_none());
+        let (_, body) = merger.rebound_snapshot(existing).unwrap();
+        assert_eq!(body["dependencies"]["leaf"], "2.0.0");
+    }
 }

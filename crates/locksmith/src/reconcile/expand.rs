@@ -583,7 +583,9 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
         original: &str,
         scope: &Scope,
     ) -> Result<Option<String>, LockfileError> {
-        let Some(bound) = peer::bound_reference(name, original, scope) else {
+        let Some(bound) =
+            peer::bound_reference(name, original, |name| scope.get(name).map(String::as_str))
+        else {
             return Ok(None);
         };
         self.concrete_reference(name, original, bound, |_| scope.clone())
@@ -595,16 +597,8 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
         original: &str,
         scope: &Environment,
     ) -> Result<Option<String>, LockfileError> {
-        let bound = self
-            .environments
-            .get(scope, name)
-            .map(str::to_owned)
-            .or_else(|| {
-                let (actual, _) = package_key(original).rsplit_once('@')?;
-                self.environments
-                    .get(scope, actual)
-                    .map(|value| format!("{actual}@{value}"))
-            });
+        let bound =
+            peer::bound_reference(name, original, |name| self.environments.get(scope, name));
         let Some(bound) = bound else { return Ok(None) };
         self.concrete_reference(name, original, bound, |resolver| {
             resolver.environments.owned(scope)
@@ -686,16 +680,9 @@ impl<'a, F: Fn(&str) -> Option<usize>> Resolver<'a, '_, '_, F> {
             for (_, name, value) in references(body) {
                 if names.contains(name)
                     && own.is_some_and(|peers| peers.get(name).is_some())
-                    && let Some(bound) = self
-                        .environments
-                        .get(&scope, name)
-                        .map(str::to_owned)
-                        .or_else(|| {
-                            let (actual, _) = package_key(value).rsplit_once('@')?;
-                            self.environments
-                                .get(&scope, actual)
-                                .map(|value| format!("{actual}@{value}"))
-                        })
+                    && let Some(bound) = peer::bound_reference(name, value, |name| {
+                        self.environments.get(&scope, name)
+                    })
                     && bound != value
                     && !(self.policy.lock.dedupe_peers && bound == package_key(value))
                 {

@@ -102,8 +102,10 @@ impl ChangeSet<'_> {
 /// # Errors
 /// Mismatched manifests or incompatible configuration changes return an error. Missing
 /// locked evidence can produce a resolution request. Incompatible graph records produce a conflict.
-/// A pnpm migration requires all final manifests and matching patch contents. Reconstructed
-/// baselines must match the recorded groups, specifiers and metadata.
+/// For a pnpm migration, supply all final manifests, both
+/// [baseline](ConvergeOptions::baseline_configuration) and [final](ConvergeOptions::configuration)
+/// configurations, and matching patch contents. Reconstructed baselines must match the recorded
+/// groups, specifiers and metadata.
 pub fn converge(
     baseline: &Lockfile,
     candidate: &Lockfile,
@@ -291,7 +293,14 @@ fn select(
     inputs: ChangeSet<'_>,
     options: ConvergeOptions<'_>,
 ) -> Result<Lockfile, LockfileError> {
-    let configured = if let Some(before) = options.baseline_configuration {
+    let before = options.baseline_configuration.or_else(|| {
+        options.configuration.filter(|config| {
+            !config.catalogs.is_empty()
+                && baseline.project().and_then(|v| v.get("catalogs"))
+                    != candidate.project().and_then(|v| v.get("catalogs"))
+        })
+    });
+    let configured = if let Some(before) = before {
         let after = options.configuration.ok_or_else(|| {
             crate::error::missing(
                 &["configuration"],
@@ -331,7 +340,7 @@ fn select(
                 baseline,
                 candidate,
                 inputs,
-                options.baseline_configuration.unwrap(),
+                before.expect("verified baseline configuration"),
                 options.configuration.unwrap(),
             );
         }

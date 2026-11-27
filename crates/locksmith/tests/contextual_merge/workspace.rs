@@ -1398,6 +1398,7 @@ fn failing_all_bootstraps_returns_target_branch_error() {
         (MergeTarget::Ours, "ours-err: 11.0.0"),
         (MergeTarget::Theirs, "theirs-err: 12.0.0"),
     ] {
+        let mut attempted = Vec::new();
         let err = target
             .workspace_for_candidate(
                 None,
@@ -1413,11 +1414,15 @@ fn failing_all_bootstraps_returns_target_branch_error() {
                         "12.0.0" => "theirs-err",
                         _ => "unknown",
                     };
-                    Err(LockfileError::WorkspaceInput(format!("{label}: {ver}")))
+                    let error = LockfileError::WorkspaceInput(format!("{label}: {ver}"));
+                    attempted.push(ver);
+                    Err(error)
                 },
             )
             .err()
             .unwrap();
+        attempted.sort_unstable();
+        assert_eq!(attempted, ["10.0.0", "11.0.0", "12.0.0"]);
         assert!(
             matches!(&err, LockfileError::WorkspaceInput(msg) if msg == expected),
             "expected {expected}, got {err}"
