@@ -1,43 +1,11 @@
-//! Encode and decode pnpm peer identities, linked paths and patch hashes.
+//! Encode and decode pnpm peer identities, and linked paths.
 use super::{WorkspaceLinks, canonical_binding};
-use crate::{LinkedPeerEncoding, graph};
-use sha2::Digest;
+use crate::{
+    LinkedPeerEncoding,
+    checksum::{HashStyle, digest},
+    graph, pin,
+};
 use std::collections::BTreeMap;
-
-pub(crate) fn patch(key: &str) -> Option<&str> {
-    checked_patch(key).ok().flatten()
-}
-
-pub(crate) fn checked_patch(key: &str) -> Result<Option<&str>, &'static str> {
-    let suffix = &key[graph::package_key(key).len()..];
-    if !suffix.contains("(patch_hash=") {
-        return Ok(None);
-    }
-    let mut depth = 0_usize;
-    let mut hash = None;
-    for (offset, byte) in suffix.bytes().enumerate() {
-        match byte {
-            b'(' => {
-                if depth == 0
-                    && let Some(rest) = suffix[offset..].strip_prefix("(patch_hash=")
-                {
-                    if offset != 0 {
-                        return Err("snapshot patch hash must occur once before peer suffixes");
-                    }
-                    let (value, _) = rest
-                        .split_once(')')
-                        .filter(|(v, _)| !v.is_empty() && !v.contains('('))
-                        .ok_or("expected a nonempty patch hash followed by ')'")?;
-                    hash = Some(value);
-                }
-                depth += 1;
-            }
-            b')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    Ok(hash)
-}
 
 /// Parse balanced suffixes without splitting nested peer identities. Hash-only
 /// suffixes deliberately remain opaque.
@@ -53,7 +21,7 @@ pub(crate) fn context(key: &str) -> Option<BTreeMap<&str, &str>> {
 
 pub(super) fn context_tokens(key: &str) -> Option<Vec<(&str, &str)>> {
     let mut result = Vec::new();
-    let mut suffix = &key[graph::package_key(key).len()..];
+    let mut suffix = &key[pin::package_key(key).len()..];
     while !suffix.is_empty() {
         let mut depth = 0;
         let mut end = None;
@@ -90,75 +58,6 @@ pub(super) fn context_tokens(key: &str) -> Option<Vec<(&str, &str)>> {
     Some(result)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum HashStyle {
-    Sha256,
-    Md5Base32,
-}
-impl HashStyle {
-    pub(super) fn recognize(hash: &str) -> Option<Self> {
-        if hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            Some(Self::Sha256)
-        } else if hash.len() == 26
-            && hash
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
-        {
-            Some(Self::Md5Base32)
-        } else {
-            None
-        }
-    }
-}
-pub(super) fn digest(text: &str, style: HashStyle) -> String {
-    match style {
-        HashStyle::Sha256 => {
-            let mut out = String::with_capacity(32);
-            let hex = b"0123456789abcdef";
-            for &b in &sha2::Sha256::digest(text.as_bytes())[..16] {
-                out.push(hex[(b >> 4) as usize] as char);
-                out.push(hex[(b & 15) as usize] as char);
-            }
-            out
-        }
-        HashStyle::Md5Base32 => {
-            let bytes = md5::Md5::digest(text.as_bytes());
-            let mut acc = 0u32;
-            let mut bits = 0;
-            let mut out = String::new();
-            for b in bytes {
-                acc = (acc << 8) | u32::from(b);
-                bits += 8;
-                while bits >= 5 {
-                    bits -= 5;
-                    out.push(
-                        b"abcdefghijklmnopqrstuvwxyz234567"[((acc >> bits) & 31) as usize] as char,
-                    );
-                }
-            }
-            if bits > 0 {
-                out.push(
-                    b"abcdefghijklmnopqrstuvwxyz234567"[((acc << (5 - bits)) & 31) as usize]
-                        as char,
-                );
-            }
-            out
-        }
-    }
-}
-
-pub(crate) fn patch_hash(text: &str, encoding: crate::PatchEncoding) -> String {
-    let normalized = text.replace("\r\n", "\n");
-    match encoding {
-        crate::PatchEncoding::Md5Base32WithPath => digest(&normalized, HashStyle::Md5Base32),
-        crate::PatchEncoding::Sha256 | crate::PatchEncoding::Sha256WithPath => {
-            sha2::Sha256::digest(normalized.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        }
-    }
-}
 pub(super) fn peer_text(
     peers: &BTreeMap<String, String>,
     flat: bool,
@@ -181,11 +80,7 @@ pub(super) fn peer_id(name: &str, value: &str, flat: bool, encoding: LinkedPeerE
     let (name, value) = canonical_binding(name, value);
     format!(
         "{name}@{}",
-        if flat {
-            graph::package_key(value)
-        } else {
-            value
-        }
+        if flat { pin::package_key(value) } else { value }
     )
 }
 
@@ -265,7 +160,7 @@ pub(super) fn token_matches(name: &str, reference: &str, token_name: &str, token
                 .any(|encoding| link_peer_id(path, encoding) == token);
     }
     let (actual, reference) = canonical_binding(name, reference);
-    actual == token_name && (reference == token || graph::package_key(reference) == token)
+    actual == token_name && (reference == token || pin::package_key(reference) == token)
 }
 
 pub(super) fn token_reference(links: &WorkspaceLinks, name: &str, token: &str) -> Option<String> {
@@ -287,7 +182,7 @@ pub(crate) fn matches_bindings(
         .rsplit_once('(')
         .and_then(|(_, tail)| tail.strip_suffix(')'));
     let style = suffix.and_then(HashStyle::recognize);
-    encode(graph::package_key(key), bindings, style, flat, encoding) == key
+    encode(pin::package_key(key), bindings, style, flat, encoding) == key
 }
 
 /// Encode a mix of two witnessed contexts only if the same pnpm encoding
@@ -311,7 +206,7 @@ pub(crate) fn projected_identity(
     let limit = lock["settings"]
         .get("peersSuffixMaxLength")
         .map_or(Some(1000), |v| v.as_u64())?;
-    let package = graph::package_key(keys[0]);
+    let package = pin::package_key(keys[0]);
     let identity = |pins: &BTreeMap<String, String>| {
         let flat = config.resolution.lock.dedupe_peers;
         let encoding = config.linked_peer_encoding;

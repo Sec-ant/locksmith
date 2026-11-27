@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use serde_json::Map;
 
 use crate::{
-    DocumentKind, LockfileError, ValidationIssue, Value, error::issue, schema::check_package_peers,
+    DocumentKind, LockfileError, ValidationIssue, Value, catalog, error::issue, patch, pin, schema,
+    schema::check_package_peers,
 };
 
 pub(crate) const DEPENDENCIES: [&str; 5] = [
@@ -34,7 +35,7 @@ impl DependencyClosure {
         let mut variants: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for snapshot in &self.snapshots {
             variants
-                .entry(package_key(snapshot))
+                .entry(pin::package_key(snapshot))
                 .or_default()
                 .push(snapshot);
         }
@@ -67,18 +68,6 @@ pub(crate) fn keys(document: &Value, key: &str) -> BTreeSet<String> {
         .flatten()
         .map(|(key, _)| key.clone())
         .collect()
-}
-
-pub(crate) fn package_key(snapshot: &str) -> &str {
-    snapshot.split_once('(').map_or(snapshot, |(key, _)| key)
-}
-
-/// A file pin is relative to the lockfile root. Aliases record the package name too.
-pub(crate) fn file_pin<'a>(name: &'a str, reference: &'a str) -> Option<(&'a str, &'a str)> {
-    let pin = package_key(reference);
-    pin.strip_prefix("file:")
-        .map(|path| (name, path))
-        .or_else(|| pin.split_once("@file:"))
 }
 
 /// pnpm writes npm aliases and remote/file references as either a full key or
@@ -297,7 +286,7 @@ fn closure_with_snapshots(
     let mut importers: VecDeque<_> = roots.iter().cloned().collect();
     let mut queued_importers = roots.clone();
     let links = LinkedProjects::new(importer_records);
-    let patches = crate::reconcile::patch_index(document);
+    let patches = patch::index(document);
     let mut traversal = Traversal {
         snapshots: section(document, "snapshots"),
         ..Traversal::default()
@@ -321,7 +310,7 @@ fn closure_with_snapshots(
                 key.as_str(),
             )
         } else if let Some((key, snapshot)) = traversal.pending.pop() {
-            reached.packages.insert(package_key(key).to_owned());
+            reached.packages.insert(pin::package_key(key).to_owned());
             check_snapshot(document, kind, key, &patches, &mut issues);
             ("snapshots", key, snapshot, false, ".")
         } else {
@@ -396,7 +385,7 @@ fn check_package(
     snapshot: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let key = package_key(snapshot);
+    let key = pin::package_key(snapshot);
     let package = document.get("packages").and_then(|map| map.get(key));
     match package {
         None => issues.push(issue(
@@ -421,20 +410,16 @@ fn check_snapshot(
     document: &Value,
     kind: DocumentKind,
     key: &str,
-    patches: &crate::reconcile::PatchIndex<'_>,
+    patches: &patch::PatchIndex<'_>,
     issues: &mut Vec<ValidationIssue>,
 ) {
     check_package(document, kind, key, issues);
-    let message = match crate::peer::checked_patch(key) {
+    let message = match patch::checked_hash_in_key(key) {
         Err(message) => message,
         Ok(actual)
             if (actual.is_some() || document.get("patchedDependencies").is_some())
-                && crate::reconcile::desired_patch_with_index(
-                    key,
-                    document,
-                    [document; 4],
-                    Some(patches),
-                ) != Some(actual) =>
+                && patch::desired_hash_with_index(key, document, [document; 4], Some(patches))
+                    != Some(actual) =>
         {
             "snapshot patch hash differs from the applicable patchedDependencies selector"
         }
@@ -488,9 +473,7 @@ fn check_catalogs(
                 let target = links.resolve(key, path);
                 document["importers"].get(&target).is_some()
                     && match (spec, entry) {
-                        (Some(spec), Some(entry)) => {
-                            crate::reconcile::metadata::catalog_link_entry_fits(spec, entry)
-                        }
+                        (Some(spec), Some(entry)) => catalog::link_entry_fits(spec, entry),
                         (Some(_), None) => true,
                         // pnpm 12.0–12.5 omitted catalog records used only by local links.
                         (None, None) => config.is_none(),
@@ -498,9 +481,7 @@ fn check_catalogs(
                     }
             } else {
                 spec.zip(pin).is_some_and(|(spec, pin)| {
-                    crate::reconcile::metadata::catalog_consumer_fits(
-                        name, spec, pin, entry, config,
-                    )
+                    catalog::consumer_fits(name, spec, pin, entry, config)
                 })
             };
             if !fits {
@@ -521,7 +502,7 @@ fn check_overrides(
     key: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    for group in crate::manifest::GROUPS {
+    for group in schema::DEPENDENCY_GROUPS {
         for (name, dependency) in section(importer, group).into_iter().flatten() {
             if let Some(expected) = overrides.get(name.as_str())
                 && dependency.get("specifier").and_then(Value::as_str) != Some(*expected)
@@ -550,7 +531,7 @@ pub(crate) fn validate_with_unresolved_snapshots(
     config: Option<&crate::WorkspaceConfig>,
     unresolved: &[String],
 ) -> Vec<ValidationIssue> {
-    let patches = crate::reconcile::patch_index(document);
+    let patches = patch::index(document);
     let mut issues = Vec::new();
     if let Err(error) = crate::LockSettings::from_document(
         document,

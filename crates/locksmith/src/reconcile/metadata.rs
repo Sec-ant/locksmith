@@ -1,92 +1,8 @@
 //! Construct and check project-wide settings, catalogs, checksums and patch records.
-use super::{MergeContext, missing};
-use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
+use super::MergeContext;
+use crate::error::missing;
+use crate::{LockfileError, Value, WorkspaceConfig, catalog, graph, manifest, patch, pin, schema};
 use serde_json::json;
-
-pub(crate) fn catalog_version_fits(specifier: &str, version: &str, recorded: Option<&str>) -> bool {
-    let range = manifest::alias(specifier).map_or(specifier, |(_, range)| range);
-    match range.parse::<node_semver::Range>() {
-        Ok(wanted) => version
-            .parse::<node_semver::Version>()
-            .is_ok_and(|pin| range == "*" || pin.satisfies(&wanted)),
-        Err(_) => recorded == Some(specifier),
-    }
-}
-
-pub(crate) fn catalog_entry_version<'a>(specifier: &str, entry: &'a Value) -> Option<&'a str> {
-    let version = entry["version"].as_str()?;
-    (entry["specifier"] == specifier && catalog_version_fits(specifier, version, Some(specifier)))
-        .then_some(version)
-}
-
-pub(crate) fn catalog_link_entry_fits(specifier: &str, entry: &Value) -> bool {
-    catalog_entry_version(specifier, entry).is_some()
-        || (entry["specifier"] == specifier && entry["version"] == specifier)
-}
-
-/// pnpm can retain distinct catalog and importer pins within the declared range.
-pub(crate) fn catalog_consumer_fits(
-    name: &str,
-    spec: &str,
-    reference: &str,
-    entry: Option<&Value>,
-    configuration: Option<&WorkspaceConfig>,
-) -> bool {
-    let effective = manifest::pinned_specifier(spec, reference, configuration);
-    if let Some(entry) = entry {
-        let Some(version) = catalog_entry_version(spec, entry) else {
-            return false;
-        };
-        if effective != spec && !catalog_version_fits(effective, version, None) {
-            return false;
-        }
-        if super::catalog_pin_matches(name, Some(effective), version, reference) {
-            return true;
-        }
-    }
-    super::range_accepts(name, effective, reference)
-}
-
-pub(crate) fn check_recorded_settings(
-    doc: &Value,
-    cfg: &WorkspaceConfig,
-) -> Result<(), LockfileError> {
-    let settings = &doc["settings"];
-    let major = cfg.pnpm_version.as_ref().map(|v| v.major());
-    let parameters = &cfg.resolution.parameters;
-    let default_suffix = Value::from(1000);
-    let disabled = Value::Bool(false);
-    for (key, expected, default, supported) in [
-        (
-            "peersSuffixMaxLength",
-            parameters
-                .get("peersSuffixMaxLength")
-                .unwrap_or(&default_suffix),
-            &default_suffix,
-            true,
-        ),
-        (
-            "injectWorkspacePackages",
-            &Value::Bool(cfg.resolution.inject_workspace_packages),
-            &disabled,
-            major.is_none_or(|m| m >= 10),
-        ),
-        (
-            "addMissingPeerTypes",
-            parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
-            &disabled,
-            major.is_none_or(|m| m >= 12),
-        ),
-    ] {
-        if supported && settings.get(key).unwrap_or(default) != expected {
-            return Err(missing(
-                &["settings", key],
-                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
-            ));
-        }
-    }
-    Ok(())
-}
 
 pub(super) fn check_merge_settings(
     doc: &Value,
@@ -101,7 +17,7 @@ pub(super) fn check_merge_settings(
         .as_ref()
         .is_some_and(|version| version >= &node_semver::Version::from((12, 15, 0)))
     {
-        check_recorded_settings(doc, config)?;
+        config.check_recorded_settings(doc)?;
     }
     if let Some(field) = config.frozen_settings_mismatch(doc) {
         return Err(missing(
@@ -126,11 +42,11 @@ pub(crate) fn check_repair_configuration(
     if cfg.read_lock_settings(doc)? != cfg.read_lock_settings(metadata)? {
         return Err(mismatch("settings"));
     }
-    check_recorded_settings(doc, cfg)?;
+    cfg.check_recorded_settings(doc)?;
     if !manifest::same_overrides(doc, metadata) {
         return Err(mismatch("overrides"));
     }
-    if !same_patch_records(doc, metadata.get("patchedDependencies")) {
+    if !patch::records_match(doc, metadata.get("patchedDependencies")) {
         return Err(mismatch("patchedDependencies"));
     }
     if !crate::checksum::extensions_match(
@@ -300,12 +216,11 @@ pub(crate) fn resolve(
                     let recorded = context.configurations[*side]
                         .registry_specifier(entry["specifier"].as_str()?);
                     let effective = config.registry_specifier(specifier);
-                    if manifest::alias(recorded).map(|(n, _)| n)
-                        != manifest::alias(effective).map(|(n, _)| n)
+                    if pin::alias(recorded).map(|(n, _)| n) != pin::alias(effective).map(|(n, _)| n)
                     {
                         return None;
                     }
-                    catalog_version_fits(effective, version, Some(recorded))
+                    catalog::version_fits(effective, version, Some(recorded))
                         .then(|| json!({"specifier":specifier,"version":version}))
                 })
                 .or_else(|| {
@@ -351,81 +266,13 @@ pub(crate) fn resolve(
             }
         }
     }
-    if let Some(rules) = effective_overrides(config, context.manifests.get("."))? {
+    if let Some(rules) = manifest::effective_overrides(config, context.manifests.get("."))? {
         output["overrides"] = rules;
     }
-    if let Some(patches) = patch_records(config, context.patches, config.patch_encoding)? {
+    if let Some(patches) = patch::records(config, context.patches, config.patch_encoding)? {
         output["patchedDependencies"] = patches;
     }
     Ok(output)
-}
-
-pub(crate) fn patch_records(
-    config: &crate::WorkspaceConfig,
-    contents: &std::collections::BTreeMap<String, String>,
-    encoding: crate::PatchEncoding,
-) -> Result<Option<Value>, LockfileError> {
-    let Some(patches) = config
-        .patches
-        .as_ref()
-        .filter(|patches| !patches.is_empty())
-    else {
-        return Ok(None);
-    };
-    let records = patches
-        .iter()
-        .map(|(name, path)| {
-            let contents = contents.get(path).ok_or_else(|| {
-                missing(
-                    &["patchedDependencies", name],
-                    format!("missing patch contents: {path}"),
-                )
-            })?;
-            let hash = peer::patch_hash(contents, encoding);
-            let record = match encoding {
-                crate::PatchEncoding::Sha256 => Value::String(hash),
-                crate::PatchEncoding::Sha256WithPath | crate::PatchEncoding::Md5Base32WithPath => {
-                    json!({"hash": hash, "path": path})
-                }
-            };
-            Ok((name.clone(), record))
-        })
-        .collect::<Result<_, LockfileError>>()?;
-    Ok(Some(Value::Object(records)))
-}
-
-pub(crate) fn same_patch_records(document: &Value, expected: Option<&Value>) -> bool {
-    let recorded = manifest::rule_map(document, "patchedDependencies");
-    if recorded == expected {
-        return true;
-    }
-    let (Some(recorded), Some(expected)) = (
-        recorded.and_then(Value::as_object),
-        expected.and_then(Value::as_object),
-    ) else {
-        return false;
-    };
-    recorded.len() == expected.len()
-        && expected.iter().all(|(name, patch)| {
-            let Some(old) = recorded.get(name) else {
-                return false;
-            };
-            if old == patch {
-                return true;
-            }
-            let paths = old["path"].as_str().zip(patch["path"].as_str());
-            old.as_object().is_some_and(|entry| entry.len() == 2)
-                && old["hash"] == patch["hash"]
-                && paths.is_some_and(|(old, new)| {
-                    use std::path::{Component, Path};
-                    Path::new(old)
-                        .components()
-                        .filter(|c| *c != Component::CurDir)
-                        .eq(Path::new(new)
-                            .components()
-                            .filter(|c| *c != Component::CurDir))
-                })
-        })
 }
 
 /// pnpm records publication times for direct dependency locators only.
@@ -447,15 +294,15 @@ pub(crate) fn publication_times<const N: usize>(
         .map(|v| v.major());
     let snapshots = graph::section(project, "snapshots");
     for (_, importer) in graph::section(project, "importers").into_iter().flatten() {
-        for group in crate::manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(importer, group).into_iter().flatten() {
                 let Some(version) = dep["version"].as_str().filter(|v| !v.starts_with("link:"))
                 else {
                     continue;
                 };
                 let key = graph::snapshot_key(name, version, snapshots);
-                let key = graph::package_key(&key);
-                let reference = graph::package_key(version);
+                let key = pin::package_key(&key);
+                let reference = pin::package_key(version);
                 // pnpm 9 and 10 use /name@version, or the reference itself for files and paths.
                 let legacy = if reference.starts_with("file:") || reference.contains('/') {
                     reference.to_owned()
@@ -488,7 +335,7 @@ pub(super) fn retain_used_catalogs(output: &mut Value) {
     };
     let mut used = std::collections::HashSet::new();
     for (_, importer) in graph::section(output, "importers").into_iter().flatten() {
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(importer, group).into_iter().flatten() {
                 if let Some(catalog) = dep["specifier"]
                     .as_str()
@@ -515,51 +362,4 @@ pub(super) fn retain_used_catalogs(output: &mut Value) {
     if !groups.is_empty() {
         output["catalogs"] = catalogs;
     }
-}
-
-/// Resolve catalog and root-manifest references while preserving selector order.
-pub(crate) fn effective_overrides(
-    config: &crate::WorkspaceConfig,
-    root: Option<&Value>,
-) -> Result<Option<Value>, LockfileError> {
-    let Some(overrides) = &config.overrides else {
-        return Ok(None);
-    };
-    let mut rules = serde_json::Map::new();
-    for (selector, replacement) in overrides {
-        let mut value = replacement.as_str();
-        if let Some(name) = value.strip_prefix('$') {
-            value = root
-                .and_then(|m| {
-                    ["optionalDependencies", "dependencies", "devDependencies"]
-                        .into_iter()
-                        .find_map(|g| m.get(g)?.get(name)?.as_str())
-                })
-                .ok_or_else(|| {
-                    missing(
-                        &["overrides", selector],
-                        "missing referenced root dependency",
-                    )
-                })?;
-        }
-        if let Some(catalog) = value.strip_prefix("catalog:") {
-            let (_, name, _) = manifest::override_selector(selector);
-            value = config
-                .catalogs
-                .get(if catalog.is_empty() {
-                    "default"
-                } else {
-                    catalog
-                })
-                .and_then(|c| c.get(name))
-                .ok_or_else(|| {
-                    missing(
-                        &["overrides", selector],
-                        "missing referenced catalog declaration",
-                    )
-                })?;
-        }
-        rules.insert(selector.clone(), Value::from(value));
-    }
-    Ok((!rules.is_empty()).then_some(Value::Object(rules)))
 }

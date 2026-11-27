@@ -1,8 +1,7 @@
 //! Keep consumers bound to the providers selected in the repaired importer.
 use super::Evidence;
 use crate::{
-    LockfileError, Value, graph, manifest, peer,
-    reconcile::{missing, peer_names},
+    LockfileError, Value, error::missing, graph, peer, pin, reconcile::peer_names, schema,
 };
 use std::collections::BTreeMap;
 
@@ -13,7 +12,7 @@ fn scope(doc: &Value, id: &str, root_peers: bool) -> BTreeMap<String, String> {
         .into_iter()
         .chain([id])
     {
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(&doc["importers"][importer], group)
                 .into_iter()
                 .flatten()
@@ -49,7 +48,7 @@ pub(super) fn affected(
         if current == old {
             continue;
         }
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(importer, group).into_iter().flatten() {
                 let Some(pin) = dep["version"].as_str().filter(|v| !v.starts_with("link:")) else {
                     continue;
@@ -72,7 +71,7 @@ pub(super) fn affected(
                         )
                     })?;
                 let other = scope(donor, id, root_peers);
-                if graph::package_key(candidate) != graph::package_key(pin)
+                if pin::package_key(candidate) != pin::package_key(pin)
                     || names.iter().any(|p| other.get(p) != current.get(p))
                 {
                     return Err(missing(

@@ -59,3 +59,26 @@ pub(crate) fn check_package_peers(
         }
     }
 }
+
+pub(crate) const DEPENDENCY_GROUPS: [&str; 3] =
+    ["dependencies", "devDependencies", "optionalDependencies"];
+
+/// pnpm omits rule maps with no entries when writing the lockfile.
+pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
+    document
+        .get(field)
+        .filter(|value| !value.as_object().is_some_and(|rules| rules.is_empty()))
+}
+
+pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
+    same_ordered_mapping(left.get("overrides"), right.get("overrides"))
+}
+
+pub(crate) fn same_ordered_mapping(left: Option<&Value>, right: Option<&Value>) -> bool {
+    left == right
+        && left
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .eq(right.and_then(Value::as_object).into_iter().flatten())
+}

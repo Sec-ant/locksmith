@@ -1,13 +1,14 @@
 //! Reconcile existing dependency instances, preserving their package identity.
-use crate::{LinkedPeerEncoding, Value, graph};
+use crate::{LinkedPeerEncoding, Value, graph, pin, schema};
 
 mod exact;
 pub(crate) use exact::same_binding;
 mod identity;
-use identity::{HashStyle, context, context_tokens, encode, link_peer_id};
+use crate::checksum::HashStyle;
+use crate::{patch::hash_in_key, pin::reference};
+use identity::{context, context_tokens, encode, link_peer_id};
 pub(crate) use identity::{
-    checked_patch, context as explicit_bindings, matches_bindings, patch, patch_hash,
-    projected_identity, root_provider,
+    context as explicit_bindings, matches_bindings, projected_identity, root_provider,
 };
 mod bindings;
 pub(crate) use bindings::optional_requirement;
@@ -54,7 +55,7 @@ impl<'a> PeerIndex<'a> {
             for document in self.documents.into_iter().flatten() {
                 for (key, body) in graph::section(document, "snapshots").into_iter().flatten() {
                     candidates
-                        .entry(graph::package_key(key))
+                        .entry(pin::package_key(key))
                         .or_default()
                         .push((key, body));
                 }
@@ -186,7 +187,7 @@ impl<'a> Merger<'a> {
         for (name, binding) in &mut target {
             if name != "patch_hash"
                 && let Some(provider) = providers.get(name)
-                && !(source.versions_only.contains(name) && graph::package_key(provider) == binding)
+                && !(source.versions_only.contains(name) && pin::package_key(provider) == binding)
             {
                 *binding = provider.clone();
             }
@@ -289,7 +290,7 @@ impl<'a> Merger<'a> {
     }
 
     pub(crate) fn repatch(&mut self, side: usize, key: &str, hash: Option<&str>) -> Option<String> {
-        if patch(key) == hash {
+        if hash_in_key(key) == hash {
             return Some(key.into());
         }
         let mut bindings = self.binding_context(side, key, &BTreeMap::new())?;
@@ -298,7 +299,7 @@ impl<'a> Merger<'a> {
         } else {
             bindings.remove("patch_hash");
         }
-        let package = graph::package_key(key);
+        let package = pin::package_key(key);
         let suffix = &key[package.len()..];
         let suffix = if let Some(patched) = suffix.strip_prefix("(patch_hash=") {
             patched.split_once(')')?.1
@@ -403,7 +404,7 @@ impl<'a> Merger<'a> {
             }
         }
         for (name, _) in graph::section(
-            &doc["packages"][graph::package_key(candidate)],
+            &doc["packages"][pin::package_key(candidate)],
             "peerDependencies",
         )
         .into_iter()
@@ -467,7 +468,7 @@ impl<'a> Merger<'a> {
             let previous_providers = previous_providers();
             let doc = self.documents[side]?;
             let available = canonical_providers(&previous_providers);
-            let names = doc["packages"][graph::package_key(key)]["peerDependencies"]
+            let names = doc["packages"][pin::package_key(key)]["peerDependencies"]
                 .as_object()
                 .into_iter()
                 .flatten()
@@ -521,7 +522,7 @@ impl<'a> Merger<'a> {
                 );
             }
             for (key, snapshot) in graph::section(doc, "snapshots").into_iter().flatten() {
-                let Some((package, _)) = graph::package_key(key).rsplit_once('@') else {
+                let Some((package, _)) = pin::package_key(key).rsplit_once('@') else {
                     continue;
                 };
                 let names = dependencies.entry(package).or_default();
@@ -543,7 +544,7 @@ impl<'a> Merger<'a> {
                 );
                 let own = doc
                     .get("packages")
-                    .and_then(|packages| packages.get(graph::package_key(key)))
+                    .and_then(|packages| packages.get(pin::package_key(key)))
                     .and_then(|package| package.get("peerDependencies"));
                 for group in ["dependencies", "optionalDependencies"] {
                     for (name, value) in graph::section(snapshot, group).into_iter().flatten() {
@@ -778,7 +779,7 @@ impl<'a> Merger<'a> {
                     }
                     Self::check_bindings(
                         self.documents.into_iter().flatten(),
-                        graph::package_key(key),
+                        pin::package_key(key),
                         &changed,
                         value,
                     )?;
@@ -822,7 +823,7 @@ impl<'a> Merger<'a> {
     }
 
     fn instance(&mut self, keys: &[String]) -> Option<String> {
-        let packages: Vec<_> = keys.iter().map(|k| graph::package_key(k)).collect();
+        let packages: Vec<_> = keys.iter().map(|k| pin::package_key(k)).collect();
         // A new package release can have different dependency declarations.
         // Rebind that release's graph without copying old-release dependencies
         // or substituting a different consumer's regular resolutions.
@@ -893,13 +894,13 @@ impl<'a> Merger<'a> {
             .collect();
         let records = records?;
         if packages.iter().any(|p| *p != package)
-            || keys.iter().any(|k| patch(k) != patch(&keys[0]))
+            || keys.iter().any(|k| hash_in_key(k) != hash_in_key(&keys[0]))
         {
             let (_, peers) = desired?;
             let mut rebound = None;
             for (side, source) in packages.iter().enumerate() {
                 if *source == package
-                    && patch(&keys[side]) == peers.get("patch_hash").map(String::as_str)
+                    && hash_in_key(&keys[side]) == peers.get("patch_hash").map(String::as_str)
                 {
                     let key = self.rebind(side, &keys[side], &peers, &BTreeMap::new())?;
                     if rebound.as_ref().is_some_and(|previous| *previous != key) {
@@ -1004,7 +1005,7 @@ impl<'a> Merger<'a> {
         let source = &source.peers;
         let mut target = Cow::Borrowed(target);
         let mut child_scope = None;
-        let package = graph::package_key(key);
+        let package = pin::package_key(key);
         let own_peers = doc
             .get("packages")?
             .get(package)?
@@ -1065,7 +1066,7 @@ impl<'a> Merger<'a> {
                             && changed.contains(peer.as_str())
                             && source
                                 .get(peer)
-                                .is_some_and(|v| v == binding || v == graph::package_key(binding))
+                                .is_some_and(|v| v == binding || v == pin::package_key(binding))
                             && let Some(new) = target.get(peer)
                         {
                             *binding = new.clone();
@@ -1073,7 +1074,7 @@ impl<'a> Merger<'a> {
                     }
                     if next != old {
                         let child = self.recontextualize_source(side, &child, &next, scope)?;
-                        *value = Value::String(crate::peer::reference(name, &child));
+                        *value = Value::String(pin::reference(name, &child));
                     }
                 }
             }
@@ -1104,7 +1105,7 @@ impl<'a> Merger<'a> {
         {
             return Some(binding.into());
         }
-        if graph::package_key(original) == binding {
+        if pin::package_key(original) == binding {
             return Some(original.into());
         }
         let (old_name, old_version) = canonical_binding(name, original);
@@ -1329,7 +1330,7 @@ fn cycle_record(key: &str, existing: &Value, candidate: &Value) -> Option<bool> 
         return None;
     }
     let parent = context(key)?;
-    let (parent_name, parent_version) = graph::package_key(key).rsplit_once('@')?;
+    let (parent_name, parent_version) = pin::package_key(key).rsplit_once('@')?;
     let mut selected = None;
     for group in ["dependencies", "optionalDependencies"] {
         for (name, old) in graph::section(existing, group).into_iter().flatten() {
@@ -1339,7 +1340,7 @@ fn cycle_record(key: &str, existing: &Value, candidate: &Value) -> Option<bool> 
             }
             let (child_name, old) = canonical_binding(name, old.as_str()?);
             let (_, new) = canonical_binding(name, new.as_str()?);
-            if parent.get(child_name).copied() != Some(graph::package_key(old)) {
+            if parent.get(child_name).copied() != Some(pin::package_key(old)) {
                 return None;
             }
             let before = context(old)?;
@@ -1405,8 +1406,8 @@ pub(crate) fn same_releases(a: &Value, b: &Value) -> bool {
                         else {
                             return false;
                         };
-                        graph::package_key(reference) == graph::package_key(other)
-                            && patch(reference) == patch(other)
+                        pin::package_key(reference) == pin::package_key(other)
+                            && hash_in_key(reference) == hash_in_key(other)
                     })
             })
 }
@@ -1421,7 +1422,7 @@ pub(crate) fn importer_providers(
         .into_iter()
         .flatten()
     {
-        for group in crate::manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(&importers[path], group)
                 .into_iter()
                 .flatten()
@@ -1443,13 +1444,13 @@ pub(crate) fn canonical_providers(
         if value.starts_with("link:") {
             continue;
         }
-        if let Some((name, _)) = graph::package_key(value).rsplit_once('@') {
+        if let Some((name, _)) = pin::package_key(value).rsplit_once('@') {
             if providers.contains_key(name) {
                 continue;
             }
             let version = &value[name.len() + 1..];
             let replace = result.get(name).is_none_or(|old| {
-                matches!((graph::package_key(old).parse::<node_semver::Version>(), graph::package_key(version).parse::<node_semver::Version>()),
+                matches!((pin::package_key(old).parse::<node_semver::Version>(), pin::package_key(version).parse::<node_semver::Version>()),
                     (Ok(old), Ok(new)) if new > old)
             });
             if replace {
@@ -1468,7 +1469,7 @@ pub(crate) fn bound_reference(
     if let Some(value) = bindings.get(name) {
         return Some(value.clone());
     }
-    let (target, _) = graph::package_key(actual).rsplit_once('@')?;
+    let (target, _) = pin::package_key(actual).rsplit_once('@')?;
     bindings
         .get(target)
         .map(|value| format!("{target}@{value}"))
@@ -1490,12 +1491,12 @@ fn affected_by(doc: &Value, key: &str, changed: &BTreeSet<&str>) -> bool {
                         .and_then(|v| v.get(group))
                         .and_then(|v| v.get(name))
                         .and_then(Value::as_str)
-                        .and_then(|r| graph::package_key(r).rsplit_once('@'))
+                        .and_then(|r| pin::package_key(r).rsplit_once('@'))
                         .is_some_and(|(actual, _)| changed.contains(actual))
                 })
     };
     doc.get("packages")
-        .and_then(|v| v.get(graph::package_key(key)))
+        .and_then(|v| v.get(pin::package_key(key)))
         .and_then(|v| v.get("peerDependencies"))
         .and_then(Value::as_object)
         .into_iter()
@@ -1516,7 +1517,7 @@ fn contextual_bindings(
     available: &BTreeMap<String, String>,
 ) -> Option<Bindings> {
     let snapshot = doc.get("snapshots")?.get(key)?;
-    let package = doc.get("packages")?.get(graph::package_key(key))?;
+    let package = doc.get("packages")?.get(pin::package_key(key))?;
     let mut names: BTreeSet<&str> = package
         .get("peerDependencies")
         .and_then(Value::as_object)
@@ -1543,11 +1544,11 @@ fn contextual_bindings(
         };
         peers.insert(name.into(), value.into());
     }
-    if let Some(patch) = patch(key) {
+    if let Some(patch) = hash_in_key(key) {
         peers.insert("patch_hash".into(), patch.into());
     }
-    let suffix = &key[graph::package_key(key).len()..];
-    let suffix = if patch(key).is_some() {
+    let suffix = &key[pin::package_key(key).len()..];
+    let suffix = if hash_in_key(key).is_some() {
         suffix.split_once(')')?.1
     } else {
         suffix
@@ -1578,18 +1579,11 @@ fn contextual_bindings(
     None
 }
 
-fn reference(name: &str, key: &str) -> String {
-    key.strip_prefix(name)
-        .and_then(|v| v.strip_prefix('@'))
-        .unwrap_or(key)
-        .to_owned()
-}
-
 pub(crate) fn canonical_binding<'a>(name: &'a str, reference: &'a str) -> (&'a str, &'a str) {
     if reference.starts_with("link:") {
         return (name, reference);
     }
-    if let Some((actual, _)) = graph::package_key(reference).rsplit_once('@') {
+    if let Some((actual, _)) = pin::package_key(reference).rsplit_once('@') {
         (actual, &reference[actual.len() + 1..])
     } else {
         (name, reference)

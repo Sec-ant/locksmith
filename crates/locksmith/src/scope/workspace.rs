@@ -2,11 +2,12 @@
 //! as witnesses. Only paths to releases matched by a changed rule are paired.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::error::missing;
 use crate::{
-    Lockfile, LockfileError, Value, WorkspaceConfig, config, graph, manifest, peer, reconcile,
+    Lockfile, LockfileError, Value, WorkspaceConfig, catalog, config, graph, manifest, patch, peer,
+    pin, reconcile, schema,
 };
 use graph::{dependency, transitive};
-use reconcile::missing;
 
 const EDGES: [&str; 2] = ["dependencies", "optionalDependencies"];
 mod bindings;
@@ -89,7 +90,7 @@ pub(super) fn apply(
         .filter_map(|(_, v)| v.strip_prefix('$'))
         .any(|name| {
             root.is_some_and(|root| {
-                manifest::GROUPS.iter().any(|g| {
+                schema::DEPENDENCY_GROUPS.iter().any(|g| {
                     root.before.and_then(|r| r.get(g)?.get(name))
                         != root.after.and_then(|r| r.get(g)?.get(name))
                 })
@@ -97,7 +98,7 @@ pub(super) fn apply(
         });
     let changes_overrides = before.overrides != after.overrides
         || root_reference_changed
-        || !manifest::same_override_order(base, donor);
+        || !schema::same_override_order(base, donor);
     let changes_extensions = !rules(before)
         .into_iter()
         .flatten()
@@ -151,7 +152,7 @@ pub(super) fn apply(
         let previous = manifest::Overrides::new(base, before);
         for doc in docs {
             for (key, body) in graph::section(doc, "snapshots").into_iter().flatten() {
-                let pkg = graph::package_key(key);
+                let pkg = pin::package_key(key);
                 if !pkg.contains('@') {
                     continue;
                 }
@@ -181,7 +182,7 @@ pub(super) fn apply(
     let policy = config::ResolutionCompatibility::new(&before.resolution, &after.resolution, base);
     let affected = if changes_extensions || !override_edits.is_empty() {
         super::affected_by(base, |key| {
-            let pkg = graph::package_key(key);
+            let pkg = pin::package_key(key);
             !policy.unchanged(key)
                 || override_edits.get(pkg).is_some_and(|names| {
                     donor["snapshots"].get(key).is_none()
@@ -248,7 +249,7 @@ pub(super) fn apply(
             after.linked_peer_encoding,
         );
         for (id, root) in graph::section(base, "importers").into_iter().flatten() {
-            for group in manifest::GROUPS {
+            for group in schema::DEPENDENCY_GROUPS {
                 for (name, dep) in graph::section(root, group).into_iter().flatten() {
                     let Some(pin) = dep["version"].as_str() else {
                         return Err(
@@ -294,7 +295,7 @@ pub(super) fn apply(
                                 .any(|m| m.importer == id && m.before != m.after))
                     {
                         let fits = current["specifier"].as_str().is_some_and(|s| {
-                            reconcile::accepts(name, s, pin, &output, Some(after))
+                            catalog::accepts_pin(name, s, pin, &output, Some(after))
                         });
                         if !fits {
                             continue;
@@ -303,7 +304,7 @@ pub(super) fn apply(
                     let next = walk.witness(name, &old, current.get("version"))?;
                     let selected = walk.visit(&old, &next)?;
                     output["importers"][id][group][name]["version"] =
-                        reconcile::reference(name, &selected.key).into();
+                        pin::reference(name, &selected.key).into();
                     if !selected.peers.is_empty() {
                         bindings.push(bindings::Root {
                             id: id.clone(),
@@ -368,8 +369,8 @@ impl Projector<'_> {
         if let Some(next) = pin
             .and_then(Value::as_str)
             .map(|v| graph::snapshot_key(name, v, snapshots))
-            && graph::package_key(old) == graph::package_key(&next)
-            && peer::patch(old) == peer::patch(&next)
+            && pin::package_key(old) == pin::package_key(&next)
+            && patch::hash_in_key(old) == patch::hash_in_key(&next)
             && snapshots.is_some_and(|m| m.contains_key(&next))
         {
             return Ok(next);
@@ -394,8 +395,8 @@ impl Projector<'_> {
             let peers = if old == next
                 && transitive(&self.docs[0]["snapshots"][old])
                     .eq(transitive(&self.docs[1]["snapshots"][next]))
-                && self.docs[0]["packages"][graph::package_key(old)].get("peerDependencies")
-                    == self.docs[1]["packages"][graph::package_key(next)].get("peerDependencies")
+                && self.docs[0]["packages"][pin::package_key(old)].get("peerDependencies")
+                    == self.docs[1]["packages"][pin::package_key(next)].get("peerDependencies")
             {
                 Edits::new()
             } else {
@@ -421,7 +422,7 @@ impl Projector<'_> {
             return Ok(assumed);
         }
         let [base, donor] = self.docs;
-        let pkg = graph::package_key(old);
+        let pkg = pin::package_key(old);
         if base["packages"][pkg].get("resolution") != donor["packages"][pkg].get("resolution")
             || !base["packages"][pkg]["resolution"]["integrity"].is_string()
         {
@@ -454,7 +455,7 @@ impl Projector<'_> {
             let witness = self.witness(name, &child, installed[group].get(name))?;
             let projected = self.visit(&child, &witness)?;
             let (dest, _) = dependency(&edit.body, name).expect("retained dependency");
-            edit.body[dest][name] = reconcile::reference(name, &projected.key).into();
+            edit.body[dest][name] = pin::reference(name, &projected.key).into();
             for (n, (before, after)) in projected.peers {
                 edit.peer_change(name, &n, &before, &after);
             }
@@ -488,7 +489,7 @@ impl Projector<'_> {
         edit: &mut SnapshotEdit,
     ) -> Result<(), LockfileError> {
         let [base, donor] = self.docs;
-        let pkg = graph::package_key(old);
+        let pkg = pin::package_key(old);
         let ext = !self.policy.unchanged(old);
         let overridden = self.override_edits.get(pkg).cloned().unwrap_or_default();
         let rules = if ext {
@@ -621,7 +622,7 @@ impl Projector<'_> {
                     .registry
                     .is_some_and(|r| !r.unavailable_manifests.contains(pkg))
                 && self.config.resolution.pnpmfile_checksum.is_none()
-                && peer::patch(old).is_none()
+                && patch::hash_in_key(old).is_none()
             {
                 let group = installed_edge.or(old_edge).unwrap().0;
                 reconcile::published::declaration(
@@ -658,9 +659,8 @@ impl Projector<'_> {
                 let wrong_pin = (old_edge.is_none() || unconditional)
                     && !peer_names.contains(name)
                     && installed_edge.is_some_and(|(_, pin)| {
-                        (spec.parse::<node_semver::Range>().is_ok()
-                            || manifest::alias(spec).is_some())
-                            && !reconcile::accepts(
+                        (spec.parse::<node_semver::Range>().is_ok() || pin::alias(spec).is_some())
+                            && !catalog::accepts_pin(
                                 name,
                                 spec,
                                 pin,
@@ -671,7 +671,7 @@ impl Projector<'_> {
                 if required_missing || wrong_pin {
                     if old_edge.is_none()
                         && self.config.resolution.pnpmfile_checksum.is_none()
-                        && peer::patch(old).is_none()
+                        && patch::hash_in_key(old).is_none()
                         && declaration.is_some_and(|d| d != spec)
                         && rules[1][0].contains_key(name)
                         && !rules[1][1].contains_key(name)
@@ -700,7 +700,7 @@ impl Projector<'_> {
             let new_edge = match (old_edge, installed_edge, constraint.as_deref()) {
                 (Some((_, old_pin)), Some((group, _)), Some(spec))
                     if !peer_names.contains(name)
-                        && reconcile::accepts(
+                        && catalog::accepts_pin(
                             name,
                             spec,
                             old_pin,
@@ -776,7 +776,7 @@ impl Projector<'_> {
             let body = donor["snapshots"]
                 .get(&key)
                 .ok_or_else(|| missing(&["snapshots", &key], "missing installed dependency"))?;
-            let release = graph::package_key(&key);
+            let release = pin::package_key(&key);
             let package = donor["packages"]
                 .get(release)
                 .ok_or_else(|| missing(&["packages", release], "missing installed package"))?;

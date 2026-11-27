@@ -122,3 +122,11 @@ impl From<serde_saphyr::Error> for LockfileError {
         Self::Parse(Box::new(error))
     }
 }
+
+pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileError {
+    LockfileError::ResolutionRequired {
+        request: None,
+        path: path.iter().map(|s| (*s).into()).collect(),
+        message: message.into(),
+    }
+}

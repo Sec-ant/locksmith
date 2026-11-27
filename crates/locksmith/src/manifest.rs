@@ -1,8 +1,9 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
-use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, graph};
+use crate::{
+    LockfileError, OverrideTieBreak, Value, WorkspaceConfig, error::missing, graph, pin, schema,
+};
 
-pub(crate) const GROUPS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
 
 pub(crate) struct PnpmManager<'a> {
@@ -87,88 +88,10 @@ fn legacy_pnpm(manifest: &Value) -> Option<(&str, node_semver::Version)> {
     (version.to_string() == specifier).then_some((specifier, version))
 }
 
-pub(crate) fn alias(specifier: &str) -> Option<(&str, &str)> {
-    let alias = specifier.strip_prefix("npm:")?;
-    Some(
-        alias
-            .rsplit_once('@')
-            .filter(|(name, _)| !name.is_empty())
-            .unwrap_or((alias, "*")),
-    )
-}
-
-/// Use the runner's alias rules when known. With no version, a plain pin
-/// indicates shorthand and a qualified pin can identify a legacy numeric alias.
-pub(crate) fn pinned_specifier<'a>(
-    specifier: &'a str,
-    pin: &str,
-    configuration: Option<&WorkspaceConfig>,
-) -> &'a str {
-    if let Some(config) = configuration.filter(|config| config.pnpm_version.is_some()) {
-        return config.registry_specifier(specifier);
-    }
-    if let Some(range) = specifier.strip_prefix("npm:")
-        && range.parse::<node_semver::Range>().is_ok()
-        && graph::package_key(pin)
-            .parse::<node_semver::Version>()
-            .is_ok()
-    {
-        range
-    } else {
-        specifier
-    }
-}
-
-impl WorkspaceConfig {
-    /// pnpm 11.1 added npm:<range> as shorthand for a range on the dependency's own name.
-    pub(crate) fn registry_specifier<'a>(&self, specifier: &'a str) -> &'a str {
-        if let Some(range) = specifier.strip_prefix("npm:")
-            && self
-                .pnpm_version
-                .as_ref()
-                .is_none_or(|v| v >= &node_semver::Version::from((11, 1, 0)))
-            && range.parse::<node_semver::Range>().is_ok()
-        {
-            range
-        } else {
-            specifier
-        }
-    }
-
-    pub(crate) fn registry_request<'a>(
-        &self,
-        name: &'a str,
-        specifier: &'a str,
-    ) -> (&'a str, &'a str) {
-        let specifier = self.registry_specifier(specifier);
-        alias(specifier).unwrap_or((name, specifier))
-    }
-}
-
-/// pnpm omits rule maps with no entries when writing the lockfile.
-pub(crate) fn rule_map<'a>(document: &'a Value, field: &str) -> Option<&'a Value> {
-    document
-        .get(field)
-        .filter(|value| !value.as_object().is_some_and(|rules| rules.is_empty()))
-}
-
 pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
     let config = WorkspaceConfig::default();
-    rule_map(left, "overrides") == rule_map(right, "overrides")
+    schema::rule_map(left, "overrides") == schema::rule_map(right, "overrides")
         && Overrides::new(left, &config).same_rules(&Overrides::new(right, &config))
-}
-
-pub(crate) fn same_override_order(left: &Value, right: &Value) -> bool {
-    same_ordered_mapping(left.get("overrides"), right.get("overrides"))
-}
-
-pub(crate) fn same_ordered_mapping(left: Option<&Value>, right: Option<&Value>) -> bool {
-    left == right
-        && left
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .eq(right.and_then(Value::as_object).into_iter().flatten())
 }
 
 /// pnpm precedence: optional > production > dev > auto-installed peers.
@@ -322,7 +245,7 @@ fn recorded_declarations<'a>(
     id: &str,
 ) -> Result<Declarations<'a>, LockfileError> {
     let mut expected = Declarations::new();
-    for group in GROUPS {
+    for group in schema::DEPENDENCY_GROUPS {
         let Some(entries) = manifest.get(group) else {
             continue;
         };
@@ -389,7 +312,7 @@ pub(crate) fn check_manifest(
         _ => declarations(manifest, overrides, importer)?,
     };
     let mut actual = BTreeMap::new();
-    for group in GROUPS {
+    for group in schema::DEPENDENCY_GROUPS {
         if let Some(deps) = record.get(group) {
             let deps = deps
                 .as_object()
@@ -435,9 +358,9 @@ pub(crate) fn check_manifest(
                     let prefix = format!("{target}@");
                     resolved_key =
                         graph::snapshot_key(name, version, graph::section(document, "snapshots"));
-                    let resolved = graph::package_key(version)
+                    let resolved = pin::package_key(version)
                         .strip_prefix(&prefix)
-                        .or_else(|| graph::package_key(&resolved_key).strip_prefix(&prefix))
+                        .or_else(|| pin::package_key(&resolved_key).strip_prefix(&prefix))
                         .ok_or_else(|| {
                             mismatch(
                                 importer,
@@ -447,7 +370,7 @@ pub(crate) fn check_manifest(
                         })?;
                     (range, resolved)
                 } else {
-                    (specifier, graph::package_key(version))
+                    (specifier, pin::package_key(version))
                 };
                 // pnpm accepts the registry's latest tag for *, including prereleases.
                 if range != "*"
@@ -523,19 +446,6 @@ pub(crate) fn link_directory<'a>(
     })
 }
 
-pub(crate) fn matches_version(range: &str, version: Option<&str>) -> bool {
-    let range = range.parse::<node_semver::Range>();
-    let version = version.and_then(|s| s.parse::<node_semver::Version>().ok());
-    matches!((range, version), (Ok(range), Some(version)) if version.satisfies(&range))
-}
-
-pub(crate) fn selector(value: &str) -> (&str, Option<&str>) {
-    value
-        .char_indices()
-        .skip(1)
-        .find(|(_, c)| *c == '@')
-        .map_or((value, None), |(i, _)| (&value[..i], Some(&value[i + 1..])))
-}
 fn intersects(selector: Option<&str>, specifier: &str) -> bool {
     let Some(selector) = selector else {
         return true;
@@ -554,13 +464,13 @@ pub(crate) fn override_selector(rule: &str) -> (Option<&str>, &str, Option<&str>
         .find(|(i, c)| *c == '>' && *i > 0 && !b" |@".contains(&rule.as_bytes()[i - 1]))
         .map(|(i, _)| i);
     let (parent, target) = delimiter.map_or((None, rule), |i| (Some(&rule[..i]), &rule[i + 1..]));
-    let (name, range) = selector(target);
+    let (name, range) = pin::selector(target);
     (parent, name, range)
 }
 
 pub(crate) fn override_scope(rule: &str) -> (&str, Option<&str>) {
     let (parent, name, _) = override_selector(rule);
-    (name, parent.map(|parent| selector(parent).0))
+    (name, parent.map(|parent| pin::selector(parent).0))
 }
 
 /// Registry overrides whose effective direct specifier is known without a
@@ -724,8 +634,8 @@ impl<'a> Overrides<'a> {
                     // of their relative position in the configuration.
                     let mut left: Vec<_> = left.iter().collect();
                     let mut right: Vec<_> = right.iter().collect();
-                    left.sort_by_key(|rule| rule.parent.map(|parent| selector(parent).0));
-                    right.sort_by_key(|rule| rule.parent.map(|parent| selector(parent).0));
+                    left.sort_by_key(|rule| rule.parent.map(|parent| pin::selector(parent).0));
+                    right.sort_by_key(|rule| rule.parent.map(|parent| pin::selector(parent).0));
                     left == right
                 })
             })
@@ -773,12 +683,12 @@ impl<'a> Overrides<'a> {
                 value,
             } = *rule;
             if let Some(parent) = parent {
-                let (parent_name, range) = selector(parent);
+                let (parent_name, range) = pin::selector(parent);
                 if manifest.get("name").and_then(Value::as_str) != Some(parent_name) {
                     continue;
                 }
                 if let Some(range) = range
-                    && !matches_version(range, manifest["version"].as_str())
+                    && !pin::matches_version(range, manifest["version"].as_str())
                 {
                     continue;
                 }
@@ -882,4 +792,51 @@ pub(crate) fn parent_matches(selector: &str, name: &str, version: &str) -> bool 
                 matches!((r.parse::<node_semver::Range>(), version.parse::<node_semver::Version>()),
             (Ok(range), Ok(version)) if version.satisfies(&range))
             })
+}
+
+/// Resolve catalog and root-manifest references while preserving selector order.
+pub(crate) fn effective_overrides(
+    config: &crate::WorkspaceConfig,
+    root: Option<&Value>,
+) -> Result<Option<Value>, LockfileError> {
+    let Some(overrides) = &config.overrides else {
+        return Ok(None);
+    };
+    let mut rules = serde_json::Map::new();
+    for (selector, replacement) in overrides {
+        let mut value = replacement.as_str();
+        if let Some(name) = value.strip_prefix('$') {
+            value = root
+                .and_then(|m| {
+                    ["optionalDependencies", "dependencies", "devDependencies"]
+                        .into_iter()
+                        .find_map(|g| m.get(g)?.get(name)?.as_str())
+                })
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced root dependency",
+                    )
+                })?;
+        }
+        if let Some(catalog) = value.strip_prefix("catalog:") {
+            let (_, name, _) = override_selector(selector);
+            value = config
+                .catalogs
+                .get(if catalog.is_empty() {
+                    "default"
+                } else {
+                    catalog
+                })
+                .and_then(|c| c.get(name))
+                .ok_or_else(|| {
+                    missing(
+                        &["overrides", selector],
+                        "missing referenced catalog declaration",
+                    )
+                })?;
+        }
+        rules.insert(selector.clone(), Value::from(value));
+    }
+    Ok((!rules.is_empty()).then_some(Value::Object(rules)))
 }

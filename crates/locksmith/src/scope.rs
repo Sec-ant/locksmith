@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde_json::{Map, json};
 
-use crate::{Lockfile, LockfileError, Value, assembly, graph, manifest};
+use crate::{Lockfile, LockfileError, Value, assembly, catalog, graph, manifest, pin, schema};
 
 mod installed;
 mod peers;
@@ -146,22 +146,22 @@ pub fn converge_with_recorded_baselines(
     }
     if let (Some(config), Some(project)) = (options.configuration, candidate.project()) {
         if !config.matches_config_dependencies(candidate.environment()) {
-            return Err(crate::reconcile::missing(
+            return Err(crate::error::missing(
                 &["importers", ".", "configDependencies"],
                 "installed bootstrap graph differs from the configuration dependencies",
             ));
         }
-        crate::reconcile::metadata::check_recorded_settings(project, config)?;
+        config.check_recorded_settings(project)?;
     }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
         && before.requires_bootstrap_reconciliation(after, baseline, candidate)
     {
-        let installed = candidate.project().ok_or_else(|| {
-            crate::reconcile::missing(&["importers"], "missing candidate project")
-        })?;
+        let installed = candidate
+            .project()
+            .ok_or_else(|| crate::error::missing(&["importers"], "missing candidate project"))?;
         let original = baseline
             .project()
-            .ok_or_else(|| crate::reconcile::missing(&["importers"], "missing baseline project"))?;
+            .ok_or_else(|| crate::error::missing(&["importers"], "missing baseline project"))?;
         let baseline_rules = manifest::Overrides::new(original, before);
         let rules = manifest::Overrides::new(installed, after);
         let mut manifests = BTreeMap::new();
@@ -180,7 +180,7 @@ pub fn converge_with_recorded_baselines(
             .into_iter()
             .find(|id| !manifests.contains_key(id))
         {
-            return Err(crate::reconcile::missing(
+            return Err(crate::error::missing(
                 &["manifests", &id],
                 "pnpm migration requires every final workspace manifest",
             ));
@@ -233,7 +233,7 @@ pub fn converge_with_recorded_baselines(
     let mut result = select(baseline, candidate, inputs, options)?;
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
-        crate::reconcile::metadata::check_recorded_settings(project, config)?;
+        config.check_recorded_settings(project)?;
         let mut plan = crate::extensions::plan(project, config, candidate.project(), None)?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(
@@ -289,7 +289,7 @@ fn select(
 ) -> Result<Lockfile, LockfileError> {
     let configured = if let Some(before) = options.baseline_configuration {
         let after = options.configuration.ok_or_else(|| {
-            crate::reconcile::missing(
+            crate::error::missing(
                 &["configuration"],
                 "the final workspace configuration is required",
             )
@@ -478,7 +478,7 @@ fn manifest_edits<'a>(
             && root_choices.and_then(|r| r.get(change.importer)).is_none();
         if same_project
             && !recorded
-            && manifest::GROUPS
+            && schema::DEPENDENCY_GROUPS
                 .iter()
                 .all(|key| get(change.before, key) == get(change.after, key))
         {
@@ -486,7 +486,10 @@ fn manifest_edits<'a>(
         }
         manifest::check(candidate_rules, change.importer, change.after, "candidate")?;
         let mut names = BTreeSet::new();
-        for field in manifest::GROUPS.into_iter().chain(["peerDependencies"]) {
+        for field in schema::DEPENDENCY_GROUPS
+            .into_iter()
+            .chain(["peerDependencies"])
+        {
             // The verified importer contains the candidate's effective specifiers.
             // Peer declarations are only available in the manifest itself.
             let from_importer = recorded && field != "peerDependencies";
@@ -528,7 +531,7 @@ fn manifest_edits<'a>(
                 && let (Some((old_group, previous)), Some((new_group, next))) = (old, new)
                 && let (Some(pin), Some(declaration)) =
                     (previous["version"].as_str(), next["specifier"].as_str())
-                && crate::reconcile::accepts(
+                && catalog::accepts_pin(
                     name,
                     declaration,
                     pin,
@@ -556,7 +559,7 @@ fn manifest_edits<'a>(
                     continue;
                 };
                 let key = graph::snapshot_key(name, pin, graph::section(doc, "snapshots"));
-                if let Some((actual, _)) = graph::package_key(&key).rsplit_once('@') {
+                if let Some((actual, _)) = pin::package_key(&key).rsplit_once('@') {
                     providers
                         .entry(actual.into())
                         .or_default()
@@ -634,7 +637,7 @@ fn local_changes(
     for graph in graphs {
         let document = graph.document;
         for (id, record) in graph::section(document, "importers").into_iter().flatten() {
-            for group in manifest::GROUPS {
+            for group in schema::DEPENDENCY_GROUPS {
                 for (name, dep) in record
                     .get(group)
                     .and_then(Value::as_object)
@@ -735,7 +738,7 @@ fn select_edges(
         } else {
             record.clone()
         };
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             let old_deps = old.and_then(|v| v.get(group)).and_then(Value::as_object);
             let new_deps = new.and_then(|v| v.get(group)).and_then(Value::as_object);
             let names: BTreeSet<_> = old_deps
@@ -792,7 +795,7 @@ fn select_edges(
                         get(change.after, "peerDependencies")
                             .and_then(|v| v.get(name))
                             .is_some()
-                            && manifest::GROUPS.iter().all(|field| {
+                            && schema::DEPENDENCY_GROUPS.iter().all(|field| {
                                 get(change.after, field).and_then(|v| v.get(name)).is_none()
                             })
                     })
@@ -999,7 +1002,7 @@ fn importer_dependency<'a>(
     name: &str,
 ) -> Option<(&'static str, &'a Value)> {
     let importer = &document["importers"][id];
-    manifest::GROUPS
+    schema::DEPENDENCY_GROUPS
         .into_iter()
         .find_map(|group| importer[group].get(name).map(|dep| (group, dep)))
 }
@@ -1007,7 +1010,7 @@ fn importer_dependency<'a>(
 fn local_package(document: &Value, key: &str) -> Option<String> {
     document
         .get("packages")?
-        .get(graph::package_key(key))?
+        .get(pin::package_key(key))?
         .get("resolution")?
         .get("directory")?
         .as_str()

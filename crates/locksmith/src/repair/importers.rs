@@ -1,8 +1,7 @@
 //! Keep every compatible importer pin and update only stale declarations.
 use super::Evidence;
 use crate::{
-    LockfileError, Value, graph, manifest,
-    reconcile::{self, missing},
+    LockfileError, Value, catalog, error::missing, graph, manifest, pin, reconcile, schema,
 };
 use serde_json::{Map, json};
 use std::{borrow::Cow, collections::BTreeSet};
@@ -51,7 +50,7 @@ pub(super) fn repair<'a>(
         }
         let desired = manifest::declarations(manifest, &overrides, id)?;
         let mut next = Cow::Borrowed(old);
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for key in graph::section(old, group)
                 .into_iter()
                 .flat_map(|m| m.keys())
@@ -93,9 +92,11 @@ pub(super) fn repair<'a>(
             } else {
                 &spec
             };
-            let prior = old[group]
-                .get(name)
-                .or_else(|| manifest::GROUPS.into_iter().find_map(|g| old[g].get(name)));
+            let prior = old[group].get(name).or_else(|| {
+                schema::DEPENDENCY_GROUPS
+                    .into_iter()
+                    .find_map(|g| old[g].get(name))
+            });
             let prior_link = prior
                 .and_then(|dep| dep["version"].as_str())
                 .is_some_and(|pin| pin.starts_with("link:"));
@@ -127,7 +128,7 @@ pub(super) fn repair<'a>(
                 let current = result["catalogs"][catalog].get(name);
                 let entry_fits = |entry: &Value| {
                     if workspace_link.is_some() {
-                        reconcile::metadata::catalog_link_entry_fits(range, entry)
+                        catalog::link_entry_fits(range, entry)
                     } else {
                         catalog_fits(range, entry)
                     }
@@ -137,12 +138,11 @@ pub(super) fn repair<'a>(
                     let entry = if let Some(entry) = proposed.filter(|e| catalog_fits(range, e)) {
                         entry.clone()
                     } else if let Some(pin) = retained {
-                        let base = graph::package_key(pin);
+                        let base = pin::package_key(pin);
                         let effective =
-                            manifest::pinned_specifier(range, pin, Some(context.configuration));
-                        let target = manifest::alias(effective).map_or(name, |(target, _)| target);
-                        let version =
-                            reconcile::version_from_pin(name, target, base).unwrap_or(base);
+                            pin::pinned_specifier(range, pin, Some(context.configuration));
+                        let target = pin::alias(effective).map_or(name, |(target, _)| target);
+                        let version = pin::version_from_pin(name, target, base).unwrap_or(base);
                         json!({"specifier":range,"version":version})
                     } else {
                         return Err(reconcile::published::need_version(
@@ -160,7 +160,7 @@ pub(super) fn repair<'a>(
             }
             let dangling = retained.filter(|pin| pin.contains('(')).is_some_and(|pin| {
                 let key = graph::snapshot_key(name, pin, graph::section(doc, "snapshots"));
-                doc["packages"].get(graph::package_key(&key)).is_some()
+                doc["packages"].get(pin::package_key(&key)).is_some()
                     && doc["snapshots"].get(&key).is_none()
                     && context.parents.iter().all(|(lock, _)| {
                         lock.project()
@@ -179,8 +179,7 @@ pub(super) fn repair<'a>(
                                 "no resolved dependency for the final declaration",
                             )
                         })?;
-                    if prior.is_some_and(|v| graph::package_key(v) != graph::package_key(candidate))
-                    {
+                    if prior.is_some_and(|v| pin::package_key(v) != pin::package_key(candidate)) {
                         return Err(missing(
                             &["importers", id, group, name],
                             "no peer instance for the retained release",
@@ -267,7 +266,7 @@ pub(super) fn repair<'a>(
 }
 
 fn catalog_fits(spec: &str, entry: &Value) -> bool {
-    reconcile::metadata::catalog_entry_version(spec, entry).is_some()
+    catalog::entry_version(spec, entry).is_some()
 }
 
 fn fits(
@@ -281,15 +280,15 @@ fn fits(
     if version.starts_with("link:") {
         return same_spec;
     }
-    let range = manifest::pinned_specifier(range, version, Some(config));
+    let range = pin::pinned_specifier(range, version, Some(config));
     if range == "*"
-        && reconcile::version_from_pin(name, name, graph::package_key(version))
+        && pin::version_from_pin(name, name, pin::package_key(version))
             .is_some_and(|release| release.parse::<node_semver::Version>().is_ok())
     {
         return true;
     }
     if range.starts_with("npm:") || range.parse::<node_semver::Range>().is_ok() {
-        return reconcile::accepts(name, range, version, doc, Some(config));
+        return catalog::accepts_pin(name, range, version, doc, Some(config));
     }
     same_spec
 }

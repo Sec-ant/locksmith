@@ -1,8 +1,8 @@
 //! Obtain individual missing records from compatible parents or a resolved graph.
 use super::RepairContext;
 use crate::{
-    Lockfile, LockfileError, MergeContext, MergeTarget, Value, WorkspaceConfig, graph, manifest,
-    reconcile::{self, missing},
+    Lockfile, LockfileError, MergeContext, MergeTarget, Value, WorkspaceConfig, error::missing,
+    graph, manifest, pin, reconcile,
 };
 use serde_json::json;
 
@@ -79,7 +79,7 @@ impl<'a> Evidence<'a> {
             let Some(record) = parent[section].get(key) else {
                 continue;
             };
-            let package = graph::package_key(key);
+            let package = pin::package_key(key);
             if section == "snapshots"
                 && let Some(resolution) = current["packages"][package].get("resolution")
                 && parent["packages"][package].get("resolution") != Some(resolution)
@@ -100,7 +100,7 @@ impl<'a> Evidence<'a> {
         if let Some(record) = agreed {
             return Ok(record.clone());
         }
-        let package = graph::package_key(key);
+        let package = pin::package_key(key);
         if let Some(publication) = self.context.registry.and_then(|r| r.releases.get(package)) {
             if self.published.is_none() {
                 let config = self.context.configuration;
@@ -154,7 +154,7 @@ impl<'a> Evidence<'a> {
 // supplies the whole binding environment. Hashes and transitive peer scopes
 // require a witnessed instance or the contextual resolver.
 fn peer_only_snapshot(key: &str, release: &Value, published: &Value) -> Option<Value> {
-    let pkg = graph::package_key(key);
+    let pkg = pin::package_key(key);
     if ["dependencies", "optionalDependencies"]
         .iter()
         .any(|field| graph::section(release, field).is_some_and(|m| !m.is_empty()))
@@ -184,7 +184,7 @@ fn peer_only_snapshot(key: &str, release: &Value, published: &Value) -> Option<V
         let Some(version) = bindings.remove(name.as_str()) else {
             if optional { continue } else { return None }
         };
-        if !manifest::matches_version(specifier.as_str()?, Some(graph::package_key(version))) {
+        if !pin::matches_version(specifier.as_str()?, Some(pin::package_key(version))) {
             return None;
         }
         let group = if optional {

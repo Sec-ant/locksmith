@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use node_semver::Version;
 use serde_json::json;
 
-use super::{GraphSources, accepts, published, reference};
-use crate::{LockfileError, Value, graph, manifest};
+use super::{GraphSources, published};
+use crate::{LockfileError, Value, graph, pin, schema};
+use crate::{catalog::accepts_pin, pin::reference};
 
 struct Edge<'a> {
     parent: &'a str,
@@ -64,7 +65,7 @@ pub(super) fn reconcile(
     }
     let mut protected = HashSet::new();
     for (_, record) in graph::section(output, "importers").into_iter().flatten() {
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(record, group).into_iter().flatten() {
                 if let Some(pin) = dep["version"].as_str() {
                     let key = graph::snapshot_key(name, pin, Some(snapshots));
@@ -84,7 +85,7 @@ pub(super) fn reconcile(
                 if !candidates.contains_key(key.as_str()) || protected.contains(&key) {
                     continue;
                 }
-                let pkg = &output["packages"][graph::package_key(parent)];
+                let pkg = &output["packages"][pin::package_key(parent)];
                 if pkg["peerDependencies"].get(name).is_some()
                     || body["transitivePeerDependencies"]
                         .as_array()
@@ -143,7 +144,7 @@ fn allows(
     edge: &Edge<'_>,
     pin: &str,
 ) -> Result<bool, LockfileError> {
-    let parent = graph::package_key(edge.parent);
+    let parent = pin::package_key(edge.parent);
     let pkg = &output["packages"][parent];
     let witnessed = sources.inputs[..PUBLISHED]
         .iter()
@@ -182,7 +183,7 @@ fn allows(
     else {
         return Ok(false);
     };
-    Ok(accepts(
+    Ok(accepts_pin(
         edge.name,
         &range,
         pin,

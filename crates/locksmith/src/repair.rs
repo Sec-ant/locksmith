@@ -11,8 +11,10 @@ use std::{
 };
 
 use crate::{
-    DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig, graph,
-    reconcile::{self, MergeContext, missing},
+    DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig,
+    error::missing,
+    graph, pin,
+    reconcile::{self, MergeContext},
     source::edit,
 };
 
@@ -52,23 +54,9 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
-        Self::bootstrap_lockfile(text)?.0.recorded_pnpm_version()
-    }
-
-    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
-        // Ordinary project-only lockfiles need no preliminary parse. Quoted
-        // keys can also spell a bootstrap field using escapes.
-        if !text.contains("\n---")
-            && !text.contains("configDependencies")
-            && !text.contains("packageManagerDependencies")
-            && !text.contains('\\')
-        {
-            return None;
-        }
-        let text = text.trim_start_matches('\u{feff}');
-        let ranges = crate::source::document_ranges(text);
-        let bootstrap = ranges.first()?;
-        crate::recovery::bootstrap_candidate(&text[bootstrap.clone()])
+        crate::recovery::bootstrap_lockfile(text)?
+            .0
+            .recorded_pnpm_version()
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].
@@ -217,7 +205,7 @@ fn fill_missing(
         if doc["snapshots"].get(&key).is_none() {
             doc.to_mut()["snapshots"][&key] = evidence.record("snapshots", &key)?;
         }
-        let pkg = graph::package_key(&key);
+        let pkg = pin::package_key(&key);
         if doc["packages"].get(pkg).is_none() {
             doc.to_mut()["packages"][pkg] = evidence.record("packages", pkg)?;
         }

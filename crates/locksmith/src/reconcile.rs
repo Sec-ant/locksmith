@@ -9,7 +9,9 @@ mod preference;
 pub(crate) mod published;
 mod repair;
 
-use crate::{DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, graph, manifest, peer};
+use crate::{
+    DocumentKind, Lockfile, LockfileError, Value, error::missing, graph, manifest, patch, peer, pin,
+};
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -92,14 +94,6 @@ pub struct MergeContext<'a> {
     pub configuration: &'a crate::WorkspaceConfig,
     /// Final patch contents keyed by their declared workspace-relative paths.
     pub patches: &'a BTreeMap<String, String>,
-}
-
-pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileError {
-    LockfileError::ResolutionRequired {
-        request: None,
-        path: path.iter().map(|s| (*s).into()).collect(),
-        message: message.into(),
-    }
 }
 
 /// Merge using final manifests/configuration and an explicit target preference.
@@ -476,185 +470,10 @@ fn opaque(specifier: &str) -> bool {
         && !specifier.starts_with("npm:")
         && (specifier.contains(':') || specifier.parse::<node_semver::Range>().is_err())
 }
-pub(crate) fn reference(name: &str, key: &str) -> String {
-    key.strip_prefix(name)
-        .and_then(|s| s.strip_prefix('@'))
-        .unwrap_or(key)
-        .into()
-}
-pub(crate) fn accepts(
-    name: &str,
-    specifier: &str,
-    reference: &str,
-    metadata: &Value,
-    configuration: Option<&WorkspaceConfig>,
-) -> bool {
-    if let Some(catalog) = specifier.strip_prefix("catalog:") {
-        let catalog = if catalog.is_empty() {
-            "default"
-        } else {
-            catalog
-        };
-        let Some(entry) = metadata
-            .get("catalogs")
-            .and_then(|v| v.get(catalog))
-            .and_then(|v| v.get(name))
-        else {
-            return false;
-        };
-        let Some(version) = entry.get("version").and_then(Value::as_str) else {
-            return false;
-        };
-        let spec = entry["specifier"]
-            .as_str()
-            .map(|s| manifest::pinned_specifier(s, reference, configuration));
-        return catalog_pin_matches(name, spec, version, reference);
-    }
-    range_accepts(
-        name,
-        manifest::pinned_specifier(specifier, reference, configuration),
-        reference,
-    )
-}
-
-fn catalog_pin_matches(name: &str, spec: Option<&str>, version: &str, reference: &str) -> bool {
-    let pin = graph::package_key(reference);
-    if let Some(request) = spec.and_then(|s| s.strip_prefix("workspace:"))
-        && let Some(path) = version.strip_prefix("file:")
-    {
-        return graph::file_pin(name, reference).is_some_and(|(package, pinned_path)| {
-            pinned_path == path
-                && (request.starts_with('.')
-                    || package == crate::workspace_links::workspace_request(name, request).0)
-        });
-    }
-    let target = spec
-        .and_then(manifest::alias)
-        .map_or(name, |(target, _)| target);
-    version_from_pin(name, target, pin) == Some(version)
-}
-
-fn range_accepts(name: &str, specifier: &str, reference: &str) -> bool {
-    let (target, range) = manifest::alias(specifier).unwrap_or((name, specifier));
-    manifest::matches_version(
-        range,
-        version_from_pin(name, target, graph::package_key(reference)),
-    )
-}
-
-pub(crate) fn version_from_pin<'a>(name: &str, target: &str, pin: &'a str) -> Option<&'a str> {
-    pin.strip_prefix(target)
-        .and_then(|suffix| suffix.strip_prefix('@'))
-        .or_else(|| (name == target).then_some(pin))
-}
-// The outer None denotes competing selectors without a unique applicable patch.
-pub(crate) fn desired_patch<'a>(
-    key: &str,
-    metadata: &'a Value,
-    docs: [&Value; 4],
-) -> Option<Option<&'a str>> {
-    desired_patch_with_index(key, metadata, docs, None)
-}
-
-pub(crate) type PatchIndex<'a> = HashMap<&'a str, Vec<(&'a str, &'a Value)>>;
-
-pub(crate) fn patch_index(document: &Value) -> PatchIndex<'_> {
-    let mut index = PatchIndex::new();
-    for (selector, patch) in graph::section(document, "patchedDependencies")
-        .into_iter()
-        .flatten()
-    {
-        let (name, range) = manifest::selector(selector);
-        if let Some(range) = range {
-            index.entry(name).or_default().push((range, patch));
-        }
-    }
-    index
-}
-
-pub(crate) fn desired_patch_with_index<'a>(
-    key: &str,
-    metadata: &'a Value,
-    docs: [&Value; 4],
-    index: Option<&PatchIndex<'a>>,
-) -> Option<Option<&'a str>> {
-    let package = graph::package_key(key);
-    let Some(patches) = metadata
-        .get("patchedDependencies")
-        .and_then(Value::as_object)
-    else {
-        return Some(None);
-    };
-    if patches.is_empty() {
-        return Some(None);
-    }
-    // Git, file and tarball locators identify the artifact. pnpm matches patch
-    // selectors against its recorded release version, just as for a registry pin.
-    let recorded;
-    let package = if let Some(separator) = package
-        .char_indices()
-        .skip(1)
-        .find_map(|(i, c)| (c == '@').then_some(i))
-        && let (name, locator) = (&package[..separator], &package[separator + 1..])
-        && locator.contains(':')
-        && let Some(version) = docs
-            .iter()
-            .find_map(|doc| doc.get("packages")?.get(package)?.get("version")?.as_str())
-    {
-        recorded = format!("{name}@{version}");
-        &recorded
-    } else {
-        package
-    };
-    let mut declared = patches.get(package);
-    if declared.is_none()
-        && let Some((name, version)) = package.rsplit_once('@')
-    {
-        let version = version.parse::<node_semver::Version>().ok();
-        let matches = |(range, patch): (&str, &'a Value)| {
-            let range = range.parse::<node_semver::Range>().ok()?;
-            version
-                .as_ref()
-                .is_some_and(|v| v.satisfies(&range))
-                .then_some((range, patch))
-        };
-        let matching: Vec<_> = match index {
-            Some(index) => index
-                .get(name)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter_map(matches)
-                .collect(),
-            None => patches
-                .iter()
-                .filter_map(|(selector, patch)| {
-                    let range = selector.strip_prefix(name)?.strip_prefix('@')?;
-                    matches((range, patch))
-                })
-                .collect(),
-        };
-        if matching.is_empty() {
-            declared = patches.get(name);
-        } else {
-            let mut narrowest = matching
-                .iter()
-                .filter(|(range, _)| matching.iter().all(|(other, _)| other.allows_all(range)))
-                .map(|(_, patch)| *patch);
-            declared = narrowest.next();
-            if declared.is_none() || narrowest.any(|p| Some(p) != declared) {
-                return None;
-            }
-        }
-    }
-    let declared = declared.and_then(|v| v.as_str().or_else(|| v.get("hash")?.as_str()));
-    Some(declared)
-}
-
 pub(crate) fn peer_names(doc: &Value, key: &str) -> BTreeSet<String> {
     let mut names: BTreeSet<_> = doc
         .get("packages")
-        .and_then(|v| v.get(graph::package_key(key)))
+        .and_then(|v| v.get(pin::package_key(key)))
         .and_then(|v| v.get("peerDependencies"))
         .and_then(Value::as_object)
         .into_iter()
@@ -699,11 +518,11 @@ struct GraphSources<'a> {
 
 impl<'a> GraphSources<'a> {
     fn authorized_patch(&self, key: &str, metadata: &Value) -> bool {
-        self.desired_patch(key, metadata) == Some(peer::patch(key))
+        self.desired_patch(key, metadata) == Some(patch::hash_in_key(key))
     }
 
     fn desired_patch<'m>(&self, key: &str, metadata: &'m Value) -> Option<Option<&'m str>> {
-        desired_patch(key, metadata, self.documents())
+        patch::desired_hash(key, metadata, self.documents())
     }
 
     fn documents(&self) -> [&'a Value; 4] {
@@ -722,7 +541,7 @@ impl<'a> GraphSources<'a> {
                     if !self.inputs[side].compatibility.accepts(key) {
                         continue;
                     }
-                    if let Some((name, _)) = graph::package_key(key).rsplit_once('@') {
+                    if let Some((name, _)) = pin::package_key(key).rsplit_once('@') {
                         candidates.entry(name).or_default().push((side, key));
                     }
                 }

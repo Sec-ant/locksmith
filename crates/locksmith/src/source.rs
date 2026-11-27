@@ -10,7 +10,7 @@ use serde::{
 use serde_json::Map;
 use serde_saphyr::Spanned;
 
-use crate::{DocumentKind, LockfileError, Value};
+use crate::{DocumentKind, LockfileError, Value, schema};
 
 pub(crate) const SECTIONS: [&str; 3] = ["importers", "packages", "snapshots"];
 
@@ -308,7 +308,7 @@ fn layout(text: Arc<String>, range: Range<usize>, parsed: &ParsedMap) -> Layout 
 }
 
 fn ordered_importer(record: &Value) -> bool {
-    crate::manifest::GROUPS.into_iter().all(|group| {
+    schema::DEPENDENCY_GROUPS.into_iter().all(|group| {
         record
             .get(group)
             .and_then(Value::as_object)
@@ -417,7 +417,7 @@ pub(crate) fn render(
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
                 || !source.reusable_field(kind, key, preserve_baseline && i == 0, order.is_some())
-                || (key == "overrides" && !crate::manifest::same_override_order(original, document))
+                || (key == "overrides" && !schema::same_override_order(original, document))
             {
                 return None;
             }

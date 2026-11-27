@@ -3,7 +3,8 @@ use std::{cell::OnceCell, fmt::Display};
 
 use node_semver::Version;
 
-use super::{MergeTarget, Source, missing};
+use super::{MergeTarget, Source};
+use crate::error::missing;
 use crate::{
     ContextualMerge, Lockfile, LockfileError, MergeInput, Value, WorkspaceConfig,
     manifest::ManagerPolicy,

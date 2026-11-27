@@ -2,7 +2,7 @@
 
 mod range;
 
-use crate::{Lockfile, LockfileError, Value, graph, manifest};
+use crate::{Lockfile, LockfileError, Value, graph, manifest, pin};
 use node_semver::Version;
 pub(crate) use range::PeerRange;
 use serde::Serialize;
@@ -164,7 +164,7 @@ pub(crate) struct Record {
 }
 
 pub(crate) fn package_identity<'a>(key: &'a str, record: &'a Value) -> (&'a str, Option<&'a str>) {
-    let (name, locator) = manifest::selector(key);
+    let (name, locator) = pin::selector(key);
     (
         record["name"].as_str().unwrap_or(name),
         record["version"].as_str().or(locator),
@@ -185,7 +185,7 @@ pub(crate) fn scan(
     let mut ranges = BTreeMap::new();
     let mut records = Vec::new();
     for (key, body) in snapshots.into_iter().flatten() {
-        let Some(package) = packages.and_then(|p| p.get(graph::package_key(key))) else {
+        let Some(package) = packages.and_then(|p| p.get(pin::package_key(key))) else {
             continue;
         };
         for (name, declaration) in graph::section(package, "peerDependencies")
@@ -209,7 +209,7 @@ pub(crate) fn scan(
                 Some(pin) => {
                     let target = graph::snapshot_key(name, pin, snapshots);
                     packages
-                        .and_then(|p| p.get_key_value(graph::package_key(&target)))
+                        .and_then(|p| p.get_key_value(pin::package_key(&target)))
                         .map(|(id, record)| package_identity(id, record))
                         .unwrap_or((name, None))
                 }
@@ -235,7 +235,7 @@ pub(crate) fn scan(
             };
             let exception = allowed_peer(
                 rules,
-                package_identity(graph::package_key(key), package),
+                package_identity(pin::package_key(key), package),
                 name,
                 binding,
                 parsed.as_ref(),
@@ -298,7 +298,7 @@ fn allowed_peer(
         match selector {
             None => global = Some((rule, range)),
             Some(s) => {
-                let (name, wanted) = manifest::selector(s);
+                let (name, wanted) = pin::selector(s);
                 if name == parent
                     && wanted.is_none_or(|r| {
                         parent_version

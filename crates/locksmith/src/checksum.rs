@@ -1,4 +1,4 @@
-//! pnpm's configuration checksum encodings, verified against supplied records.
+//! Checksums for pnpm configuration, patches, and peer identities.
 use crate::Value;
 use base64::Engine;
 use sha2::Digest;
@@ -63,8 +63,7 @@ pub(crate) fn hooks_match(input: Option<&Value>, recorded: Option<&Value>) -> bo
                 .next()
                 .and_then(Value::as_str)
                 .is_some_and(|content| {
-                    crate::peer::patch_hash(content, crate::PatchEncoding::Md5Base32WithPath)
-                        == hash
+                    patch_hash(content, crate::PatchEncoding::Md5Base32WithPath) == hash
                 });
     }
     let mut hashes = Vec::with_capacity(files.len());
@@ -210,5 +209,75 @@ fn json(value: &Value, out: &mut String) {
             out.push('}');
         }
         _ => out.push_str(&value.to_string()),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum HashStyle {
+    Sha256,
+    Md5Base32,
+}
+impl HashStyle {
+    pub(crate) fn recognize(hash: &str) -> Option<Self> {
+        if hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Some(Self::Sha256)
+        } else if hash.len() == 26
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+        {
+            Some(Self::Md5Base32)
+        } else {
+            None
+        }
+    }
+}
+pub(crate) fn digest(text: &str, style: HashStyle) -> String {
+    match style {
+        HashStyle::Sha256 => {
+            let mut out = String::with_capacity(32);
+            let hex = b"0123456789abcdef";
+            for &b in &sha2::Sha256::digest(text.as_bytes())[..16] {
+                out.push(hex[(b >> 4) as usize] as char);
+                out.push(hex[(b & 15) as usize] as char);
+            }
+            out
+        }
+        HashStyle::Md5Base32 => {
+            let bytes = md5::Md5::digest(text.as_bytes());
+            let mut acc = 0u32;
+            let mut bits = 0;
+            let mut out = String::new();
+            for b in bytes {
+                acc = (acc << 8) | u32::from(b);
+                bits += 8;
+                while bits >= 5 {
+                    bits -= 5;
+                    out.push(
+                        b"abcdefghijklmnopqrstuvwxyz234567"[((acc >> bits) & 31) as usize] as char,
+                    );
+                }
+            }
+            if bits > 0 {
+                out.push(
+                    b"abcdefghijklmnopqrstuvwxyz234567"[((acc << (5 - bits)) & 31) as usize]
+                        as char,
+                );
+            }
+            out
+        }
+    }
+}
+
+pub(crate) fn patch_hash(text: &str, encoding: crate::PatchEncoding) -> String {
+    let normalized = text.replace("\r\n", "\n");
+    match encoding {
+        crate::PatchEncoding::Md5Base32WithPath => digest(&normalized, HashStyle::Md5Base32),
+        crate::PatchEncoding::Sha256 | crate::PatchEncoding::Sha256WithPath => {
+            sha2::Sha256::digest(normalized.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
     }
 }

@@ -1,5 +1,5 @@
 //! Explicit workspace inputs and the pnpm configuration decoder.
-use crate::{LockfileError, Value};
+use crate::{LockfileError, Value, error::missing, pin};
 use std::collections::BTreeMap;
 
 const INCLUDE_RESOLUTION_SETTINGS: &str = "lockfile.includeResolutionSettings";
@@ -406,6 +406,44 @@ impl WorkspaceConfig {
         let mut settings = self.supported_lock_settings(self.resolution.lock.clone());
         settings.project_scoped_optional_peers &= self.resolution.dedupe_peer_dependents;
         settings
+    }
+
+    pub(crate) fn check_recorded_settings(&self, doc: &Value) -> Result<(), LockfileError> {
+        let settings = &doc["settings"];
+        let major = self.pnpm_version.as_ref().map(|v| v.major());
+        let parameters = &self.resolution.parameters;
+        let default_suffix = Value::from(1000);
+        let disabled = Value::Bool(false);
+        for (key, expected, default, supported) in [
+            (
+                "peersSuffixMaxLength",
+                parameters
+                    .get("peersSuffixMaxLength")
+                    .unwrap_or(&default_suffix),
+                &default_suffix,
+                true,
+            ),
+            (
+                "injectWorkspacePackages",
+                &Value::Bool(self.resolution.inject_workspace_packages),
+                &disabled,
+                major.is_none_or(|m| m >= 10),
+            ),
+            (
+                "addMissingPeerTypes",
+                parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
+                &disabled,
+                major.is_none_or(|m| m >= 12),
+            ),
+        ] {
+            if supported && settings.get(key).unwrap_or(default) != expected {
+                return Err(missing(
+                    &["settings", key],
+                    "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn frozen_settings_mismatch(&self, document: &Value) -> Option<&'static str> {
@@ -852,12 +890,12 @@ impl<'a> ResolutionCompatibility<'a> {
     }
 
     pub(crate) fn accepts(&self, key: &str) -> bool {
-        self.unchanged(key) || self.additions.contains_key(crate::graph::package_key(key))
+        self.unchanged(key) || self.additions.contains_key(pin::package_key(key))
     }
 
     pub(crate) fn additions(&self, key: &str) -> &[ExtensionAddition<'a>] {
         self.additions
-            .get(crate::graph::package_key(key))
+            .get(pin::package_key(key))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -865,7 +903,7 @@ impl<'a> ResolutionCompatibility<'a> {
         if !self.global {
             return None;
         }
-        let (name, version) = crate::graph::package_key(key).rsplit_once('@')?;
+        let (name, version) = pin::package_key(key).rsplit_once('@')?;
         let rules = self.extensions.get(name)?;
         Some([
             extension_fields(&rules[0], name, version)?,
@@ -908,7 +946,7 @@ impl<'a> ResolutionCompatibility<'a> {
         if self.extensions.is_empty() || key.starts_with("link:") {
             return true;
         }
-        let Some((name, version)) = crate::graph::package_key(key).rsplit_once('@') else {
+        let Some((name, version)) = pin::package_key(key).rsplit_once('@') else {
             return false;
         };
         let Some(rules) = self.extensions.get(name) else {

@@ -134,9 +134,21 @@ pub(crate) fn resolve(
     Lockfile::parse(&output)
 }
 
-/// Read the bootstrap importer and package resolutions even when snapshot keys repeat.
-pub(crate) fn bootstrap_candidate(text: &str) -> Option<(Lockfile, Vec<String>)> {
-    let (lock, alternatives) = candidate(text).ok()?;
+/// Read the bootstrap document even when snapshot keys repeat or the project document is invalid.
+pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
+    // Ordinary project-only lockfiles need no preliminary parse. Quoted
+    // keys can also spell a bootstrap field using escapes.
+    if !text.contains("\n---")
+        && !text.contains("configDependencies")
+        && !text.contains("packageManagerDependencies")
+        && !text.contains('\\')
+    {
+        return None;
+    }
+    let text = text.trim_start_matches('\u{feff}');
+    let ranges = crate::source::document_ranges(text);
+    let bootstrap = ranges.first()?;
+    let (lock, alternatives) = candidate(&text[bootstrap.clone()]).ok()?;
     lock.environment().is_some().then_some((lock, alternatives))
 }
 

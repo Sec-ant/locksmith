@@ -2,7 +2,7 @@
 mod impact;
 
 use crate::{
-    Disposition, Lockfile, LockfileError, PeerRules, PeerStatus, Value, diagnostics, graph,
+    Disposition, Lockfile, LockfileError, PeerRules, PeerStatus, Value, diagnostics, graph, pin,
 };
 use node_semver::Version;
 use serde::Serialize;
@@ -149,7 +149,7 @@ pub fn inspect(
         .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
     let mut counts = BTreeMap::new();
     for (id, _) in graph::section(doc, "snapshots").into_iter().flatten() {
-        *counts.entry(graph::package_key(id)).or_insert(0usize) += 1;
+        *counts.entry(pin::package_key(id)).or_insert(0usize) += 1;
     }
     let mut versions = BTreeMap::<&str, BTreeSet<Version>>::new();
     let mut releases = BTreeMap::<&str, Vec<LockedRelease>>::new();
@@ -182,7 +182,7 @@ pub fn inspect(
         let issue = record.issue;
         let requirement = PeerRequirement {
             status: record.status,
-            requester: graph::package_key(&issue.snapshot).to_owned(),
+            requester: pin::package_key(&issue.snapshot).to_owned(),
             peer: issue.peer,
             wanted: issue.wanted,
             provider: record.provider,

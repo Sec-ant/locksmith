@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use super::{ChangeSet, ManifestChange};
 use crate::{
-    DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, assembly, config, graph,
-    manifest, peer, reconcile,
+    DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, assembly, catalog, config,
+    graph, manifest, patch, peer, pin, reconcile, schema,
 };
 
 pub(super) fn converge(
@@ -64,7 +64,7 @@ fn restorations<'a>(
     let mut blocked = None;
     let locks = [base, donor];
     for (section, groups) in [
-        ("importers", manifest::GROUPS.as_slice()),
+        ("importers", schema::DEPENDENCY_GROUPS.as_slice()),
         (
             "snapshots",
             ["dependencies", "optionalDependencies"].as_slice(),
@@ -75,7 +75,7 @@ fn restorations<'a>(
                 continue;
             };
             let root = section == "importers";
-            let release = graph::package_key(key);
+            let release = pin::package_key(key);
             if !root
                 && (!base["packages"][release]["resolution"]["integrity"].is_string()
                     || !assembly::same_package(
@@ -99,25 +99,25 @@ fn restorations<'a>(
                         || overrides.contains(name.as_str())
                         || root
                             && !entry["specifier"].as_str().is_some_and(|s| {
-                                reconcile::accepts(name, s, prior, donor, Some(after))
+                                catalog::accepts_pin(name, s, prior, donor, Some(after))
                             })
                     {
                         continue;
                     }
                     let targets = [prior, pin].map(|v| format!("{name}@{v}"));
                     if !locks.into_iter().zip(&targets).all(|(doc, k)| {
-                        let release = graph::package_key(k);
+                        let release = pin::package_key(k);
                         release.rsplit_once('@').is_some_and(|(n, v)| {
                             n == name && v.parse::<node_semver::Version>().is_ok()
                         }) && doc["packages"][release]["resolution"]["integrity"].is_string()
                             && doc["snapshots"].get(k).is_some()
-                            && peer::patch(k).is_none()
+                            && patch::hash_in_key(k).is_none()
                     }) || !policy.unchanged(&targets[0])
                     {
                         continue;
                     }
                     let old_key = &targets[0];
-                    let pkg = graph::package_key(old_key);
+                    let pkg = pin::package_key(old_key);
                     if donor["packages"]
                         .get(pkg)
                         .is_some_and(|p| !assembly::same_package(p, &base["packages"][pkg]))
@@ -129,7 +129,7 @@ fn restorations<'a>(
                         .zip(&targets)
                         .all(|(d, k)| assembly::ordinary(d, k));
                     if !ordinary {
-                        if !root || pkg != graph::package_key(&targets[1]) {
+                        if !root || pkg != pin::package_key(&targets[1]) {
                             continue;
                         }
                         // The prior consumer witnessed the complete old instance.
@@ -203,7 +203,7 @@ impl Restorations<'_> {
                     self.missing.insert(target);
                 }
             }
-            let release = graph::package_key(&key);
+            let release = pin::package_key(&key);
             if output["packages"].get(release).is_none() {
                 output["packages"][release] = base["packages"][release].clone();
             }
@@ -244,7 +244,7 @@ fn check_manifests(
                 a == b
                     || [a, b].into_iter().all(|r| {
                         r.as_object().unwrap().keys().all(|k| {
-                            if manifest::GROUPS.contains(&k.as_str()) {
+                            if schema::DEPENDENCY_GROUPS.contains(&k.as_str()) {
                                 graph::section(r, k).into_iter().flatten().all(|(n, _)| {
                                     a[k][n].get("specifier") == b[k][n].get("specifier")
                                 })
@@ -315,12 +315,12 @@ fn incompatible_subgraphs(
         })
         .collect();
     super::affected_by(base, |key| {
-        let release = graph::package_key(key);
+        let release = pin::package_key(key);
         let body = &base["snapshots"][key];
         let package = &base["packages"][release];
         !package["resolution"]["integrity"].is_string()
             || !policy.unchanged(release)
-            || peer::patch(key).is_some()
+            || patch::hash_in_key(key).is_some()
             || donor["packages"]
                 .get(release)
                 .is_some_and(|p| !assembly::same_package(p, package))

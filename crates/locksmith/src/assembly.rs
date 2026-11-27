@@ -1,7 +1,10 @@
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, graph};
+use crate::{
+    Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, catalog, graph, patch,
+    pin,
+};
 
 /// Assemble a graph from independently selected importer edges. The large
 /// input graphs stay borrowed until their selected records are copied once.
@@ -33,7 +36,7 @@ pub(crate) fn from_edges(
             copy_optional(record, previous);
         }
         let chosen = edits.get(key).unwrap_or(installed);
-        let release = graph::package_key(key);
+        let release = pin::package_key(key);
         // Both paths selected the same immutable parent instance. Its earlier
         // child peer bindings remain usable when all releases are the same and
         // the manifest edits cannot reach a provider in either subgraph.
@@ -204,7 +207,7 @@ fn retain_children(
         && (base.get("packageExtensionsChecksum").is_none()
             || config.resolution.package_extensions.is_some());
     for key in selected {
-        let parent = graph::package_key(key);
+        let parent = pin::package_key(key);
         let current = &candidate["snapshots"][key];
         let old = &base["snapshots"][key];
         if old == current || (!old.is_object() && !lookup) || affected[1].contains(key) {
@@ -216,7 +219,7 @@ fn retain_children(
         let pkg = &candidate["packages"][parent];
         let witnessed = !old.is_null() && same_package(pkg, &base["packages"][parent]);
         if !pkg["resolution"]["integrity"].is_string()
-            || (!witnessed && crate::peer::patch(key).is_some())
+            || (!witnessed && patch::hash_in_key(key).is_some())
         {
             continue;
         }
@@ -230,7 +233,7 @@ fn retain_children(
                     continue;
                 }
                 let child = graph::snapshot_key(name, pin, graph::section(candidate, "snapshots"));
-                let Some((actual, v)) = graph::package_key(&child).rsplit_once('@') else {
+                let Some((actual, v)) = pin::package_key(&child).rsplit_once('@') else {
                     continue;
                 };
                 if v.parse::<node_semver::Version>().is_err() || affected[1].contains(&child) {
@@ -297,10 +300,10 @@ fn retain_children(
                     };
                     let valid = |k: &str| {
                         reusable(k)
-                            && crate::reconcile::accepts(
+                            && catalog::accepts_pin(
                                 name,
                                 &range,
-                                super::reconcile::reference(name, k).as_str(),
+                                pin::reference(name, k).as_str(),
                                 base,
                                 options.configuration,
                             )
@@ -321,7 +324,7 @@ fn retain_children(
                 };
                 if let Some(pick) = pick.filter(|k| k != &child) {
                     edits.entry(key.clone()).or_insert_with(|| current.clone())[group][name] =
-                        Value::from(crate::reconcile::reference(name, &pick));
+                        Value::from(pin::reference(name, &pick));
                     restored.insert(pick);
                 }
             }
@@ -331,8 +334,8 @@ fn retain_children(
 }
 
 fn same_child_context(base: &Value, old: &str, installed: &Value, new: &str, name: &str) -> bool {
-    let previous = graph::package_key(old);
-    let current = graph::package_key(new);
+    let previous = pin::package_key(old);
+    let current = pin::package_key(new);
     let Some((old_name, version)) = previous.rsplit_once('@') else {
         return false;
     };

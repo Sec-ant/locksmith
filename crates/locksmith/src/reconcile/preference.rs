@@ -1,6 +1,6 @@
 //! Restrict a second choice of locked pins to the providers involved in a conflict.
 use super::{MergeContext, peer_names};
-use crate::{LockfileError, Value, graph, manifest};
+use crate::{LockfileError, Value, graph, pin, schema};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Default)]
@@ -11,7 +11,7 @@ pub(super) struct Preferences {
 
 pub(super) fn dependency<'a>(doc: &'a Value, id: &str, name: &str) -> Option<&'a str> {
     let importer = doc.get("importers")?.get(id)?;
-    manifest::GROUPS
+    schema::DEPENDENCY_GROUPS
         .iter()
         .find_map(|g| importer.get(*g)?.get(name)?.get("version")?.as_str())
 }
@@ -23,9 +23,8 @@ pub(super) fn ordinary_edges_match(
     candidate: &str,
     preserve_versions: bool,
 ) -> bool {
-    let package = &doc["packages"][graph::package_key(key)];
-    if package.get("resolution")
-        != other["packages"][graph::package_key(candidate)].get("resolution")
+    let package = &doc["packages"][pin::package_key(key)];
+    if package.get("resolution") != other["packages"][pin::package_key(candidate)].get("resolution")
     {
         return false;
     }
@@ -44,8 +43,8 @@ pub(super) fn ordinary_edges_match(
                         .and_then(Value::as_str)
                         .is_none_or(|next| {
                             preserve_versions
-                                && Some(graph::package_key(next))
-                                    != reference.as_str().map(graph::package_key)
+                                && Some(pin::package_key(next))
+                                    != reference.as_str().map(pin::package_key)
                         })
                 {
                     return false;
@@ -64,7 +63,7 @@ impl Preferences {
     }
 
     pub(super) fn snapshot(&self, key: &str) -> bool {
-        self.snapshots.contains(graph::package_key(key))
+        self.snapshots.contains(pin::package_key(key))
     }
 
     // Trace the failed release back to the importer edges that selected it.
@@ -85,8 +84,8 @@ impl Preferences {
             let mut incoming: HashMap<&str, Vec<&str>> = HashMap::new();
             let mut queue = Vec::new();
             for (parent, body) in records {
-                let parent = graph::package_key(parent);
-                if parent == graph::package_key(key) {
+                let parent = pin::package_key(parent);
+                if parent == pin::package_key(key) {
                     queue.push(parent);
                 }
                 for group in ["dependencies", "optionalDependencies"] {
@@ -95,7 +94,7 @@ impl Preferences {
                             let child = graph::snapshot_key(name, version, Some(records));
                             if let Some((child, _)) = records.get_key_value(&child) {
                                 incoming
-                                    .entry(graph::package_key(child))
+                                    .entry(pin::package_key(child))
                                     .or_default()
                                     .push(parent);
                             }
@@ -111,10 +110,10 @@ impl Preferences {
                 }
             }
             for (id, importer) in graph::section(doc, "importers").into_iter().flatten() {
-                for group in manifest::GROUPS {
+                for group in schema::DEPENDENCY_GROUPS {
                     for (name, dep) in graph::section(importer, group).into_iter().flatten() {
                         if let Some(version) = dep["version"].as_str()
-                            && seen.contains(graph::package_key(&graph::snapshot_key(
+                            && seen.contains(pin::package_key(&graph::snapshot_key(
                                 name,
                                 version,
                                 Some(records),
@@ -150,7 +149,8 @@ impl Preferences {
                 (roots, changed)
             }
             [section, id, group, name]
-                if section == "importers" && manifest::GROUPS.contains(&group.as_str()) =>
+                if section == "importers"
+                    && schema::DEPENDENCY_GROUPS.contains(&group.as_str()) =>
             {
                 (vec![(id.clone(), name.clone())], false)
             }
@@ -158,7 +158,7 @@ impl Preferences {
                 (vec![(id.clone(), name.clone())], false)
             }
             [section, key, ..] if matches!(section.as_str(), "packages" | "snapshots") => {
-                let locator = graph::package_key(key);
+                let locator = pin::package_key(key);
                 if let (Some(a), Some(b)) = (
                     docs[target]["packages"][locator].get("resolution"),
                     docs[other]["packages"][locator].get("resolution"),
@@ -193,15 +193,11 @@ impl Preferences {
             let old = keys[target].as_deref();
             let available = if let Some(new) = keys[other].as_deref() {
                 old.is_none_or(|old| {
-                    graph::package_key(old) != graph::package_key(new)
+                    pin::package_key(old) != pin::package_key(new)
                         || ordinary_edges_match(docs[target], old, docs[other], new, false)
                 })
             } else {
-                old.is_some_and(|key| {
-                    docs[other]["packages"]
-                        .get(graph::package_key(key))
-                        .is_some()
-                })
+                old.is_some_and(|key| docs[other]["packages"].get(pin::package_key(key)).is_some())
             };
             if available {
                 changed |= self
