@@ -39,6 +39,18 @@ pub struct ValidationIssue {
     pub message: String,
 }
 
+pub(crate) fn issue(
+    kind: DocumentKind,
+    path: &[&str],
+    message: impl Into<String>,
+) -> ValidationIssue {
+    ValidationIssue {
+        document: kind,
+        path: path.iter().map(|s| (*s).into()).collect(),
+        message: message.into(),
+    }
+}
+
 /// Input, resolution and output failures reported by lockfile operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LockfileError {

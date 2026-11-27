@@ -42,6 +42,7 @@ mod reconcile;
 mod recovery;
 mod registry;
 mod repair;
+mod schema;
 mod scope;
 mod source;
 mod verify;
