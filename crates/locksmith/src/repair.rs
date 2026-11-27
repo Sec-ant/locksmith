@@ -11,9 +11,10 @@ use std::{
 };
 
 use crate::{
-    DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig, graph,
-    manifest,
-    reconcile::{self, MergeContext, missing},
+    DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig,
+    error::missing,
+    graph, pin,
+    reconcile::{self, MergeContext},
     source::edit,
 };
 
@@ -53,23 +54,9 @@ impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
-        Self::bootstrap_lockfile(text)?.0.recorded_pnpm_version()
-    }
-
-    pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
-        // Ordinary project-only lockfiles need no preliminary parse. Quoted
-        // keys can also spell a bootstrap field using escapes.
-        if !text.contains("\n---")
-            && !text.contains("configDependencies")
-            && !text.contains("packageManagerDependencies")
-            && !text.contains('\\')
-        {
-            return None;
-        }
-        let text = text.trim_start_matches('\u{feff}');
-        let ranges = crate::source::document_ranges(text);
-        let bootstrap = ranges.first()?;
-        crate::recovery::bootstrap_candidate(&text[bootstrap.clone()])
+        crate::recovery::bootstrap_lockfile(text)?
+            .0
+            .recorded_pnpm_version()
     }
 
     /// Accept the same YAML and identical duplicate records as [`repair`].
@@ -163,9 +150,10 @@ impl RepairInput {
         let metadata = reconcile::metadata::resolve(
             [d?, a?, b?],
             [0, 1, 2],
+            0,
             &evidence.merge_context(sources.map(|(_, cfg)| cfg)),
         )?;
-        check_configuration(doc, &metadata, context.configuration)?;
+        reconcile::metadata::check_repair_configuration(doc, &metadata, context.configuration)?;
         let mut result = importers::repair(doc, &metadata, &mut evidence)?;
         let roots = context.manifests.keys().cloned().collect();
         loop {
@@ -201,87 +189,6 @@ impl RepairInput {
     }
 }
 
-pub(crate) fn check_recorded_settings(
-    doc: &Value,
-    cfg: &WorkspaceConfig,
-) -> Result<(), LockfileError> {
-    let settings = &doc["settings"];
-    let major = cfg.pnpm_version.as_ref().map(|v| v.major());
-    let parameters = &cfg.resolution.parameters;
-    let default_suffix = Value::from(1000);
-    let disabled = Value::Bool(false);
-    for (key, expected, default, supported) in [
-        (
-            "peersSuffixMaxLength",
-            parameters
-                .get("peersSuffixMaxLength")
-                .unwrap_or(&default_suffix),
-            &default_suffix,
-            true,
-        ),
-        (
-            "injectWorkspacePackages",
-            &Value::Bool(cfg.resolution.inject_workspace_packages),
-            &disabled,
-            major.is_none_or(|m| m >= 10),
-        ),
-        (
-            "addMissingPeerTypes",
-            parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
-            &disabled,
-            major.is_none_or(|m| m >= 12),
-        ),
-    ] {
-        if supported && settings.get(key).unwrap_or(default) != expected {
-            return Err(missing(
-                &["settings", key],
-                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn check_configuration(
-    doc: &Value,
-    metadata: &Value,
-    cfg: &WorkspaceConfig,
-) -> Result<(), LockfileError> {
-    let mismatch = |field| {
-        missing(
-            &[field],
-            "workspace configuration differs from the lock; its effects extend beyond a broken record",
-        )
-    };
-    if cfg.read_lock_settings(doc)? != cfg.read_lock_settings(metadata)? {
-        return Err(mismatch("settings"));
-    }
-    check_recorded_settings(doc, cfg)?;
-    if !manifest::same_overrides(doc, metadata) {
-        return Err(mismatch("overrides"));
-    }
-    if !reconcile::metadata::same_patch_records(doc, metadata.get("patchedDependencies")) {
-        return Err(mismatch("patchedDependencies"));
-    }
-    if !crate::checksum::extensions_match(
-        cfg,
-        doc.get("packageExtensionsChecksum")
-            .filter(|hash| hash.is_string()),
-    ) {
-        return Err(mismatch("packageExtensionsChecksum"));
-    }
-    if !crate::checksum::hooks_match(
-        cfg.resolution.pnpmfile_checksum.as_ref(),
-        doc.get("pnpmfileChecksum"),
-    ) {
-        return Err(mismatch("pnpmfileChecksum"));
-    }
-    if !cfg.matches_optional_header_for_repair(doc)? {
-        return Err(mismatch("ignoredOptionalDependencies"));
-    }
-    Ok(())
-}
-
 fn fill_missing(
     doc: &mut Cow<'_, Value>,
     evidence: &mut Evidence<'_>,
@@ -298,7 +205,7 @@ fn fill_missing(
         if doc["snapshots"].get(&key).is_none() {
             doc.to_mut()["snapshots"][&key] = evidence.record("snapshots", &key)?;
         }
-        let pkg = graph::package_key(&key);
+        let pkg = pin::package_key(&key);
         if doc["packages"].get(pkg).is_none() {
             doc.to_mut()["packages"][pkg] = evidence.record("packages", pkg)?;
         }

@@ -1,10 +1,15 @@
 //! Recover a snapshot’s original peer bindings and construct replacements from scoped evidence.
 use super::identity::{
-    HashStyle, context_tokens, digest, encode, link_peer_id, patch, peer_text, token_matches,
-    token_reference,
+    context_tokens, encode, link_peer_id, peer_text, token_matches, token_reference,
 };
 use super::{BindingCandidates, WorkspaceLinks, canonical_binding, canonical_providers};
-use crate::{LinkedPeerEncoding, Value, graph};
+use crate::{
+    LinkedPeerEncoding, Value,
+    checksum::{HashStyle, digest},
+    graph,
+    patch::hash_in_key,
+    pin,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod search;
@@ -33,7 +38,7 @@ impl Bindings {
         dedupe: bool,
         encoding: LinkedPeerEncoding,
     ) -> String {
-        let package = graph::package_key(key);
+        let package = pin::package_key(key);
         if dedupe || self.hash.is_some() {
             return encode(package, target, self.hash, dedupe || self.flat, encoding);
         }
@@ -53,7 +58,7 @@ impl Bindings {
                 continue;
             }
             let (actual, reference) = canonical_binding(name, before);
-            if !tokens.contains(&(actual, graph::package_key(reference))) {
+            if !tokens.contains(&(actual, pin::package_key(reference))) {
                 continue;
             }
             // The token for a cyclic provider stops at its release even when
@@ -64,14 +69,14 @@ impl Bindings {
                 };
                 context_tokens(value).is_some_and(|peers| {
                     peers.iter().any(|(peer, bound)| {
-                        *peer == package_name && graph::package_key(bound) == version
+                        *peer == package_name && pin::package_key(bound) == version
                     })
                 })
             };
             if partially_flat && reference.contains('(') || closes_cycle() {
                 shortened
                     .to_mut()
-                    .insert(name.clone(), graph::package_key(value).into());
+                    .insert(name.clone(), pin::package_key(value).into());
             }
         }
         encode(package, &shortened, None, false, encoding)
@@ -94,8 +99,8 @@ impl ConstructedBindings {
                     self.fixed.flat
                         && !provider.starts_with("link:")
                         && !candidate.starts_with("link:")
-                        && graph::package_key(provider) == graph::package_key(candidate)
-                        && patch(provider) == patch(candidate)
+                        && pin::package_key(provider) == pin::package_key(candidate)
+                        && hash_in_key(provider) == hash_in_key(candidate)
                 });
                 match (matching.next(), matching.next()) {
                     (Some(first), None) => first,
@@ -127,7 +132,7 @@ pub(crate) fn optional_requirement(
         if !seen.insert(key.clone()) {
             continue;
         }
-        let Some(package) = packages.get(graph::package_key(&key)) else {
+        let Some(package) = packages.get(pin::package_key(&key)) else {
             return Some(false);
         };
         let own = package.get("peerDependencies");
@@ -175,7 +180,7 @@ pub(crate) fn optional_requirement(
                 let Some(record) = snapshots.get(&child) else {
                     return Some(false);
                 };
-                let Some(package) = packages.get(graph::package_key(&child)) else {
+                let Some(package) = packages.get(pin::package_key(&child)) else {
                     return Some(false);
                 };
                 if package
@@ -214,7 +219,7 @@ fn named_context(
         });
     }
     let snapshot = doc.get("snapshots")?.get(key)?;
-    let package = doc.get("packages")?.get(graph::package_key(key))?;
+    let package = doc.get("packages")?.get(pin::package_key(key))?;
     let names: BTreeSet<_> = package
         .get("peerDependencies")
         .and_then(Value::as_object)
@@ -336,10 +341,7 @@ impl<'a> SnapshotGraph<'a> {
         let mut nodes = Vec::with_capacity(records.len());
         let mut edges = Vec::new();
         for (key, record) in records {
-            let own = graph::section(
-                &doc["packages"][graph::package_key(key)],
-                "peerDependencies",
-            );
+            let own = graph::section(&doc["packages"][pin::package_key(key)], "peerDependencies");
             let start = edges.len();
             for group in ["dependencies", "optionalDependencies"] {
                 for (name, value) in graph::section(record, group).into_iter().flatten() {
@@ -392,7 +394,7 @@ pub(super) fn analyze_bindings<'a>(
     {
         return Some(context);
     }
-    let mut suffix = &key[graph::package_key(key).len()..];
+    let mut suffix = &key[pin::package_key(key).len()..];
     let mut peers = BTreeMap::new();
     if suffix.starts_with("(patch_hash=") {
         let end = suffix.find(')')?;
@@ -415,7 +417,7 @@ pub(super) fn analyze_bindings<'a>(
     let snapshot = doc.get("snapshots")?.get(key)?;
     let mut names: BTreeSet<&str> = doc
         .get("packages")?
-        .get(graph::package_key(key))?
+        .get(pin::package_key(key))?
         .get("peerDependencies")
         .and_then(Value::as_object)
         .into_iter()
@@ -568,15 +570,15 @@ pub(super) fn analyze_bindings<'a>(
         // the full edge when it is the sole context for that package version.
         let nested: BTreeSet<_> = values
             .iter()
-            .filter(|v| graph::package_key(v) != *v)
-            .map(|v| graph::package_key(v).to_owned())
+            .filter(|v| pin::package_key(v) != *v)
+            .map(|v| pin::package_key(v).to_owned())
             .collect();
         values.retain(|value| !nested.contains(value));
     }
     let direct = peers;
     if let Some((flat, linked_peer_encoding, alternatives)) = reconstruction {
         let mut peers = direct;
-        let own = doc["packages"][graph::package_key(key)].get("peerDependencies");
+        let own = doc["packages"][pin::package_key(key)].get("peerDependencies");
         peers.retain(|name, _| {
             name == "patch_hash" || own.is_some_and(|own| own.get(name).is_some())
         });
@@ -587,12 +589,12 @@ pub(super) fn analyze_bindings<'a>(
                 first.clone()
             } else if flat
                 && values.iter().all(|value| {
-                    graph::package_key(value) == graph::package_key(first)
-                        && patch(value) == patch(first)
+                    pin::package_key(value) == pin::package_key(first)
+                        && hash_in_key(value) == hash_in_key(first)
                 })
             {
                 versions_only.insert((*name).into());
-                graph::package_key(first).to_owned()
+                pin::package_key(first).to_owned()
             } else {
                 alternatives.insert((*name).into(), values.clone());
                 continue;
@@ -632,11 +634,11 @@ fn transitive_aliases(
         {
             let (actual, reference) = canonical_binding(name, value);
             if actual != name
-                && doc["packages"][graph::package_key(&key)]["peerDependencies"]
+                && doc["packages"][pin::package_key(&key)]["peerDependencies"]
                     .get(name)
                     .is_some()
                 && context.iter().any(|(n, v)| {
-                    *n == actual && (*v == reference || *v == graph::package_key(reference))
+                    *n == actual && (*v == reference || *v == pin::package_key(reference))
                 })
             {
                 result.insert(value.into());

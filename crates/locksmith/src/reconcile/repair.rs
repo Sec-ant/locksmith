@@ -1,9 +1,6 @@
 //! Apply final overrides, extensions and patches to a selected snapshot.
-use super::{
-    GraphSources, PeerChanges, PeerRequirements, RepairedSnapshot, accepts, missing, peer_names,
-    reference,
-};
-use crate::{LockfileError, Value, graph, manifest, peer};
+use super::{GraphSources, PeerChanges, PeerRequirements, RepairedSnapshot, peer_names};
+use crate::{LockfileError, Value, catalog, error::missing, graph, manifest, peer, pin};
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,7 +170,7 @@ fn extend_dependencies(
         return Ok((changed, requirements));
     }
     let previous = previous.resolve(peers);
-    let package_key = graph::package_key(key);
+    let package_key = pin::package_key(key);
     let (parent_name, parent_version) = package_key.rsplit_once('@').expect("package identity");
     let parent = json!({"name":parent_name,"version":parent_version});
     let package = &sources.inputs[side].document["packages"][package_key];
@@ -220,8 +217,8 @@ fn extend_dependencies(
             for (candidate_side, candidate) in
                 sources.candidates().get(actual_name).into_iter().flatten()
             {
-                let candidate_ref = reference(name, candidate);
-                if !accepts(
+                let candidate_ref = pin::reference(name, candidate);
+                if !catalog::accepts_pin(
                     name,
                     &desired,
                     &candidate_ref,
@@ -248,7 +245,7 @@ fn extend_dependencies(
                     .into_keys()
                     .filter(|name| name != "patch_hash")
                     .collect::<BTreeSet<_>>();
-                selected = Some((reference(name, &resolved), required));
+                selected = Some((pin::reference(name, &resolved), required));
                 break;
             }
             if selected.is_some() {
@@ -297,7 +294,7 @@ pub(super) fn repair_snapshot(
     peers: &mut peer::Merger<'_>,
 ) -> Result<RepairedSnapshot, LockfileError> {
     let (package, mut changed_peers) =
-        repair_peer_declarations(graph::package_key(key), side, package, body, sources)?;
+        repair_peer_declarations(pin::package_key(key), side, package, body, sources)?;
     let retired: BTreeSet<_> = changed_peers
         .iter()
         .filter(|name| package["peerDependencies"].get(*name).is_none())
@@ -348,7 +345,7 @@ pub(super) fn repair_snapshot(
             previous.providers.insert(name.clone(), reference.into());
         }
     }
-    let Some((parent_name, parent_version)) = graph::package_key(key).rsplit_once('@') else {
+    let Some((parent_name, parent_version)) = pin::package_key(key).rsplit_once('@') else {
         return Ok(RepairedSnapshot {
             body: result,
             package,
@@ -389,9 +386,9 @@ pub(super) fn repair_snapshot(
                         .expect("peer declaration"),
                 ))
             } else if own_peer {
-                Some(std::borrow::Cow::Borrowed(graph::package_key(reference)))
+                Some(std::borrow::Cow::Borrowed(pin::package_key(reference)))
             } else {
-                overrides.apply(&parent, ".", name, graph::package_key(reference))?
+                overrides.apply(&parent, ".", name, pin::package_key(reference))?
             };
             if !own_peer {
                 let before = sources.inputs[side]
@@ -415,11 +412,11 @@ pub(super) fn repair_snapshot(
                         .flatten()
                         .filter(|(source, candidate)| {
                             parent_version.parse::<node_semver::Version>().is_ok()
-                                && graph::package_key(candidate) == graph::package_key(key)
+                                && pin::package_key(candidate) == pin::package_key(key)
                                 && sources.inputs[*source]
                                     .document
                                     .get("packages")
-                                    .and_then(|v| v.get(graph::package_key(candidate)))
+                                    .and_then(|v| v.get(pin::package_key(candidate)))
                                     .and_then(|v| v.get("resolution"))
                                     == package.get("resolution")
                                 && sources.authorized_patch(candidate, metadata)
@@ -442,7 +439,7 @@ pub(super) fn repair_snapshot(
                             .as_str()
                     });
                     if let Some(witnessed) = witnessed {
-                        let version = graph::package_key(witnessed);
+                        let version = pin::package_key(witnessed);
                         expected = Some(if version.rsplit_once('@').is_some() {
                             std::borrow::Cow::Owned(format!("npm:{version}"))
                         } else {
@@ -455,10 +452,9 @@ pub(super) fn repair_snapshot(
                             .iter()
                             .find(|addition| addition.group == group && addition.name == name)?;
                         let body = &sources.inputs[*source].document["snapshots"][*candidate];
-                        if sources.inputs[*source].document["packages"]
-                            [graph::package_key(candidate)]
-                        .get("peerDependencies")
-                        .is_some_and(|peers| peers.get(name).is_some())
+                        if sources.inputs[*source].document["packages"][pin::package_key(candidate)]
+                            .get("peerDependencies")
+                            .is_some_and(|peers| peers.get(name).is_some())
                             || (group == "dependencies"
                                 && body
                                     .get("optionalDependencies")
@@ -505,8 +501,8 @@ pub(super) fn repair_snapshot(
                 }
             }
             let mut needs_override = expected.as_ref().is_none_or(|range| {
-                range.as_ref() != graph::package_key(reference)
-                    && !accepts(
+                range.as_ref() != pin::package_key(reference)
+                    && !catalog::accepts_pin(
                         name,
                         range,
                         reference,
@@ -532,18 +528,18 @@ pub(super) fn repair_snapshot(
                 );
             if own_peer
                 && needs_configuration
-                && !graph::package_key(&old_key)
+                && !pin::package_key(&old_key)
                     .rsplit_once('@')
                     .is_some_and(|(name, _)| {
                         sources.candidates().get(name).into_iter().flatten().any(
                             |(_, candidate)| {
-                                graph::package_key(candidate) == graph::package_key(&old_key)
+                                pin::package_key(candidate) == pin::package_key(&old_key)
                                     && sources.authorized_patch(candidate, metadata)
                             },
                         )
                     })
                 && let Some(declaration) = package["peerDependencies"][name].as_str()
-                && !accepts(
+                && !catalog::accepts_pin(
                     name,
                     declaration,
                     reference,
@@ -563,7 +559,7 @@ pub(super) fn repair_snapshot(
                 removed.insert(name.clone());
                 continue;
             };
-            let (old_name, old_version) = graph::package_key(&old_key)
+            let (old_name, old_version) = pin::package_key(&old_key)
                 .rsplit_once('@')
                 .ok_or_else(|| missing(&["snapshots", key, name], "missing package identity"))?;
             let desired = if needs_override {
@@ -594,7 +590,7 @@ pub(super) fn repair_snapshot(
                 let source = peers.origin_side(&old_key).unwrap_or(side);
                 selected = peers
                     .repatch(source, &old_key, patch)
-                    .map(|key| crate::reconcile::reference(name, &key));
+                    .map(|key| pin::reference(name, &key));
             }
             // Prefer a proven final-patch graph before deriving a new one.
             for reconstructed in [false, true] {
@@ -609,7 +605,7 @@ pub(super) fn repair_snapshot(
                         let source = peers.origin_side(&old_key).unwrap_or(side);
                         selected = peers
                             .repatch(source, &old_key, hash)
-                            .map(|key| crate::reconcile::reference(name, &key));
+                            .map(|key| pin::reference(name, &key));
                     }
                     for (candidate_side, candidate) in
                         sources.candidates().get(actual_name).into_iter().flatten()
@@ -617,9 +613,9 @@ pub(super) fn repair_snapshot(
                         if selected.is_some() {
                             break;
                         }
-                        let candidate_ref = crate::reconcile::reference(name, candidate);
+                        let candidate_ref = pin::reference(name, candidate);
                         let matches = if needs_override {
-                            accepts(
+                            catalog::accepts_pin(
                                 name,
                                 desired,
                                 &candidate_ref,
@@ -627,7 +623,7 @@ pub(super) fn repair_snapshot(
                                 Some(sources.configuration),
                             )
                         } else {
-                            graph::package_key(candidate) == graph::package_key(&old_key)
+                            pin::package_key(candidate) == pin::package_key(&old_key)
                         };
                         if sources.inputs[*candidate_side]
                             .compatibility
@@ -681,7 +677,7 @@ pub(super) fn repair_snapshot(
                                 )
                             })
                         {
-                            selected = Some(crate::reconcile::reference(name, &original));
+                            selected = Some(pin::reference(name, &original));
                             if !affected.is_empty() {
                                 changed_contexts.insert(name.clone(), affected);
                             }
@@ -701,7 +697,7 @@ pub(super) fn repair_snapshot(
                                 )
                             })
                     {
-                        selected = Some(crate::reconcile::reference(name, &original));
+                        selected = Some(pin::reference(name, &original));
                         if !affected.is_empty() {
                             changed_contexts.insert(name.clone(), affected);
                         }

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;
 
-use crate::{LockfileError, Value, manifest};
+use crate::{LockfileError, Value, pin};
 
 /// An input missing from a merge or convergence. A declaration lookup is for a release
 /// already identified by an input lock, even when it is no longer a candidate.
@@ -43,7 +43,7 @@ impl RegistryRequest {
     }
 
     pub(crate) fn version(name: &str, specifier: &str) -> Option<Self> {
-        let (name, selector) = manifest::alias(specifier).unwrap_or((name, specifier));
+        let (name, selector) = pin::alias(specifier).unwrap_or((name, specifier));
         (valid_name(name) && (selector.parse::<node_semver::Range>().is_ok() || tag(selector)))
             .then(|| Self::Version {
                 name: name.into(),
@@ -52,7 +52,7 @@ impl RegistryRequest {
     }
 
     pub(crate) fn manifest(key: &str) -> Option<Self> {
-        let (name, version) = crate::graph::package_key(key).rsplit_once('@')?;
+        let (name, version) = pin::package_key(key).rsplit_once('@')?;
         (valid_name(name) && version.parse::<node_semver::Version>().is_ok()).then(|| {
             Self::Manifest {
                 name: name.into(),
@@ -139,7 +139,7 @@ impl RegistryMetadata {
         let valid = match request {
             RegistryRequest::Manifest { .. } => version == selector,
             RegistryRequest::Version { .. } => match selector.parse::<node_semver::Range>() {
-                Ok(_) => selector == "*" || manifest::matches_version(selector, Some(version)),
+                Ok(_) => selector == "*" || pin::matches_version(selector, Some(version)),
                 Err(_) => tag(selector),
             },
         };

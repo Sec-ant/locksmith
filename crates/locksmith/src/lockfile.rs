@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{LockfileError, Value, graph, source::Source};
+use crate::{LockfileError, Value, graph, manifest, patch, pin, schema, source::Source};
 
 /// The project dependency graph or pnpm's package-manager bootstrap graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,7 +127,7 @@ impl Lockfile {
                         .zip(self.recorded_pnpm_version().as_ref())
                         .is_some_and(|(runner, recorded)| runner != recorded)))
         {
-            return Err(crate::reconcile::missing(
+            return Err(crate::error::missing(
                 &["importers", ".", "packageManagerDependencies", "pnpm"],
                 format!(
                     "bootstrap graph does not match the declared pnpm@{}",
@@ -146,7 +146,7 @@ impl Lockfile {
         };
         let links = graph::LinkedProjects::new(doc.get("importers"));
         for (key, snapshot) in graph::section(doc, "snapshots").into_iter().flatten() {
-            let package = &doc["packages"][graph::package_key(key)];
+            let package = &doc["packages"][pin::package_key(key)];
             for (name, _) in graph::section(package, "peerDependencies")
                 .into_iter()
                 .flatten()
@@ -193,8 +193,9 @@ impl Lockfile {
     /// Check the graph and compare its importers against the complete set of
     /// workspace manifests and configured patch files, keyed by declared path.
     /// External members are paths inside the workspace whose symlinks lead outside the root.
-    /// Callers supply effective manifests if hooks apply. For a range pinned to a
-    /// directory outside the member set, `read_linked` supplies its manifest,
+    /// If hooks apply, supply their effective manifests and the hook checksum
+    /// or contents in `config`. For a range pinned to a directory outside the
+    /// member set, `read_linked` supplies its manifest,
     /// `None` for an absent directory, or an error for unreadable inputs.
     ///
     /// # Errors
@@ -230,7 +231,14 @@ impl Lockfile {
                 "dependency settings differ",
             ));
         }
-        crate::repair::check_recorded_settings(document, config)?;
+        config.check_recorded_settings(document)?;
+        if let Some(field) = config.frozen_settings_mismatch(document) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                format!("settings/{field} differs"),
+            ));
+        }
         if let Some(catalogs) = document.get("catalogs") {
             for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
                 crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
@@ -254,11 +262,8 @@ impl Lockfile {
             }
         }
         let patches_match = |encoding| {
-            let expected = crate::reconcile::metadata::patch_records(config, patches, encoding)?;
-            Ok::<_, LockfileError>(crate::reconcile::metadata::same_patch_records(
-                document,
-                expected.as_ref(),
-            ))
+            let expected = patch::records(config, patches, encoding)?;
+            Ok::<_, LockfileError>(patch::records_match(document, expected.as_ref()))
         };
         if !patches_match(config.patch_encoding)?
             && !(config.pnpm_version.is_none()
@@ -278,6 +283,16 @@ impl Lockfile {
                 "packageExtensionsChecksum differs",
             ));
         }
+        if !crate::checksum::hooks_match(
+            config.resolution.pnpmfile_checksum.as_ref(),
+            document.get("pnpmfileChecksum"),
+        ) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "pnpmfileChecksum differs",
+            ));
+        }
         if !config
             .resolution
             .ignored_optional_dependencies_match(document)?
@@ -288,10 +303,9 @@ impl Lockfile {
                 "ignoredOptionalDependencies differs",
             ));
         }
-        let effective =
-            crate::reconcile::metadata::effective_overrides(config, manifests.get("."))?;
-        let recorded_overrides = crate::manifest::rule_map(document, "overrides");
-        if !crate::manifest::same_ordered_mapping(effective.as_ref(), recorded_overrides) {
+        let effective = manifest::effective_overrides(config, manifests.get("."))?;
+        let recorded_overrides = schema::rule_map(document, "overrides");
+        if !schema::same_ordered_mapping(effective.as_ref(), recorded_overrides) {
             return Err(crate::manifest::mismatch(
                 ".",
                 "workspace",
@@ -354,7 +368,7 @@ impl Lockfile {
         for (i, source) in self.sources.iter().enumerate() {
             if source.documents == self.documents
                 && self.documents.iter().all(|(kind, document)| {
-                    crate::manifest::same_override_order(document, &source.documents[kind])
+                    schema::same_override_order(document, &source.documents[kind])
                         && (Arc::ptr_eq(document, &source.documents[kind]) || {
                             let keep_importer_order = self.preserve_baseline
                                 && crate::source::importer_order(&self.sources, *kind, document)

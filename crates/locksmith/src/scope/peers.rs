@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Map;
 
-use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, peer, reconcile};
+use crate::{LockfileError, Value, WorkspaceConfig, graph, patch, peer, pin, reconcile, schema};
 
 type Providers = BTreeMap<String, String>;
 
@@ -67,7 +67,7 @@ pub(super) fn bind(
         let previous = docs.map(|d| providers(&d["importers"], &id, inherit));
         let mut roots = Vec::new();
         for (side, source) in [&*retained, &*adopted].into_iter().enumerate() {
-            for group in manifest::GROUPS {
+            for group in schema::DEPENDENCY_GROUPS {
                 for (name, dep) in graph::section(&source[&id], group).into_iter().flatten() {
                     if let Some(reference) =
                         dep["version"].as_str().filter(|r| !r.starts_with("link:"))
@@ -146,7 +146,7 @@ pub(super) fn bind(
                 break;
             }
             if pass == roots.len() {
-                return Err(reconcile::missing(
+                return Err(crate::error::missing(
                     &["importers", &id],
                     "peer bindings do not reach a stable context",
                 ));
@@ -189,7 +189,7 @@ fn select(
         return Ok(None);
     }
     let unresolved = || {
-        reconcile::missing(
+        crate::error::missing(
             &["importers", id, pin.group, name],
             "cannot determine peer bindings for the selected providers",
         )
@@ -206,10 +206,10 @@ fn select(
             )
         })
         .filter(|(_, k)| {
-            graph::package_key(k) == graph::package_key(&key)
-                && peer::patch(k) == peer::patch(&key)
-                && docs[side]["packages"][graph::package_key(&key)]
-                    == docs[other]["packages"][graph::package_key(k)]
+            pin::package_key(k) == pin::package_key(&key)
+                && patch::hash_in_key(k) == patch::hash_in_key(&key)
+                && docs[side]["packages"][pin::package_key(&key)]
+                    == docs[other]["packages"][pin::package_key(k)]
         })
         .and_then(|(r, k)| {
             peers
@@ -262,6 +262,6 @@ fn select(
     Ok(Some(Bound {
         side,
         witness: witness.into(),
-        reference: reconcile::reference(name, &rebound),
+        reference: pin::reference(name, &rebound),
     }))
 }

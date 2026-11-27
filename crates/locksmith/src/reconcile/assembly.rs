@@ -1,7 +1,7 @@
 //! Follow reachable dependency edges and install each repaired snapshot with its source metadata.
 use super::repair::repair_snapshot;
-use super::{GraphSources, PeerChanges, RepairedSnapshot, expand, missing, peer_names};
-use crate::{LockfileError, Value, graph, manifest, peer};
+use super::{GraphSources, PeerChanges, RepairedSnapshot, expand, peer_names};
+use crate::{LockfileError, Value, error::missing, graph, peer, pin, schema};
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +20,7 @@ pub(super) fn assemble(
     output["packages"] = json!({});
     let mut pending = Vec::new();
     for (_, record) in graph::section(output, "importers").into_iter().flatten() {
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(record, group).into_iter().flatten() {
                 let value = dep["version"].as_str().expect("selected version");
                 if !value.starts_with("link:") {
@@ -43,7 +43,7 @@ pub(super) fn assemble(
                     "instance does not use the final patch",
                 ));
             }
-            let package_key = graph::package_key(&key);
+            let package_key = pin::package_key(&key);
             let mut selected = None;
             let mut reconstructed = None;
             let mut order = source_order;

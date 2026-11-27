@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fs, path::Path, thread};
 
 use locksmith::{Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::registry::ProjectRc;
@@ -111,45 +112,57 @@ pub(crate) fn with_context(
     Ok(result)
 }
 
+#[derive(Deserialize)]
+struct FileContext {
+    target: String,
+    manifests: BTreeMap<String, Value>,
+    configurations: [Value; 3],
+    configuration: Value,
+    #[serde(default)]
+    patches: BTreeMap<String, String>,
+}
+
 pub fn from_file<P: AsRef<Path>>(
     files: [&P; 3],
     path: &P,
     allow_network: bool,
 ) -> Result<Lockfile> {
-    let mut raw: Value = serde_json::from_slice(&fs::read(path)?)?;
-    let target = match raw["target"].as_str() {
-        Some("ours") => MergeTarget::Ours,
-        Some("theirs") => MergeTarget::Theirs,
+    let FileContext {
+        target,
+        manifests,
+        configurations: source_settings,
+        configuration: settings,
+        patches,
+    } = serde_json::from_slice(&fs::read(path)?)?;
+    let target = match target.as_str() {
+        "ours" => MergeTarget::Ours,
+        "theirs" => MergeTarget::Theirs,
         _ => return Err("context.target must be ours or theirs".into()),
     };
-    let manifests: BTreeMap<String, Value> = serde_json::from_value(raw["manifests"].take())?;
     let root = manifests.get(".").ok_or("missing root manifest")?;
-    let source: [Value; 3] = serde_json::from_value(raw["configurations"].take())?;
     let inputs = Sources::read(files)?;
     let locks = inputs.inputs();
     let [base, ours, theirs] = [0, 1, 2].map(|i| {
         locksmith::WorkspaceConfig::from_pnpm_source(
-            &source[i],
+            &source_settings[i],
             Some(root),
             locks[i].recorded_pnpm_version(),
         )
     });
     let configurations = [base?, ours?, theirs?];
-    let settings = &raw["configuration"];
     let ((), config, merge) =
         target.workspace_for_candidate(Some(root), locks, |lock| -> Result<_> {
             let version = lock.and_then(Lockfile::recorded_pnpm_version);
             let config =
-                locksmith::WorkspaceConfig::from_pnpm_context(settings, Some(root), version)?;
+                locksmith::WorkspaceConfig::from_pnpm_context(&settings, Some(root), version)?;
             let config = crate::workspace::bootstrap_configuration(
                 config,
-                settings,
+                &settings,
                 lock.map(Into::into),
                 crate::registry::working_rc,
             )?;
             Ok(((), config))
         })?;
-    let patches = serde_json::from_value(raw["patches"].take())?;
     let context = MergeContext {
         registry: None,
         target,
@@ -161,7 +174,7 @@ pub fn from_file<P: AsRef<Path>>(
     with_context(
         &merge,
         &context,
-        &raw["configuration"],
+        &settings,
         allow_network.then_some(ProjectRc::Working),
     )
 }

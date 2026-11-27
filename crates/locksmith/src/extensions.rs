@@ -2,7 +2,9 @@
 //! workspace overrides their version independently of the published range.
 use std::collections::{BTreeSet, HashMap};
 
-use crate::{LockfileError, Value, WorkspaceConfig, config, graph, manifest, peer, reconcile};
+use crate::{
+    LockfileError, Value, WorkspaceConfig, catalog, config, graph, manifest, patch, peer, pin,
+};
 
 #[derive(Default)]
 pub(crate) struct Plan {
@@ -73,7 +75,7 @@ pub(crate) fn plan(
             continue;
         };
         let fields = config::extension_fields(rules, parent, version).ok_or_else(|| {
-            reconcile::missing(
+            crate::error::missing(
                 &["packageExtensions", release],
                 "expected dependency mappings",
             )
@@ -98,7 +100,7 @@ pub(crate) fn plan(
                 continue;
             };
             if let Some(spec) = overrides.apply(&identity, ".", name, declaration)?
-                && manifest::alias(&spec)
+                && pin::alias(&spec)
                     .map_or(spec.as_ref(), |(_, v)| v)
                     .parse::<node_semver::Version>()
                     .is_ok()
@@ -119,16 +121,16 @@ pub(crate) fn plan(
         if reachable.is_some_and(|c| !c.snapshots.contains(key)) {
             continue;
         }
-        let Some(targets) = constraints.get(graph::package_key(key)) else {
+        let Some(targets) = constraints.get(pin::package_key(key)) else {
             continue;
         };
-        if peer::patch(key).is_some() {
+        if patch::hash_in_key(key).is_some() {
             continue;
         }
         let mut changes = Vec::new();
         for (name, spec) in targets {
             let edge = graph::dependency(body, name);
-            if edge.is_some_and(|(_, pin)| reconcile::accepts(name, spec, pin, doc, Some(cfg))) {
+            if edge.is_some_and(|(_, pin)| catalog::accepts_pin(name, spec, pin, doc, Some(cfg))) {
                 continue;
             }
             let pin = peers
@@ -140,7 +142,7 @@ pub(crate) fn plan(
                     (pin == selected).then_some(pin)
                 })
                 .ok_or_else(|| {
-                    reconcile::missing(
+                    crate::error::missing(
                         &["snapshots", key, name],
                         format!(
                             "no unique locked instance of {spec} matches this consumer's peers"
@@ -168,7 +170,7 @@ pub(crate) fn plan(
             if graph::transitive(body).any(|peer| peer == *name)
                 || peer::explicit_bindings(key).is_some_and(|m| m.contains_key(name))
             {
-                return Err(reconcile::missing(
+                return Err(crate::error::missing(
                     &["snapshots", key, name],
                     "the override also changes the parent’s peer identity",
                 ));
@@ -222,7 +224,7 @@ pub(crate) fn plan(
                 let record = &donor[section][&key];
                 match doc[section].get(&key) {
                     Some(existing) if existing != record => {
-                        return Err(reconcile::missing(
+                        return Err(crate::error::missing(
                             &[section, &key],
                             "the installed override requires a different record for a shared identity",
                         ));
@@ -254,7 +256,7 @@ fn verify_provider(
         )
     };
     let body = &doc["snapshots"][&key];
-    let declares_peer = doc["packages"][graph::package_key(&key)]["peerDependencies"]
+    let declares_peer = doc["packages"][pin::package_key(&key)]["peerDependencies"]
         .get(name)
         .is_some();
     if declares_peer || graph::transitive(body).any(|n| n == name) {
@@ -264,7 +266,7 @@ fn verify_provider(
             peer::explicit_bindings(&key).and_then(|b| b.get(name).copied())
         };
         if bound != Some(pin) {
-            return Err(reconcile::missing(
+            return Err(crate::error::missing(
                 &["snapshots", parent, sibling],
                 format!("peer {name} also needs rebinding to {pin}"),
             ));

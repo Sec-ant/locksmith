@@ -159,6 +159,125 @@ fn strict_peer_policy_uses_pnpm_prerelease_matching() {
 }
 
 #[test]
+fn contextual_merge_requires_recorded_settings_matching_the_final_workspace() {
+    let pnpm = "12.15.0".parse().unwrap();
+    let config = |value| WorkspaceConfig::from_pnpm_version(&value, &pnpm).unwrap();
+    let opts = |auto_dedupe, dedupe_peer_dependents| {
+        json!({
+            "lockfile": {"includeResolutionSettings": true},
+            "autoDedupe": auto_dedupe,
+            "dedupePeerDependents": dedupe_peer_dependents,
+        })
+    };
+    let input = |auto_dedupe, dedupe_peer_dependents| {
+        let document = json!({"lockfileVersion": "9.0", "importers": {".": {}}, "settings": {
+            "autoDedupe": auto_dedupe,
+            "dedupeInjectedDeps": true,
+            "dedupePeerDependents": dedupe_peer_dependents,
+            "linkWorkspacePackages": false,
+        }});
+        Lockfile::parse(&document.to_string()).unwrap()
+    };
+    let configurations = [
+        config(opts(false, true)),
+        config(opts(true, true)),
+        config(opts(false, false)),
+    ];
+    let [base, ours, theirs] = [input(false, true), input(true, true), input(false, false)];
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    let final_config = config(opts(true, false));
+    let mut context = MergeContext {
+        registry: None,
+        target: MergeTarget::Ours,
+        manifests: &manifests,
+        configurations: configurations.each_ref(),
+        configuration: &final_config,
+        patches: &BTreeMap::new(),
+    };
+    assert!(matches!(
+        merge(&base, &ours, &theirs, Some(&context)),
+        Err(LockfileError::ResolutionRequired { path, .. }) if path == ["settings", "autoDedupe"]
+    ));
+
+    context.configuration = &configurations[2];
+    let merged = merge(&base, &ours, &theirs, Some(&context)).unwrap();
+    let settings = &merged.project().unwrap()["settings"];
+    assert_eq!(settings["autoDedupe"], false);
+    assert_eq!(settings["dedupePeerDependents"], false);
+
+    context.target = MergeTarget::Theirs;
+    context.configurations = [&configurations[0], &configurations[1], &configurations[0]];
+    context.configuration = &configurations[1];
+    let merged = merge(&base, &ours, &base, Some(&context)).unwrap();
+    assert_eq!(merged.project().unwrap()["settings"]["autoDedupe"], true);
+}
+
+#[test]
+fn contextual_merge_matches_peer_suffix_limit_for_older_and_unknown_pnpm() {
+    let input = |settings: &Value| {
+        let document = json!({
+            "lockfileVersion": "9.0", "importers": {".": {}}, "settings": settings,
+        });
+        Lockfile::parse(&document.to_string()).unwrap()
+    };
+    let stale = input(&json!({"peersSuffixMaxLength": 32}));
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    for (version, configuration, matching_settings) in [
+        (
+            None,
+            json!({"peersSuffixMaxLength": 64, "injectWorkspacePackages": true, "addMissingPeerTypes": true}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
+        (None, json!({}), json!({})),
+        (
+            Some("9.15.9"),
+            json!({"peersSuffixMaxLength": 64}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
+        (Some("10.34.9"), json!({}), json!({})),
+        (
+            Some("12.14.0"),
+            json!({"peersSuffixMaxLength": 64, "injectWorkspacePackages": true, "addMissingPeerTypes": true}),
+            json!({"peersSuffixMaxLength": 64}),
+        ),
+    ] {
+        let config = match version {
+            Some(version) => {
+                WorkspaceConfig::from_pnpm_version(&configuration, &version.parse().unwrap())
+                    .unwrap()
+            }
+            None => cfg(&configuration),
+        };
+        let matching = input(&matching_settings);
+        let context = MergeContext {
+            registry: None,
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configurations: [&config; 3],
+            configuration: &config,
+            patches: &BTreeMap::new(),
+        };
+
+        for (preferred, other) in [(&matching, &stale), (&stale, &matching)] {
+            let merged = merge(&stale, preferred, other, Some(&context)).unwrap();
+            assert_eq!(
+                merged.project().unwrap()["settings"].get("peersSuffixMaxLength"),
+                matching_settings.get("peersSuffixMaxLength"),
+                "pnpm version: {version:?}",
+            );
+        }
+        assert!(
+            matches!(
+                merge(&stale, &stale, &stale, Some(&context)),
+                Err(LockfileError::ResolutionRequired { path, .. })
+                    if path == ["settings", "peersSuffixMaxLength"]
+            ),
+            "pnpm version: {version:?}"
+        );
+    }
+}
+
+#[test]
 fn configuration_decoding_normalizes_defaults_and_excludes_acceptance_policy() {
     let implicit = WorkspaceConfig::from_pnpm(&json!({})).unwrap();
     let explicit=WorkspaceConfig::from_pnpm(&json!({"autoInstallPeers":true,"dedupePeers":false,"excludeLinksFromLockfile":false,"resolvePeersFromWorkspaceRoot":true,"injectWorkspacePackages":false,"strictPeerDependencies":true})).unwrap();

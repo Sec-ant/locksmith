@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use serde_json::{Map, json};
 
-use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, graph};
+use crate::{Conflict, ConflictKind, DocumentKind, Lockfile, LockfileError, Value, graph, schema};
 
 /// A parsed lockfile or its original YAML text.
 #[derive(Clone, Copy)]
@@ -17,7 +17,7 @@ impl<'a> MergeInput<'a> {
     pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, Vec<String>) {
         match self {
             Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), Vec::new()),
-            Self::Yaml(text) => crate::RepairInput::bootstrap_lockfile(text)
+            Self::Yaml(text) => crate::recovery::bootstrap_lockfile(text)
                 .map(|(lock, duplicates)| (Some(Cow::Owned(lock)), duplicates))
                 .unwrap_or_default(),
         }
@@ -126,7 +126,7 @@ impl ContextualMerge<'_> {
 ///
 /// # Errors
 /// Returns [`LockfileError::Conflicts`] for incompatible branch edits, or
-/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select a pin.
+/// [`LockfileError::ResolutionRequired`] when the supplied evidence cannot select compatible pins or settings.
 /// Malformed inputs and invalid dependency graphs also return errors.
 pub fn merge<'a>(
     base: impl Into<MergeInput<'a>>,
@@ -268,13 +268,13 @@ impl Context<'_> {
         let ordered = path.len() == 1 && path[0] == "overrides";
         let equal = |left: Option<&Value>, right: Option<&Value>| {
             if ordered {
-                crate::manifest::same_ordered_mapping(left, right)
+                schema::same_ordered_mapping(left, right)
             } else {
                 left == right
                     && (!path.is_empty()
                         || left
                             .zip(right)
-                            .is_none_or(|(a, b)| crate::manifest::same_override_order(a, b)))
+                            .is_none_or(|(a, b)| schema::same_override_order(a, b)))
             }
         };
         if equal(ours, theirs) {

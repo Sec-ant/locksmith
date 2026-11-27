@@ -5,9 +5,11 @@ use super::{
     EDGES, Instance, ProjectionError, Projector, SnapshotEdit, dependency, edges, transitive,
 };
 use crate::{
-    LockfileError, Value, graph,
+    LockfileError, Value, catalog,
+    error::missing,
+    graph, patch,
     peer::{self, same_binding},
-    reconcile::missing,
+    pin,
 };
 
 type Bindings = BTreeMap<String, String>;
@@ -47,13 +49,10 @@ impl Projector<'_> {
             .map(|(n, v)| (n, Binding::Bound(v)))
             .collect();
         for n in transitive(&doc["snapshots"][key]).chain(
-            graph::section(
-                &doc["packages"][graph::package_key(key)],
-                "peerDependencies",
-            )
-            .into_iter()
-            .flatten()
-            .map(|(n, _)| n.as_str()),
+            graph::section(&doc["packages"][pin::package_key(key)], "peerDependencies")
+                .into_iter()
+                .flatten()
+                .map(|(n, _)| n.as_str()),
         ) {
             exposed.entry(n.into()).or_insert(Binding::Unbound);
         }
@@ -91,7 +90,7 @@ impl Projector<'_> {
                     missing(&["snapshots", old, sibling], "invalid dependency reference")
                 })?;
                 let key = graph::snapshot_key(sibling, pin, graph::section(base, "snapshots"));
-                if base["packages"][graph::package_key(&key)]["peerDependencies"]
+                if base["packages"][pin::package_key(&key)]["peerDependencies"]
                     .get(provider)
                     .is_none()
                     && !transitive(&base["snapshots"][&key]).any(|n| n == provider)
@@ -116,8 +115,8 @@ impl Projector<'_> {
                     continue;
                 }
                 if let Some(witness) = witnessed
-                    && graph::package_key(&key) == graph::package_key(&witness)
-                    && peer::patch(&key) == peer::patch(&witness)
+                    && pin::package_key(&key) == pin::package_key(&witness)
+                    && patch::hash_in_key(&key) == patch::hash_in_key(&witness)
                 {
                     let installed_binding = self
                         .interface(1, &witness)?
@@ -178,7 +177,7 @@ impl Projector<'_> {
                     .rebind(0, &key, &desired, &previous_scope)
                     .ok_or_else(err)?;
                 let (group, _) = dependency(&edit.body, &sibling).expect("retained sibling");
-                edit.body[group][&sibling] = crate::reconcile::reference(&sibling, &rebound).into();
+                edit.body[group][&sibling] = pin::reference(&sibling, &rebound).into();
             }
         }
         Ok(())
@@ -204,7 +203,7 @@ impl Projector<'_> {
         mut changes: Edits,
     ) -> Result<Instance, ProjectionError> {
         let base = self.docs[0];
-        let own = &self.docs[1]["packages"][graph::package_key(next)]["peerDependencies"];
+        let own = &self.docs[1]["packages"][pin::package_key(next)]["peerDependencies"];
         let mut inherited: BTreeSet<_> = transitive(body).map(str::to_owned).collect();
         for name in changes.keys() {
             if transitive(&self.docs[1]["snapshots"][next]).any(|n| n == name) {
@@ -231,7 +230,7 @@ impl Projector<'_> {
                 continue;
             }
             if name
-                == graph::package_key(old)
+                == pin::package_key(old)
                     .rsplit_once('@')
                     .map_or("", |(n, _)| n)
                 || own.get(&name).is_some()
@@ -249,7 +248,7 @@ impl Projector<'_> {
                             graph::section(base, "snapshots"),
                         );
                         let exposed = transitive(&base["snapshots"][&key]).any(|n| n == name)
-                            || base["packages"][graph::package_key(&key)]["peerDependencies"]
+                            || base["packages"][pin::package_key(&key)]["peerDependencies"]
                                 .get(&name)
                                 .is_some();
                         exposed.then_some(key)
@@ -414,10 +413,9 @@ impl super::Projection {
                 if new == Binding::Unbound
                     && let Some(target) = scope.get(&peer)
                     && let Some(range) =
-                        doc["packages"][graph::package_key(&instance.key)]["peerDependencies"]
-                            [&peer]
+                        doc["packages"][pin::package_key(&instance.key)]["peerDependencies"][&peer]
                             .as_str()
-                    && crate::reconcile::accepts(&peer, range, target, doc, Some(config))
+                    && catalog::accepts_pin(&peer, range, target, doc, Some(config))
                 {
                     return Err(missing(
                         &["importers", &id, group, &name, &peer],
@@ -461,12 +459,7 @@ impl super::Projection {
             let key = peers
                 .rebind(0, &instance.key, &target, &original)
                 .ok_or_else(error)?;
-            edits.push((
-                id,
-                group,
-                name.clone(),
-                crate::reconcile::reference(&name, &key),
-            ));
+            edits.push((id, group, name.clone(), pin::reference(&name, &key)));
         }
         if let Some(peers) = merger {
             let generated = peers.into_generated();

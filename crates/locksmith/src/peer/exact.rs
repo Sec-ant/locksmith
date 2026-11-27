@@ -1,7 +1,9 @@
-use super::{Merger, explicit_bindings, patch};
+use super::{Merger, explicit_bindings};
+use crate::patch::hash_in_key;
 use crate::{
     Value, WorkspaceConfig,
     graph::{self, dependency, transitive},
+    pin,
 };
 
 impl Merger<'_> {
@@ -14,7 +16,7 @@ impl Merger<'_> {
         name: &str,
         spec: &str,
     ) -> Option<String> {
-        let (target, version) = crate::manifest::alias(spec).unwrap_or((name, spec));
+        let (target, version) = pin::alias(spec).unwrap_or((name, spec));
         let version = version.parse::<node_semver::Version>().ok()?.to_string();
         let release = format!("{target}@{version}");
         let donor_side = parents.len().checked_sub(1)?;
@@ -39,7 +41,7 @@ impl Merger<'_> {
         for key in self.locked_instances(donor_side, &release) {
             let body = &donor["snapshots"][key];
             let bindings = explicit_bindings(key)?;
-            if patch(key).is_some() || transitive(body).next().is_some() {
+            if hash_in_key(key).is_some() || transitive(body).next().is_some() {
                 return None;
             }
             let declared = graph::section(&donor["packages"][&release], "peerDependencies");
@@ -53,7 +55,7 @@ impl Merger<'_> {
                 let fits = declared
                     .and_then(|d| d.get(peer_name))
                     .and_then(Value::as_str)
-                    .zip(graph::package_key(pin).parse::<node_semver::Version>().ok())
+                    .zip(pin::package_key(pin).parse::<node_semver::Version>().ok())
                     .is_some_and(|(range, v)| {
                         crate::diagnostics::PeerRange::new(
                             range,
@@ -81,7 +83,7 @@ impl Merger<'_> {
                     *exposed == pin
                         || same_binding(exposed, pin, config.resolution.lock.dedupe_peers)
                             && self
-                                .locked_instances(side, graph::package_key(&provider))
+                                .locked_instances(side, pin::package_key(&provider))
                                 .all(|k| k == provider)
                 })
             });
@@ -92,13 +94,13 @@ impl Merger<'_> {
                 chosen = Some(key);
             }
         }
-        chosen.map(|k| crate::reconcile::reference(name, k))
+        chosen.map(|k| pin::reference(name, k))
     }
 }
 
 pub(crate) fn same_binding(a: &str, b: &str, flat: bool) -> bool {
     a == b
         || flat
-            && graph::package_key(a) == graph::package_key(b)
+            && pin::package_key(a) == pin::package_key(b)
             && (!a.contains('(') || !b.contains('('))
 }

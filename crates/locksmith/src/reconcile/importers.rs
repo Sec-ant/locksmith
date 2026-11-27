@@ -1,9 +1,10 @@
 //! Select workspace pins, then bind each importer to its final peer providers.
-use super::{GraphSources, MergeContext, accepts, missing, opaque, peer_names, reference};
+use super::{GraphSources, MergeContext, opaque, peer_names};
 use crate::{
-    LockfileError, Value, graph, manifest, peer,
+    LockfileError, Value, graph, manifest, patch, peer, pin, schema,
     workspace_links::{WorkspaceLinks, injected},
 };
+use crate::{catalog::accepts_pin, error::missing, pin::reference};
 use serde_json::{Map, json};
 use std::collections::BTreeMap;
 
@@ -48,7 +49,7 @@ pub(super) fn select(
             .find_map(|side| docs[*side].get("importers")?.get(id))
             .cloned()
             .unwrap_or_else(|| json!({}));
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             record
                 .as_object_mut()
                 .ok_or_else(|| missing(&["importers", id], "expected importer mapping"))?
@@ -118,7 +119,7 @@ pub(super) fn select(
                 .map(|(name, pin)| (name.clone(), peer::root_provider(id, &pin.reference)))
                 .collect::<BTreeMap<_, _>>();
             if id != "." && context.configuration.resolution.workspace_root_peers {
-                for group in manifest::GROUPS {
+                for group in schema::DEPENDENCY_GROUPS {
                     for (name, dep) in importers
                         .get(".")
                         .and_then(|root| graph::section(root, group))
@@ -206,7 +207,7 @@ pub(super) fn select(
                 && context.configuration.resolution.workspace_root_peers
                 && let Some(root) = importers.get(".")
             {
-                for group in manifest::GROUPS {
+                for group in schema::DEPENDENCY_GROUPS {
                     for (name, dep) in graph::section(root, group).into_iter().flatten() {
                         if let Some(version) = dep.get("version").and_then(Value::as_str) {
                             providers.insert(name.clone(), peer::root_provider(".", version));
@@ -264,7 +265,7 @@ pub(super) fn select(
                 // suffix also has this witness; reconstruct only mixed contexts.
                 let existing = sources.order.iter().find_map(|&other| {
                     let record = docs[other].get("importers")?.get(id)?;
-                    let reference = manifest::GROUPS.iter().find_map(|group| {
+                    let reference = schema::DEPENDENCY_GROUPS.iter().find_map(|group| {
                         record.get(*group)?.get(name)?.get("version")?.as_str()
                     })?;
                     let key = graph::snapshot_key(
@@ -272,11 +273,11 @@ pub(super) fn select(
                         reference,
                         graph::section(docs[other], "snapshots"),
                     );
-                    if graph::package_key(&key) != graph::package_key(&pin.key)
-                        || peer::patch(&key) != peer::patch(&pin.key)
+                    if pin::package_key(&key) != pin::package_key(&pin.key)
+                        || patch::hash_in_key(&key) != patch::hash_in_key(&pin.key)
                         || !sources.inputs[other].compatibility.accepts(&key)
-                        || docs[other]["packages"][graph::package_key(&key)]
-                            != docs[pin.side]["packages"][graph::package_key(&pin.key)]
+                        || docs[other]["packages"][pin::package_key(&key)]
+                            != docs[pin.side]["packages"][pin::package_key(&pin.key)]
                         || docs[other].get("snapshots")?.get(&key).is_none()
                     {
                         return None;
@@ -304,7 +305,7 @@ pub(super) fn select(
                     if !preferences.contains(id, name) {
                         return None;
                     }
-                    let locator = graph::package_key(&pin.key);
+                    let locator = pin::package_key(&pin.key);
                     let (actual, _) = locator.rsplit_once('@')?;
                     sources
                         .candidates()
@@ -312,8 +313,8 @@ pub(super) fn select(
                         .iter()
                         .find_map(|&(side, key)| {
                             (key != pin.key
-                                && graph::package_key(key) == locator
-                                && peer::patch(key) == peer::patch(&pin.key)
+                                && pin::package_key(key) == locator
+                                && patch::hash_in_key(key) == patch::hash_in_key(&pin.key)
                                 && docs[side]["packages"][locator]
                                     == docs[pin.side]["packages"][locator]
                                 && peers.witnesses_scope(
@@ -453,7 +454,7 @@ impl PinSelector<'_, '_> {
                 .as_str()?
                 .parse::<node_semver::Version>()
                 .ok()?;
-            let (_, version) = graph::package_key(key).rsplit_once('@')?;
+            let (_, version) = pin::package_key(key).rsplit_once('@')?;
             let locked = version.parse::<node_semver::Version>().ok()?;
             let prefer = context
                 .configuration
@@ -476,7 +477,7 @@ impl PinSelector<'_, '_> {
             && !sources.inputs[target].matches_configuration
             && sources.inputs[target].unchanged_rules
             && let Some(pin) = super::preference::dependency(docs[target], id, name)
-            && accepts(name, specifier, pin, output, Some(configuration))
+            && accepts_pin(name, specifier, pin, output, Some(configuration))
         {
             let key = graph::snapshot_key(name, pin, graph::section(docs[target], "snapshots"));
             if sources.inputs[target].compatibility.unchanged(&key)
@@ -513,7 +514,7 @@ impl PinSelector<'_, '_> {
                 {
                     continue;
                 }
-                for source_group in manifest::GROUPS {
+                for source_group in schema::DEPENDENCY_GROUPS {
                     let Some(dep) = docs[side]
                         .get("importers")
                         .and_then(|v| v.get(id))
@@ -526,7 +527,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     };
                     if local.map(String::as_str) == Some(reference)
-                        || accepts(name, specifier, reference, output, Some(configuration))
+                        || accepts_pin(name, specifier, reference, output, Some(configuration))
                         || (dep.get("specifier").and_then(Value::as_str) == Some(specifier)
                             && opaque(specifier))
                     {
@@ -573,12 +574,12 @@ impl PinSelector<'_, '_> {
                         old,
                         graph::section(docs[context.target.index()], "snapshots"),
                     );
-                    let locator = graph::package_key(&old_key);
+                    let locator = pin::package_key(&old_key);
                     if let Some((actual, _)) = locator.rsplit_once('@') {
                         for &(source, key) in sources.candidates().get(actual).into_iter().flatten()
                         {
                             if source != side
-                                || graph::package_key(key) != locator
+                                || pin::package_key(key) != locator
                                 || sources.inputs[side].compatibility.unchanged(key)
                                     == matches!(pass, CandidatePass::Rebuild)
                                 || !sources.authorized_patch(key, output)
@@ -593,7 +594,7 @@ impl PinSelector<'_, '_> {
                                 continue;
                             }
                             let version = reference(name, key);
-                            if accepts(name, specifier, &version, output, Some(configuration)) {
+                            if accepts_pin(name, specifier, &version, output, Some(configuration)) {
                                 selected = Some((side, version, key.to_owned()));
                                 borrowed = true;
                                 break;
@@ -637,7 +638,7 @@ impl PinSelector<'_, '_> {
                         continue;
                     }
                     let reference = reference(name, key);
-                    if accepts(name, specifier, &reference, output, Some(configuration))
+                    if accepts_pin(name, specifier, &reference, output, Some(configuration))
                         && sources.desired_patch(key, output).is_some()
                     {
                         if sources.authorized_patch(key, output) {
@@ -681,7 +682,7 @@ impl PinSelector<'_, '_> {
                     .into_iter()
                     .flatten()
                     .find_map(|&(side, key)| {
-                        (side == super::PUBLISHED && choice == graph::package_key(key))
+                        (side == super::PUBLISHED && choice == pin::package_key(key))
                             .then(|| (side, reference(name, key), key.to_owned()))
                     });
             }
@@ -711,7 +712,7 @@ fn configured_peer_roots<'a>(
     metadata: &Value,
     sources: &GraphSources<'a>,
 ) -> Vec<(usize, &'a str)> {
-    let package_key = graph::package_key(key);
+    let package_key = pin::package_key(key);
     let Some((parent, version)) = package_key.rsplit_once('@') else {
         return Vec::new();
     };
@@ -750,7 +751,7 @@ fn configured_peer_roots<'a>(
         .copied()
         .filter(|(source, candidate)| {
             if *candidate == key
-                || graph::package_key(candidate) != package_key
+                || pin::package_key(candidate) != package_key
                 || sources.inputs[*source].document["packages"][package_key] != *package
                 || !sources.authorized_patch(candidate, metadata)
                 || peer_names(sources.inputs[*source].document, candidate) == names
@@ -808,8 +809,8 @@ fn configured_peer_roots<'a>(
                 {
                     return false;
                 }
-                if graph::package_key(replacement)
-                    != graph::package_key(reference.as_str().expect("dependency reference"))
+                if pin::package_key(replacement)
+                    != pin::package_key(reference.as_str().expect("dependency reference"))
                 {
                     if !changed {
                         return false;

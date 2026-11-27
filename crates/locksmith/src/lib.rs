@@ -24,6 +24,7 @@
 #![warn(missing_docs)]
 
 mod assembly;
+mod catalog;
 mod checksum;
 mod config;
 mod diagnostics;
@@ -34,7 +35,9 @@ mod inspect;
 mod lockfile;
 mod manifest;
 mod merge;
+mod patch;
 mod peer;
+mod pin;
 #[cfg(feature = "bench-profile")]
 #[doc(hidden)]
 pub mod profile;
@@ -42,6 +45,7 @@ mod reconcile;
 mod recovery;
 mod registry;
 mod repair;
+mod schema;
 mod scope;
 mod source;
 mod verify;

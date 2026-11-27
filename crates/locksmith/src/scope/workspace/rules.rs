@@ -2,9 +2,11 @@
 //! catalog pins and importer edges required by the edited rules.
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::error::missing;
 use crate::scope::importer_dependency;
-use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, reconcile};
-use reconcile::{metadata, missing};
+use crate::{
+    LockfileError, Value, WorkspaceConfig, catalog, graph, manifest, pin, reconcile, schema,
+};
 
 #[derive(PartialEq, Eq)]
 pub(in crate::scope) enum RootChoice {
@@ -25,7 +27,7 @@ pub(in crate::scope) fn checked_overrides(
     config: &WorkspaceConfig,
     root: Option<&Value>,
 ) -> Result<Option<Value>, LockfileError> {
-    let expected = metadata::effective_overrides(config, root)?;
+    let expected = manifest::effective_overrides(config, root)?;
     let actual = doc.get("overrides");
     let mut header = serde_json::json!({});
     if let Some(ref value) = expected {
@@ -49,7 +51,7 @@ pub(super) fn catalogs(
     let mut choices = RootChoices::new();
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
     for (id, root) in graph::section(docs[1], "importers").into_iter().flatten() {
-        for group in manifest::GROUPS {
+        for group in schema::DEPENDENCY_GROUPS {
             for (name, dep) in graph::section(root, group).into_iter().flatten() {
                 if let Some(catalog) = dep["specifier"].as_str().and_then(catalog_name) {
                     consumers
@@ -83,9 +85,9 @@ pub(super) fn catalogs(
                         return Err(error());
                     };
                     if v["specifier"].as_str() != Some(spec)
-                        || !v["version"].as_str().is_some_and(|pin| {
-                            metadata::catalog_version_fits(spec, pin, Some(spec))
-                        })
+                        || !v["version"]
+                            .as_str()
+                            .is_some_and(|pin| catalog::version_fits(spec, pin, Some(spec)))
                     {
                         return Err(error());
                     }
@@ -99,13 +101,7 @@ pub(super) fn catalogs(
                     .flatten();
                 for (id, group, dep) in users.clone() {
                     if !dep["version"].as_str().is_some_and(|pin| {
-                        metadata::catalog_consumer_fits(
-                            name,
-                            spec,
-                            pin,
-                            Some(installed),
-                            Some(configs[1]),
-                        )
+                        catalog::consumer_fits(name, spec, pin, Some(installed), Some(configs[1]))
                     }) {
                         return Err(missing(
                             &["importers", id, group, name],
@@ -115,7 +111,7 @@ pub(super) fn catalogs(
                 }
                 // pnpm may omit the catalog record for an existing exact
                 // release. A new consumer can use that same locked release.
-                let (target, range) = manifest::alias(spec).unwrap_or((name, spec));
+                let (target, range) = pin::alias(spec).unwrap_or((name, spec));
                 if before == after
                     && base.is_none()
                     && range.parse::<node_semver::Version>().is_ok()
@@ -128,27 +124,27 @@ pub(super) fn catalogs(
                 }
                 if let (Some(before), Some(pin)) =
                     (before, base.and_then(|v| v["version"].as_str()))
-                    && manifest::alias(before).map(|a| a.0) == manifest::alias(spec).map(|a| a.0)
-                    && metadata::catalog_version_fits(spec, pin, Some(before))
+                    && pin::alias(before).map(|a| a.0) == pin::alias(spec).map(|a| a.0)
+                    && catalog::version_fits(spec, pin, Some(before))
                 {
-                    let target = manifest::alias(spec).map_or(name.as_str(), |(n, _)| n);
+                    let target = pin::alias(spec).map_or(name.as_str(), |(n, _)| n);
                     let key = format!("{target}@{pin}");
                     // A peer-free snapshot can serve a new importer directly. A
                     // contextual instance needs evidence from that consumer.
                     let portable = docs[0]["snapshots"].get(&key).is_some()
                         && !affected.contains(&key)
                         && reconcile::peer_names(docs[0], &key).is_empty();
-                    let reference = reconcile::reference(name, &key);
+                    let reference = pin::reference(name, &key);
                     let fits = |dep: &Value| {
                         dep["version"]
                             .as_str()
-                            .is_some_and(|v| graph::package_key(v) == reference)
+                            .is_some_and(|v| pin::package_key(v) == reference)
                     };
                     let retains_own_pin = |id: &str| {
                         importer_dependency(docs[0], id, name)
                             .and_then(|(_, dep)| dep["version"].as_str())
                             .is_some_and(|p| {
-                                metadata::catalog_consumer_fits(
+                                catalog::consumer_fits(
                                     name,
                                     spec,
                                     p,
@@ -236,7 +232,7 @@ pub(super) fn importer_choices(
         let Some(current) = docs[1]["importers"].get(id) else {
             continue;
         };
-        let names: BTreeSet<_> = manifest::GROUPS
+        let names: BTreeSet<_> = schema::DEPENDENCY_GROUPS
             .into_iter()
             .flat_map(|g| {
                 [root, current]
@@ -286,9 +282,9 @@ pub(super) fn importer_choices(
                     };
                     let accepts = |dep: &Value, doc: &Value| {
                         dep["version"].as_str().is_some_and(|pin| {
-                            reconcile::accepts(name, effective, pin, doc, Some(configs[1]))
+                            catalog::accepts_pin(name, effective, pin, doc, Some(configs[1]))
                                 || (effective.parse::<node_semver::Range>().is_err()
-                                    && manifest::alias(effective).is_none()
+                                    && pin::alias(effective).is_none()
                                     && dep == right)
                         })
                     };
@@ -300,13 +296,7 @@ pub(super) fn importer_choices(
                     }
                     let fits_catalog = entry.is_none()
                         || left["version"].as_str().is_some_and(|p| {
-                            metadata::catalog_consumer_fits(
-                                name,
-                                effective,
-                                p,
-                                entry,
-                                Some(configs[1]),
-                            )
+                            catalog::consumer_fits(name, effective, p, entry, Some(configs[1]))
                         });
                     if accepts(left, docs[0]) && fits_catalog {
                         RootChoice::Baseline
@@ -337,10 +327,10 @@ pub(in crate::scope) fn check_installed_rules(
     let current = manifest::Overrides::new(donor, after);
     let mut samples = std::collections::HashMap::new();
     for (key, body) in graph::section(base, "snapshots").into_iter().flatten() {
-        samples.entry(graph::package_key(key)).or_insert(body);
+        samples.entry(pin::package_key(key)).or_insert(body);
     }
     for (key, body) in graph::section(donor, "snapshots").into_iter().flatten() {
-        let pkg = graph::package_key(key);
+        let pkg = pin::package_key(key);
         let Some((parent, version)) = pkg.rsplit_once('@') else {
             continue;
         };
@@ -409,8 +399,8 @@ pub(in crate::scope) fn check_installed_rules(
                 (None, p) => p.is_none(),
                 (Some(_), None) => required.is_none() || expected[1][1].contains_key(name),
                 (Some(s), Some((_, p))) if overridden || previous_edge.is_none() => {
-                    s.parse::<node_semver::Range>().is_err() && manifest::alias(s).is_none()
-                        || reconcile::accepts(name, s, p, donor, Some(after))
+                    s.parse::<node_semver::Range>().is_err() && pin::alias(s).is_none()
+                        || catalog::accepts_pin(name, s, p, donor, Some(after))
                 }
                 _ => true,
             };

@@ -1,7 +1,11 @@
 //! Test scoped peer candidates in pnpm identity order, within a fixed search budget.
 use super::{Bindings, optional_requirement};
-use crate::peer::identity::{HashStyle, digest, peer_id};
 use crate::{LinkedPeerEncoding, Value, graph};
+use crate::{
+    checksum::{HashStyle, digest},
+    peer::identity::peer_id,
+    pin,
+};
 use sha2::{Digest, Sha256};
 use std::{
     cell::OnceCell,
@@ -50,7 +54,7 @@ pub(super) fn recover(
                         let mut versions: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
                         for value in values {
                             versions
-                                .entry(graph::package_key(value))
+                                .entry(pin::package_key(value))
                                 .or_default()
                                 .push(value);
                         }

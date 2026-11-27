@@ -1,5 +1,8 @@
 //! Resolve local dependencies against the final workspace manifests.
-use crate::{LockfileError, Value, WorkspaceConfig, graph, manifest, reconcile::missing};
+use crate::{
+    LockfileError, Value, WorkspaceConfig, error::missing, graph, manifest, pin,
+    pin::workspace_request,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
@@ -15,13 +18,6 @@ pub(crate) struct WorkspaceLinks<'a> {
     manifests: &'a BTreeMap<String, Value>,
     config: &'a WorkspaceConfig,
     by_name: HashMap<&'a str, Vec<&'a str>>,
-}
-
-pub(crate) fn workspace_request<'a>(name: &'a str, request: &'a str) -> (&'a str, &'a str) {
-    request
-        .rsplit_once('@')
-        .filter(|(n, _)| !n.is_empty())
-        .unwrap_or((name, request))
 }
 
 fn local_version_matches(selector: &str, version: Option<&str>) -> bool {
@@ -111,7 +107,7 @@ impl<'a> FrozenWorkspace<'a> {
         let (target, pinned_name) = if let Some(path) = version.strip_prefix("link:") {
             (graph::linked_importer(importer, path), None)
         } else {
-            let (package, path) = graph::file_pin(name, version).ok_or_else(mismatch)?;
+            let (package, path) = pin::file_pin(name, version).ok_or_else(mismatch)?;
             let resolution = &document["packages"][format!("{package}@file:{path}")]["resolution"];
             let directory = resolution["directory"].as_str().ok_or_else(mismatch)?;
             let target = graph::linked_importer(".", path);
@@ -319,7 +315,7 @@ impl<'a> WorkspaceLinks<'a> {
                 return Ok(None);
             };
             let accepts_any = workspace.is_some() && matches!(range, "" | "*" | "^" | "~");
-            if !(accepts_any || manifest::matches_version(range, package["version"].as_str())) {
+            if !(accepts_any || pin::matches_version(range, package["version"].as_str())) {
                 return Ok(None);
             }
             link_directory(&target, package)

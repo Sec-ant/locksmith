@@ -39,6 +39,18 @@ pub struct ValidationIssue {
     pub message: String,
 }
 
+pub(crate) fn issue(
+    kind: DocumentKind,
+    path: &[&str],
+    message: impl Into<String>,
+) -> ValidationIssue {
+    ValidationIssue {
+        document: kind,
+        path: path.iter().map(|s| (*s).into()).collect(),
+        message: message.into(),
+    }
+}
+
 /// Input, resolution and output failures reported by lockfile operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LockfileError {
@@ -108,5 +120,13 @@ pub enum LockfileError {
 impl From<serde_saphyr::Error> for LockfileError {
     fn from(error: serde_saphyr::Error) -> Self {
         Self::Parse(Box::new(error))
+    }
+}
+
+pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileError {
+    LockfileError::ResolutionRequired {
+        request: None,
+        path: path.iter().map(|s| (*s).into()).collect(),
+        message: message.into(),
     }
 }

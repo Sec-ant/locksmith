@@ -1,5 +1,6 @@
 use locksmith::{ConflictKind, DocumentKind, Lockfile, LockfileError, Value, merge};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn lock(value: Value) -> Lockfile {
     Lockfile::parse(&serde_json::to_string(&value).unwrap()).unwrap()
@@ -18,6 +19,43 @@ fn graph(importers: Value, snapshots: Value) -> Value {
 
 fn dep(version: &str) -> Value {
     json!({"specifier":version.split('(').next().unwrap(),"version":version})
+}
+
+#[test]
+fn workspace_validation_checks_pnpmfile_checksum_with_effective_manifests() {
+    // SHA-256 over the two distinct pnpmfile contents.
+    let recorded = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+    let changed = "sha256-LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=";
+    let project = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
+    let manifests = BTreeMap::from([(".".into(), json!({}))]);
+    for (lock_checksum, configured, matches) in [
+        (None, json!({}), true),
+        (Some(recorded), json!({"pnpmfileChecksum": recorded}), true),
+        (Some(recorded), json!({"pnpmfileChecksum": changed}), false),
+        (Some(recorded), json!({}), false),
+        (None, json!({"pnpmfileChecksum": recorded}), false),
+    ] {
+        let mut document = project.clone();
+        if let Some(checksum) = lock_checksum {
+            document["pnpmfileChecksum"] = json!(checksum);
+        }
+        let result = lock(document).validate_workspace(
+            &manifests,
+            &BTreeSet::new(),
+            &locksmith::WorkspaceConfig::from_pnpm(&configured).unwrap(),
+            &BTreeMap::new(),
+            |_| Ok(None),
+        );
+        if matches {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result,
+                Err(LockfileError::ManifestMismatch { message, .. })
+                    if message.contains("pnpmfileChecksum")
+            ));
+        }
+    }
 }
 
 #[test]

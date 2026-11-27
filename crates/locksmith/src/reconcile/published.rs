@@ -7,10 +7,12 @@ use std::{
 use indexmap::IndexMap;
 use serde_json::{Map, json};
 
-use super::{MergeContext, accepts, desired_patch, missing, reference};
+use super::MergeContext;
 use crate::{
     LockfileError, RegistryMetadata, RegistryRequest, Value, WorkspaceConfig, graph, manifest,
+    patch, pin, schema,
 };
+use crate::{catalog::accepts_pin, error::missing, patch::desired_hash, pin::reference};
 
 // These pnpm releases started recording a declared peer even when only its
 // ordinary dependency supplied it in the resolved graph (pnpm issue #17056).
@@ -280,7 +282,7 @@ pub(crate) fn declaration(
     name: &str,
     reason: &str,
 ) -> Result<Option<String>, LockfileError> {
-    let key = graph::package_key(key);
+    let key = pin::package_key(key);
     let path = if group == "peerDependencies" {
         vec!["packages", key, group, name]
     } else {
@@ -368,7 +370,7 @@ pub(crate) fn records(
                 .into_iter()
                 .flat_map(|m| m.keys())
             {
-                if let Some((name, _)) = graph::package_key(key).rsplit_once('@')
+                if let Some((name, _)) = pin::package_key(key).rsplit_once('@')
                     && needed.contains(name)
                     && compatible.accepts(key)
                 {
@@ -380,9 +382,9 @@ pub(crate) fn records(
     let locked = |name: &str, spec: &str, request: &RegistryRequest| -> Option<String> {
         index.get(request.name())?.iter().find_map(|key| {
             let value = reference(name, key);
-            (accepts(name, spec, &value, metadata, Some(config))
-                && desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
-                    == Some(crate::peer::patch(key)))
+            (accepts_pin(name, spec, &value, metadata, Some(config))
+                && desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
+                    == Some(patch::hash_in_key(key)))
             .then_some(value)
         })
     };
@@ -439,11 +441,11 @@ pub(crate) fn records(
                     // Another importer may supply this peer under a different
                     // selector. The workspace resolver applies its actual scope.
                     registry.selections.get(req.name())?.values().find(|key| {
-                        accepts(name, spec, &reference(name, key), metadata, Some(config))
+                        accepts_pin(name, spec, &reference(name, key), metadata, Some(config))
                     })
                 })?;
                 let hash =
-                    desired_patch(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
+                    desired_hash(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
                 let locator =
                     hash.map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
                 Some(reference(name, &locator))
@@ -454,10 +456,11 @@ pub(crate) fn records(
                 && value.is_none()
                 && (optional
                     || !config.resolution.lock.auto_install_peers
-                    || context
-                        .manifests
-                        .values()
-                        .any(|m| manifest::GROUPS.iter().any(|g| m[g].get(name).is_some())))
+                    || context.manifests.values().any(|m| {
+                        schema::DEPENDENCY_GROUPS
+                            .iter()
+                            .any(|g| m[g].get(name).is_some())
+                    }))
             {
                 continue;
             }
@@ -487,7 +490,7 @@ pub(crate) fn records(
             };
             body[field][name] = value.into();
         }
-        let hash = desired_patch(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
+        let hash = desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
             .ok_or_else(|| missing(&["patchedDependencies", key], "competing patch selectors"))?;
         let instance = hash.map_or_else(|| key.clone(), |h| format!("{key}(patch_hash={h})"));
         output["packages"][key] = package;

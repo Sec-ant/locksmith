@@ -1,6 +1,9 @@
 //! Explicit workspace inputs and the pnpm configuration decoder.
-use crate::{LockfileError, Value};
+use crate::{LockfileError, Value, error::missing, pin};
 use std::collections::BTreeMap;
+
+const INCLUDE_RESOLUTION_SETTINGS: &str = "lockfile.includeResolutionSettings";
+const INTEGRITY_TARGET: &str = "lockfile.integrityTarget";
 
 /// Which declaration wins when matching override ranges have equal priority.
 /// pnpm 9–11 prefer the last matching declaration; pnpm 12 prefers the first.
@@ -405,6 +408,103 @@ impl WorkspaceConfig {
         settings
     }
 
+    pub(crate) fn check_recorded_peer_suffix(&self, doc: &Value) -> Result<(), LockfileError> {
+        let key = "peersSuffixMaxLength";
+        let default_suffix = Value::from(1000);
+        let expected = self
+            .resolution
+            .parameters
+            .get(key)
+            .unwrap_or(&default_suffix);
+        Self::check_recorded_setting(&doc["settings"], key, expected, &default_suffix)
+    }
+
+    pub(crate) fn check_recorded_settings(&self, doc: &Value) -> Result<(), LockfileError> {
+        self.check_recorded_peer_suffix(doc)?;
+        let settings = &doc["settings"];
+        let major = self.pnpm_version.as_ref().map(|v| v.major());
+        let disabled = Value::Bool(false);
+        for (key, expected, supported) in [
+            (
+                "injectWorkspacePackages",
+                &Value::Bool(self.resolution.inject_workspace_packages),
+                major.is_none_or(|m| m >= 10),
+            ),
+            (
+                "addMissingPeerTypes",
+                self.resolution
+                    .parameters
+                    .get("addMissingPeerTypes")
+                    .unwrap_or(&disabled),
+                major.is_none_or(|m| m >= 12),
+            ),
+        ] {
+            if supported {
+                Self::check_recorded_setting(settings, key, expected, &disabled)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_recorded_setting(
+        settings: &Value,
+        key: &str,
+        expected: &Value,
+        default: &Value,
+    ) -> Result<(), LockfileError> {
+        if settings.get(key).unwrap_or(default) != expected {
+            return Err(missing(
+                &["settings", key],
+                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn frozen_settings_mismatch(&self, document: &Value) -> Option<&'static str> {
+        let settings = &document["settings"];
+        let parameters = &self.resolution.parameters;
+        let version = self.pnpm_version.as_ref();
+        if parameters.get(INCLUDE_RESOLUTION_SETTINGS) == Some(&Value::Bool(true))
+            && version.is_none_or(|version| version >= &node_semver::Version::from((12, 10, 0)))
+        {
+            let enabled = Value::Bool(true);
+            let disabled = Value::Bool(false);
+            let expected = [
+                ("autoDedupe", &Value::Bool(self.auto_dedupe)),
+                (
+                    "dedupeInjectedDeps",
+                    parameters.get("dedupeInjectedDeps").unwrap_or(&enabled),
+                ),
+                (
+                    "dedupePeerDependents",
+                    &Value::Bool(self.resolution.dedupe_peer_dependents),
+                ),
+                (
+                    "linkWorkspacePackages",
+                    parameters.get("linkWorkspacePackages").unwrap_or(&disabled),
+                ),
+            ];
+            for (name, value) in expected {
+                if settings.get(name) != Some(value) {
+                    return Some(name);
+                }
+            }
+        }
+        let recorded_integrity = settings
+            .get("integrityTarget")
+            .map_or(Some("resource"), Value::as_str);
+        let configured_integrity = parameters
+            .get(INTEGRITY_TARGET)
+            .map_or(Some("resource"), Value::as_str);
+        if version.is_none_or(|version| version >= &node_semver::Version::from((12, 15, 0)))
+            && recorded_integrity != configured_integrity
+        {
+            return Some("integrityTarget");
+        }
+        None
+    }
+
     pub(crate) fn matches_optional_header_for_repair(
         &self,
         document: &Value,
@@ -502,6 +602,33 @@ impl WorkspaceConfig {
         let dedupe_peer_dependents = decode(value, "dedupePeerDependents")?.unwrap_or(true);
         let project_scoped_optional_peers =
             decode(value, "projectScopedOptionalPeers")?.unwrap_or(false);
+        let mut parameters: BTreeMap<_, _> = [
+            "peersSuffixMaxLength",
+            "addMissingPeerTypes",
+            "linkWorkspacePackages",
+            "preferWorkspacePackages",
+        ]
+        .into_iter()
+        .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
+        .collect();
+        if decode::<bool>(value, "dedupeInjectedDeps")? == Some(false) {
+            parameters.insert("dedupeInjectedDeps".into(), Value::Bool(false));
+        }
+        let lockfile = &value["lockfile"];
+        if decode::<bool>(lockfile, "includeResolutionSettings")? == Some(true) {
+            parameters.insert(INCLUDE_RESOLUTION_SETTINGS.into(), Value::Bool(true));
+        }
+        match decode::<String>(lockfile, "integrityTarget")?.as_deref() {
+            None | Some("resource") => {}
+            Some("tar") => {
+                parameters.insert(INTEGRITY_TARGET.into(), Value::String("tar".into()));
+            }
+            Some(_) => {
+                return Err(LockfileError::InvalidDocument(format!(
+                    "pnpm configuration {INTEGRITY_TARGET}: expected resource or tar"
+                )));
+            }
+        }
         Ok(Self {
             auto_dedupe: decode(value, "autoDedupe")?.unwrap_or(false),
             resolution: ResolutionSettings {
@@ -529,15 +656,7 @@ impl WorkspaceConfig {
                     (!patterns.is_empty()).then(|| Value::from(patterns))
                 },
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
-                parameters: [
-                    "peersSuffixMaxLength",
-                    "addMissingPeerTypes",
-                    "linkWorkspacePackages",
-                    "preferWorkspacePackages",
-                ]
-                .into_iter()
-                .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
-                .collect(),
+                parameters,
             },
             catalogs,
             config_registries,
@@ -728,6 +847,11 @@ impl<'a> ResolutionCompatibility<'a> {
         target: &'a ResolutionSettings,
         document: &'a Value,
     ) -> Self {
+        let affects_resolution = |(key, value): &(&String, &Value)| {
+            // The flag controls recording and frozen checks; it changes no pins.
+            key.as_str() != INCLUDE_RESOLUTION_SETTINGS
+                && (key.as_str() != "linkWorkspacePackages" || *value == "deep")
+        };
         let global = source.lock == target.lock
             && source.dedupe_peer_dependents == target.dedupe_peer_dependents
             && source.optional_peer_scope == target.optional_peer_scope
@@ -738,11 +862,8 @@ impl<'a> ResolutionCompatibility<'a> {
             && source
                 .parameters
                 .iter()
-                .filter(|(k, v)| k.as_str() != "linkWorkspacePackages" || *v == "deep")
-                .eq(target
-                    .parameters
-                    .iter()
-                    .filter(|(k, v)| k.as_str() != "linkWorkspacePackages" || *v == "deep"));
+                .filter(affects_resolution)
+                .eq(target.parameters.iter().filter(affects_resolution));
         let mut result = Self {
             global,
             extensions: BTreeMap::new(),
@@ -784,12 +905,12 @@ impl<'a> ResolutionCompatibility<'a> {
     }
 
     pub(crate) fn accepts(&self, key: &str) -> bool {
-        self.unchanged(key) || self.additions.contains_key(crate::graph::package_key(key))
+        self.unchanged(key) || self.additions.contains_key(pin::package_key(key))
     }
 
     pub(crate) fn additions(&self, key: &str) -> &[ExtensionAddition<'a>] {
         self.additions
-            .get(crate::graph::package_key(key))
+            .get(pin::package_key(key))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -797,7 +918,7 @@ impl<'a> ResolutionCompatibility<'a> {
         if !self.global {
             return None;
         }
-        let (name, version) = crate::graph::package_key(key).rsplit_once('@')?;
+        let (name, version) = pin::package_key(key).rsplit_once('@')?;
         let rules = self.extensions.get(name)?;
         Some([
             extension_fields(&rules[0], name, version)?,
@@ -840,7 +961,7 @@ impl<'a> ResolutionCompatibility<'a> {
         if self.extensions.is_empty() || key.starts_with("link:") {
             return true;
         }
-        let Some((name, version)) = crate::graph::package_key(key).rsplit_once('@') else {
+        let Some((name, version)) = pin::package_key(key).rsplit_once('@') else {
             return false;
         };
         let Some(rules) = self.extensions.get(name) else {

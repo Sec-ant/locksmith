@@ -10,7 +10,7 @@ use serde::{
 use serde_json::Map;
 use serde_saphyr::Spanned;
 
-use crate::{DocumentKind, LockfileError, Value};
+use crate::{DocumentKind, LockfileError, Value, schema};
 
 pub(crate) const SECTIONS: [&str; 3] = ["importers", "packages", "snapshots"];
 
@@ -133,7 +133,7 @@ impl Source {
                 serde_saphyr::from_str_with_options(part, options(part.len()))?;
             let kind = document_kind(&mut parsed.value, &documents)?;
             if let Some(packages) = parsed.value.get("packages").and_then(Value::as_object) {
-                crate::graph::check_peer_declarations(kind, packages)?;
+                crate::schema::check_peer_declarations(kind, packages)?;
             }
             layouts.insert(kind, layout(Arc::clone(&normalized), range, &parsed));
             documents.insert(kind, Arc::new(Value::Object(parsed.value)));
@@ -161,8 +161,9 @@ pub(crate) fn document_ranges(text: &str) -> Vec<Range<usize>> {
         let end = text[offset..]
             .find('\n')
             .map_or(text.len(), |newline| offset + newline + 1);
-        let suffix = text[offset + 3..end].trim_end();
-        if suffix.is_empty() || suffix.starts_with(" #") {
+        let suffix = text[offset + 3..end].trim_end_matches(['\r', '\n']);
+        let indicator = suffix.trim_start_matches([' ', '\t']);
+        if indicator.is_empty() || (suffix.starts_with([' ', '\t']) && indicator.starts_with('#')) {
             parts.push(start..offset);
             start = end;
         }
@@ -307,7 +308,7 @@ fn layout(text: Arc<String>, range: Range<usize>, parsed: &ParsedMap) -> Layout 
 }
 
 fn ordered_importer(record: &Value) -> bool {
-    crate::manifest::GROUPS.into_iter().all(|group| {
+    schema::DEPENDENCY_GROUPS.into_iter().all(|group| {
         record
             .get(group)
             .and_then(Value::as_object)
@@ -416,7 +417,7 @@ pub(crate) fn render(
             let original = source.documents.get(&kind)?;
             if original.get(key)? != value
                 || !source.reusable_field(kind, key, preserve_baseline && i == 0, order.is_some())
-                || (key == "overrides" && !crate::manifest::same_override_order(original, document))
+                || (key == "overrides" && !schema::same_override_order(original, document))
             {
                 return None;
             }

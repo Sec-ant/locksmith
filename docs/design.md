@@ -169,7 +169,7 @@ For `merge --context FILE`, supply JSON like the following. The root workspace p
 }
 ```
 
-`configurations` contains the base, ours, and theirs settings in order. For a pnpm upgrade, include the root `packageManager` string from each revision in its settings entry. Entries without it use the final root manifest's version. Among compatible graphs, Locksmith prefers one produced by the final pnpm version. `configuration` holds the merged settings. `patches` maps each configured patch path to its file contents. The Git driver collects these inputs automatically. If a required project file is conflicted, it names the file and leaves the lock unmerged.
+`configurations` contains the base, ours, and theirs settings in order. For a pnpm upgrade, include the root `packageManager` string from each revision in its settings entry. Entries without it use the final root manifest's version. Among compatible graphs, Locksmith prefers one produced by the final pnpm version. `configuration` holds the merged settings. `patches` maps each configured patch path to its file contents. You can omit `patches` when the workspace has no configured patches. The Git driver collects these inputs automatically. If a required project file is conflicted, it names the file and leaves the lock unmerged.
 
 ### Worked example
 

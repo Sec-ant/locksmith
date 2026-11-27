@@ -9,7 +9,7 @@ use serde_json::Map;
 use serde_saphyr::Spanned;
 
 use super::{document_ranges, options, yaml};
-use crate::{DocumentKind, Lockfile, LockfileError, Value};
+use crate::{DocumentKind, Lockfile, LockfileError, Value, schema};
 
 struct Locations(Vec<Spanned<String>>);
 
@@ -173,7 +173,7 @@ pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, Lockfi
     let result = Lockfile::try_from(output)?;
     if result.project() != Some(after)
         || result.document(DocumentKind::Environment) != lock.environment()
-        || !crate::manifest::same_override_order(after, result.project().expect("verified project"))
+        || !schema::same_override_order(after, result.project().expect("verified project"))
     {
         return Err(LockfileError::OutputMismatch);
     }
