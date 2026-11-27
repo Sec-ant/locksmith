@@ -209,7 +209,7 @@ fn three_way(
                     snapshots.insert(key, value);
                 }
             }
-            crate::assembly::complete(&mut document, kind, None, &mut context.conflicts)?;
+            graph::complete(&mut document, kind, None, &mut context.conflicts)?;
             if kind == DocumentKind::Project && context.conflicts.is_empty() {
                 graph::refresh_merged_optional(
                     &mut document,

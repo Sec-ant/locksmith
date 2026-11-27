@@ -260,7 +260,7 @@ impl WorkspaceConfig {
         recorded: Option<node_semver::Version>,
     ) -> Option<node_semver::Version> {
         let modern_runner = recorded.as_ref().filter(|v| v.major() >= 11);
-        let Some(manager) = crate::manifest::PnpmManager::declared(manifest, modern_runner) else {
+        let Some(manager) = crate::schema::PnpmManager::declared(manifest, modern_runner) else {
             return recorded;
         };
         // A range describes the desired runner. The lock records which runner produced these settings.
@@ -814,7 +814,7 @@ pub(crate) fn extension_fields<'a>(
 ) -> Option<ExtensionFields<'a>> {
     let mut fields: ExtensionFields<'a> = Default::default();
     for (selector, extension) in rules {
-        if crate::manifest::parent_matches(selector, name, version) {
+        if crate::schema::parent_matches(selector, name, version) {
             for (i, group) in EXTENSION_GROUPS.iter().enumerate() {
                 if let Some(values) = extension.get(*group) {
                     for (dep, value) in values.as_object()? {
@@ -881,13 +881,13 @@ impl<'a> ResolutionCompatibility<'a> {
                 continue;
             };
             for (selector, extension) in extensions {
-                let (_, name, _) = crate::manifest::override_selector(selector);
+                let (_, name, _) = crate::schema::override_selector(selector);
                 result.extensions.entry(name).or_default()[side].push((selector, extension));
             }
         }
         result.extensions.retain(|_, rules| rules[0] != rules[1]);
         if result.global && !result.extensions.is_empty() {
-            for (key, _) in crate::graph::section(document, "packages")
+            for (key, _) in crate::schema::section(document, "packages")
                 .into_iter()
                 .flatten()
             {
@@ -970,7 +970,7 @@ impl<'a> ResolutionCompatibility<'a> {
         // Preserve declaration order: pnpm applies the first extension's field
         // values before later matching extensions fill in missing fields.
         let applicable =
-            |rule: &&(&str, &Value)| crate::manifest::parent_matches(rule.0, name, version);
+            |rule: &&(&str, &Value)| crate::schema::parent_matches(rule.0, name, version);
         rules[0]
             .iter()
             .filter(applicable)

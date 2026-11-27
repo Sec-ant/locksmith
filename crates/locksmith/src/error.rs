@@ -130,3 +130,15 @@ pub(crate) fn missing(path: &[&str], message: impl Into<String>) -> LockfileErro
         message: message.into(),
     }
 }
+
+pub(crate) fn mismatch(
+    importer: &str,
+    side: &'static str,
+    message: impl Into<String>,
+) -> LockfileError {
+    LockfileError::ManifestMismatch {
+        importer: importer.into(),
+        side,
+        message: message.into(),
+    }
+}

@@ -1,6 +1,6 @@
 //! Resolve the final workspace against locked graphs and supplied release metadata.
 mod assembly;
-mod bootstrap;
+pub(crate) mod bootstrap;
 mod dedupe;
 mod expand;
 mod importers;
@@ -420,7 +420,7 @@ fn resolve_sources(
             }
         }
         let mut conflicts = Vec::new();
-        crate::assembly::complete(&mut output, DocumentKind::Project, None, &mut conflicts)?;
+        graph::complete(&mut output, DocumentKind::Project, None, &mut conflicts)?;
         if let Some(times) = metadata::publication_times(
             &output,
             branch_order.map(|i| docs[i]),

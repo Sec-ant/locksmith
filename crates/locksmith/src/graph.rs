@@ -44,9 +44,7 @@ impl DependencyClosure {
     }
 }
 
-pub(crate) fn section<'a>(document: &'a Value, key: &str) -> Option<&'a Map<String, Value>> {
-    document.get(key).and_then(Value::as_object)
-}
+pub(crate) use schema::{linked_importer, section, snapshot_key};
 
 pub(crate) fn dependency<'a>(body: &'a Value, name: &str) -> Option<(&'static str, &'a str)> {
     ["dependencies", "optionalDependencies"]
@@ -68,24 +66,6 @@ pub(crate) fn keys(document: &Value, key: &str) -> BTreeSet<String> {
         .flatten()
         .map(|(key, _)| key.clone())
         .collect()
-}
-
-/// pnpm writes npm aliases and remote/file references as either a full key or
-/// a version relative to the dependency name. Peer and patch suffixes stay intact.
-pub(crate) fn snapshot_key(
-    name: &str,
-    reference: &str,
-    snapshots: Option<&Map<String, Value>>,
-) -> String {
-    let mut named = String::with_capacity(name.len() + 1 + reference.len());
-    named.push_str(name);
-    named.push('@');
-    named.push_str(reference);
-    if snapshots.is_some_and(|map| map.contains_key(reference) && !map.contains_key(&named)) {
-        reference.into()
-    } else {
-        named
-    }
 }
 
 pub(crate) fn references<'a>(
@@ -149,24 +129,6 @@ pub(crate) fn references<'a>(
         }
     }
     result
-}
-
-pub(crate) fn linked_importer(from: &str, target: &str) -> String {
-    let mut segments = Vec::new();
-    for segment in from.split('/').chain(target.split('/')) {
-        match segment {
-            "" | "." => {}
-            ".." if segments.last().is_some_and(|last| *last != "..") => {
-                segments.pop();
-            }
-            other => segments.push(other),
-        }
-    }
-    if segments.is_empty() {
-        ".".into()
-    } else {
-        segments.join("/")
-    }
 }
 
 /// Resolve importer IDs and publish directories against one fixed workspace graph.
@@ -539,7 +501,7 @@ pub(crate) fn validate_with_unresolved_snapshots(
     ) {
         issues.push(issue(kind, &["settings"], error.to_string()));
     }
-    let overrides = crate::manifest::unconditional_overrides(document);
+    let overrides = schema::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_references(document, importer, kind, "importers", key, &mut issues);
@@ -590,6 +552,32 @@ fn check_references(
             ));
         }
     }
+}
+
+/// Shared completion policy for convergence and merges.
+/// Only reachable graph conflicts survive pruning; other conflicts remain atomic.
+pub(crate) fn complete(
+    document: &mut Value,
+    kind: DocumentKind,
+    baseline: Option<(&Value, Option<&crate::WorkspaceConfig>)>,
+    conflicts: &mut Vec<crate::Conflict>,
+) -> Result<(), LockfileError> {
+    if conflicts.iter().all(|conflict| {
+        conflict.path.len() == 2 && ["packages", "snapshots"].contains(&conflict.path[0].as_str())
+    }) {
+        if let Some((baseline, config)) = baseline {
+            prune_scoped(document, kind, baseline, config)?;
+        } else {
+            prune(document, kind)?;
+        }
+        conflicts.retain(|conflict| {
+            document
+                .get(&conflict.path[0])
+                .and_then(|map| map.get(&conflict.path[1]))
+                .is_some()
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn prune(document: &mut Value, kind: DocumentKind) -> Result<(), LockfileError> {
@@ -752,7 +740,7 @@ fn retain(
     ) {
         issues.push(issue(kind, &["settings"], error.to_string()));
     }
-    let overrides = crate::manifest::unconditional_overrides(document);
+    let overrides = schema::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_catalogs(document, &links, importer, kind, key, config, &mut issues);

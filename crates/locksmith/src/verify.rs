@@ -108,7 +108,7 @@ impl<'de> Visitor<'de> for Expected<'_> {
         let mut override_order: BTreeMap<_, BTreeMap<_, VecDeque<_>>> = BTreeMap::new();
         if self.ordered {
             for key in expected.keys() {
-                let (name, parent) = crate::manifest::override_scope(key);
+                let (name, parent) = crate::schema::override_scope(key);
                 override_order
                     .entry(name)
                     .or_default()
@@ -120,7 +120,7 @@ impl<'de> Visitor<'de> for Expected<'_> {
         while let Some(Key(key)) = map.next_key()? {
             let key = key.as_ref();
             if self.ordered {
-                let (name, parent) = crate::manifest::override_scope(key);
+                let (name, parent) = crate::schema::override_scope(key);
                 self.check(
                     override_order
                         .get_mut(name)

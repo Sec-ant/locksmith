@@ -93,7 +93,7 @@ pub(crate) fn from_edges(
             output["snapshots"][key] = body;
         }
     }
-    complete(
+    graph::complete(
         output,
         DocumentKind::Project,
         Some((original, options.configuration)),
@@ -103,32 +103,6 @@ pub(crate) fn from_edges(
         return Err(LockfileError::Conflicts(conflicts));
     }
     Ok(result)
-}
-
-/// Shared completion policy for convergence and merges.
-/// Only reachable graph conflicts survive pruning; other conflicts remain atomic.
-pub(crate) fn complete(
-    document: &mut Value,
-    kind: DocumentKind,
-    baseline: Option<(&Value, Option<&crate::WorkspaceConfig>)>,
-    conflicts: &mut Vec<Conflict>,
-) -> Result<(), LockfileError> {
-    if conflicts.iter().all(|conflict| {
-        conflict.path.len() == 2 && ["packages", "snapshots"].contains(&conflict.path[0].as_str())
-    }) {
-        if let Some((baseline, config)) = baseline {
-            graph::prune_scoped(document, kind, baseline, config)?;
-        } else {
-            graph::prune(document, kind)?;
-        }
-        conflicts.retain(|conflict| {
-            document
-                .get(&conflict.path[0])
-                .and_then(|map| map.get(&conflict.path[1]))
-                .is_some()
-        });
-    }
-    Ok(())
 }
 
 // A registry deprecation notice may change after the immutable artifact was published.
