@@ -151,7 +151,7 @@ pub fn converge_with_recorded_baselines(
                 "installed bootstrap graph differs from the configuration dependencies",
             ));
         }
-        crate::repair::check_recorded_settings(project, config)?;
+        crate::reconcile::metadata::check_recorded_settings(project, config)?;
     }
     if let Some((before, after)) = options.baseline_configuration.zip(options.configuration)
         && before.requires_bootstrap_reconciliation(after, baseline, candidate)
@@ -233,7 +233,7 @@ pub fn converge_with_recorded_baselines(
     let mut result = select(baseline, candidate, inputs, options)?;
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
-        crate::repair::check_recorded_settings(project, config)?;
+        crate::reconcile::metadata::check_recorded_settings(project, config)?;
         let mut plan = crate::extensions::plan(project, config, candidate.project(), None)?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(

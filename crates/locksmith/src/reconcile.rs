@@ -287,7 +287,7 @@ fn resolve_sources(
     });
     let metadata = metadata::resolve(docs, order, context)?;
     if prefer_baseline {
-        crate::repair::check_configuration(docs[2], &metadata, context.configuration)?;
+        metadata::check_repair_configuration(docs[2], &metadata, context.configuration)?;
     }
     let environment = match bootstrap {
         Bootstrap::Select(selected) => Some(bootstrap::environment_source(

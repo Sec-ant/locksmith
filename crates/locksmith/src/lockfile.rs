@@ -230,7 +230,7 @@ impl Lockfile {
                 "dependency settings differ",
             ));
         }
-        crate::repair::check_recorded_settings(document, config)?;
+        crate::reconcile::metadata::check_recorded_settings(document, config)?;
         if let Some(catalogs) = document.get("catalogs") {
             for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
                 crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")

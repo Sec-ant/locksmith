@@ -12,7 +12,6 @@ use std::{
 
 use crate::{
     DocumentKind, Lockfile, LockfileError, RegistryMetadata, Value, WorkspaceConfig, graph,
-    manifest,
     reconcile::{self, MergeContext, missing},
     source::edit,
 };
@@ -165,7 +164,7 @@ impl RepairInput {
             [0, 1, 2],
             &evidence.merge_context(sources.map(|(_, cfg)| cfg)),
         )?;
-        check_configuration(doc, &metadata, context.configuration)?;
+        reconcile::metadata::check_repair_configuration(doc, &metadata, context.configuration)?;
         let mut result = importers::repair(doc, &metadata, &mut evidence)?;
         let roots = context.manifests.keys().cloned().collect();
         loop {
@@ -199,87 +198,6 @@ impl RepairInput {
             Cow::Owned(doc) => edit::project(lock, &doc),
         }
     }
-}
-
-pub(crate) fn check_recorded_settings(
-    doc: &Value,
-    cfg: &WorkspaceConfig,
-) -> Result<(), LockfileError> {
-    let settings = &doc["settings"];
-    let major = cfg.pnpm_version.as_ref().map(|v| v.major());
-    let parameters = &cfg.resolution.parameters;
-    let default_suffix = Value::from(1000);
-    let disabled = Value::Bool(false);
-    for (key, expected, default, supported) in [
-        (
-            "peersSuffixMaxLength",
-            parameters
-                .get("peersSuffixMaxLength")
-                .unwrap_or(&default_suffix),
-            &default_suffix,
-            true,
-        ),
-        (
-            "injectWorkspacePackages",
-            &Value::Bool(cfg.resolution.inject_workspace_packages),
-            &disabled,
-            major.is_none_or(|m| m >= 10),
-        ),
-        (
-            "addMissingPeerTypes",
-            parameters.get("addMissingPeerTypes").unwrap_or(&disabled),
-            &disabled,
-            major.is_none_or(|m| m >= 12),
-        ),
-    ] {
-        if supported && settings.get(key).unwrap_or(default) != expected {
-            return Err(missing(
-                &["settings", key],
-                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn check_configuration(
-    doc: &Value,
-    metadata: &Value,
-    cfg: &WorkspaceConfig,
-) -> Result<(), LockfileError> {
-    let mismatch = |field| {
-        missing(
-            &[field],
-            "workspace configuration differs from the lock; its effects extend beyond a broken record",
-        )
-    };
-    if cfg.read_lock_settings(doc)? != cfg.read_lock_settings(metadata)? {
-        return Err(mismatch("settings"));
-    }
-    check_recorded_settings(doc, cfg)?;
-    if !manifest::same_overrides(doc, metadata) {
-        return Err(mismatch("overrides"));
-    }
-    if !reconcile::metadata::same_patch_records(doc, metadata.get("patchedDependencies")) {
-        return Err(mismatch("patchedDependencies"));
-    }
-    if !crate::checksum::extensions_match(
-        cfg,
-        doc.get("packageExtensionsChecksum")
-            .filter(|hash| hash.is_string()),
-    ) {
-        return Err(mismatch("packageExtensionsChecksum"));
-    }
-    if !crate::checksum::hooks_match(
-        cfg.resolution.pnpmfile_checksum.as_ref(),
-        doc.get("pnpmfileChecksum"),
-    ) {
-        return Err(mismatch("pnpmfileChecksum"));
-    }
-    if !cfg.matches_optional_header_for_repair(doc)? {
-        return Err(mismatch("ignoredOptionalDependencies"));
-    }
-    Ok(())
 }
 
 fn fill_missing(
