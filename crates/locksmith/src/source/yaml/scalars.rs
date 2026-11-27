@@ -158,7 +158,7 @@ fn is_plain_safe(code: u32, prev: Option<u32>, inblock: bool) -> bool {
     }
     // change to true on ':[^ ]'
     if prev_is_colon && code_is_ns {
-        return true;
+        return base;
     }
     // ns-plain-char: a non-`#` base character that isn't the `: ` sequence.
     base && code != CHAR_SHARP && (!prev_is_colon || code_is_ns)

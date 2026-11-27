@@ -897,3 +897,62 @@ fn each_snapshot_must_use_the_patch_for_its_own_release() {
         assert!(lock(doc.clone()).validate().is_err(), "{wrong}");
     }
 }
+
+#[test]
+fn flow_scalars_with_colon_indicators_and_signed_leading_dot_floats_roundtrip() {
+    let base = lock(json!({"lockfileVersion":"9.0","importers":{".":{}}}));
+    let ours = lock(json!({
+        "lockfileVersion": "9.0",
+        "importers": {
+            ".": {
+                "dependencies": {
+                    "pkg": {"specifier": "1.0.0", "version": "1.0.0"}
+                }
+            }
+        },
+        "packages": {
+            "pkg@1.0.0": {
+                "resolution": {"integrity": "sha512-pkg"},
+                "engines": {"node": "a:,b"},
+                "cpu": ["a:[b]", "x:]y", "m:{n}", "p:}q"]
+            }
+        },
+        "snapshots": {"pkg@1.0.0": {}},
+        "extra": ["+.5", "-.5", "+.1e2", "-.1e-2"]
+    }));
+    let merged = merge(&base, &ours, &base, None).unwrap();
+    let yaml = merged.to_yaml().unwrap();
+    let reparsed = Lockfile::parse(&yaml).unwrap();
+    assert_eq!(reparsed.project(), ours.project());
+}
+
+#[test]
+fn self_workspace_link_records_dot_path() {
+    let base = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}, app: {}}\n").unwrap();
+    let manifests = std::collections::BTreeMap::from([
+        (".".into(), json!({})),
+        (
+            "app".into(),
+            json!({"name": "app", "version": "1.0.0", "dependencies": {"app": "workspace:*"}}),
+        ),
+    ]);
+    let cfg = locksmith::WorkspaceConfig::default();
+    let merged = merge(
+        &base,
+        &base,
+        &base,
+        Some(&locksmith::MergeContext {
+            configuration: &cfg,
+            configurations: [&cfg; 3],
+            target: locksmith::MergeTarget::Ours,
+            registry: None,
+            manifests: &manifests,
+            patches: &std::collections::BTreeMap::new(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        merged.project().unwrap()["importers"]["app"]["dependencies"]["app"]["version"],
+        "link:."
+    );
+}

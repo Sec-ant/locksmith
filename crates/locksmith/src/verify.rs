@@ -77,7 +77,10 @@ impl<'de> Visitor<'de> for Expected<'_> {
         self.check((self.version && v == 9) || self.value == &Value::from(v))
     }
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<(), E> {
-        self.check((self.version && v == 9.0) || self.value == &Value::from(v))
+        self.check(
+            (self.version && v == 9.0)
+                || serde_json::Number::from_f64(v).is_some_and(|n| self.value == &Value::Number(n)),
+        )
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         let expected = self
@@ -141,5 +144,23 @@ impl<'de> Visitor<'de> for Expected<'_> {
             count += 1;
         }
         self.check(count == expected.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn non_finite_yaml_floats_never_match_null() {
+        let expected = json!({"lockfileVersion": "9.0", "extra": null});
+        for scalar in [".nan", ".NaN", ".inf", "+.inf", "-.inf"] {
+            let yaml = format!("lockfileVersion: '9.0'\nextra: {scalar}\n");
+            assert!(
+                matches!(verify(&yaml, &expected), Err(LockfileError::OutputMismatch)),
+                "unexpectedly accepted {scalar} as null"
+            );
+        }
     }
 }

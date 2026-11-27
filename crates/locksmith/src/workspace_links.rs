@@ -335,6 +335,7 @@ impl<'a> WorkspaceLinks<'a> {
             .chain(to[common..].iter().copied())
             .collect::<Vec<_>>()
             .join("/");
-        Ok(Some((format!("link:{relative}"), package)))
+        let path = if relative.is_empty() { "." } else { &relative };
+        Ok(Some((format!("link:{path}"), package)))
     }
 }

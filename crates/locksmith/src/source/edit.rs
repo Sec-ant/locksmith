@@ -81,11 +81,29 @@ pub(crate) fn parse_for_repair(
     let bom = text.len() - text.trim_start_matches('\u{feff}').len();
     let mut removals = Vec::new();
     let documents = document_ranges(&text[bom..]);
-    for (index, doc) in documents.iter().enumerate() {
+    for doc in &documents {
         let start = bom + doc.start;
         let raw = &text[start..bom + doc.end];
         let Some(fields) = blocks(raw, 0) else {
             continue;
+        };
+        let kind = match fields.iter().find(|(key, _)| key == "importers") {
+            None => Some(DocumentKind::Project),
+            Some((_, range)) => {
+                let slice = &raw[range.clone()];
+                serde_saphyr::from_str_with_options::<Value>(slice, options(slice.len()))
+                    .ok()
+                    .map(|value| {
+                        let root = &value["importers"]["."];
+                        if root.get("configDependencies").is_some()
+                            || root.get("packageManagerDependencies").is_some()
+                        {
+                            DocumentKind::Environment
+                        } else {
+                            DocumentKind::Project
+                        }
+                    })
+            }
         };
         for (section, field) in fields {
             if !matches!(section.as_str(), "packages" | "snapshots") {
@@ -99,9 +117,8 @@ pub(crate) fn parse_for_repair(
             let Some(mut entries) = blocks(body, 1) else {
                 continue;
             };
-            // The project document, when present, follows the bootstrap document.
             let reference =
-                reference.filter(|_| section == "snapshots" && index + 1 == documents.len());
+                reference.filter(|_| section == "snapshots" && kind == Some(DocumentKind::Project));
             entries.sort_by(|(a, _), (b, _)| a.cmp(b));
             for copies in entries
                 .chunk_by(|(a, _), (b, _)| a == b)
@@ -153,16 +170,25 @@ pub(crate) fn parse_for_repair(
 }
 
 pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, LockfileError> {
-    let text = &lock.sources[0].text;
+    let source = lock.sources.first().ok_or_else(|| {
+        LockfileError::InvalidDocument("missing source text for project edit".into())
+    })?;
+    let text = &source.text;
     let bom = text.len() - text.trim_start_matches('\u{feff}').len();
     // A project is last when a separate package-manager environment is present.
-    let range = document_ranges(&text[bom..]).pop().expect("parsed project");
+    let range = document_ranges(&text[bom..]).pop().ok_or_else(|| {
+        LockfileError::InvalidDocument(
+            "cannot isolate the changed project mapping in the original YAML".into(),
+        )
+    })?;
     let start = bom + range.start;
     let end = bom + range.end;
     let raw = &text[start..end];
     let mut output = String::with_capacity(text.len());
     output.push_str(&text[..start]);
-    let before = lock.project().expect("parsed project");
+    let before = lock
+        .project()
+        .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
     if !edit_map(&mut output, raw, before, after, &mut Vec::new(), eol) {
         return Err(LockfileError::InvalidDocument(
@@ -381,5 +407,50 @@ fn write(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str) 
         out.push_str(&entry);
     } else {
         out.push_str(&entry.replace('\n', eol));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn parse_for_repair_does_not_treat_environment_only_lockfile_as_project() {
+        let env_only = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    configDependencies:
+      cfg: 1.0.0
+snapshots:
+  cfg@1.0.0:
+    dependencies:
+      dep: 1.0.0
+  cfg@1.0.0:
+    dependencies:
+      dep: 2.0.0
+";
+        let witness = json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {}},
+            "snapshots": {"cfg@1.0.0": {"dependencies": {"dep": "1.0.0"}}}
+        });
+        assert!(matches!(
+            parse_for_repair(env_only, Some(&witness)),
+            Err(LockfileError::ResolutionRequired { .. })
+        ));
+    }
+
+    #[test]
+    fn edit_project_rejects_lockfile_without_source_text() {
+        let doc = Arc::new(json!({"lockfileVersion": "9.0", "importers": {".": {}}}));
+        let lock = Lockfile::with_documents(BTreeMap::from([(DocumentKind::Project, doc)]), &[]);
+        let after = json!({"lockfileVersion": "9.0", "importers": {".": {"extra": true}}});
+        assert!(matches!(
+            project(&lock, &after),
+            Err(LockfileError::InvalidDocument(_))
+        ));
     }
 }
