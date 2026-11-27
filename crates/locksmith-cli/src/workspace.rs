@@ -219,6 +219,7 @@ pub fn settings(
     mut read: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<(Value, bool)> {
     let legacy = version.is_none_or(|v| v.major() < 11);
+    let pnpm9 = version.is_some_and(|v| v.major() == 9);
     let mut config = match root.get("pnpm").filter(|_| legacy) {
         Some(v) if v.is_object() => v.clone(),
         Some(_) => {
@@ -226,10 +227,15 @@ pub fn settings(
         }
         None => json!({}),
     };
+    let manifest_settings = config.as_object_mut().expect("manifest settings");
     // Membership is declared in pnpm-workspace.yaml, including the omitted-key default.
-    config.as_object_mut().unwrap().remove("packages");
+    manifest_settings.remove("packages");
     // Read this hook setting only from the configuration files supported by pnpm.
-    config.as_object_mut().unwrap().remove("ignorePnpmfile");
+    manifest_settings.remove("ignorePnpmfile");
+    if pnpm9 {
+        // pnpm 9 reads the peer suffix limit from .npmrc.
+        manifest_settings.remove("peersSuffixMaxLength");
+    }
     if legacy && let Some(resolutions) = root.get("resolutions") {
         let mut overrides = resolutions
             .as_object()
@@ -263,7 +269,7 @@ pub fn settings(
             if version.is_some_and(|v| v < &node_semver::Version::from((10, 6, 0))) {
                 settings.remove("ignorePnpmfile");
             }
-            if version.as_ref().is_some_and(|v| v.major() == 9) {
+            if pnpm9 {
                 // pnpm 9 takes these resolver settings from .npmrc.
                 for key in [
                     "peersSuffixMaxLength",
@@ -423,21 +429,23 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
             continue;
         };
         if let Some((_, field)) = FLAGS.iter().find(|(flag, _)| key.trim() == *flag) {
-            config[field] =
-                Value::Bool(ini_bool(value).map_err(|_| format!("{key} expects true or false"))?);
+            let flag = ini_value(value)
+                .parse()
+                .map_err(|_| format!("{key} expects true or false"))?;
+            config[field] = Value::Bool(flag);
         } else {
-            let value = value.trim().trim_matches('"');
+            let unquoted = value.trim().trim_matches('"');
             match key.trim() {
                 "link-workspace-packages" => {
-                    config["linkWorkspacePackages"] = match value {
+                    config["linkWorkspacePackages"] = match unquoted {
                         "deep" => json!("deep"),
-                        _ => json!(value.parse::<bool>()?),
+                        _ => json!(unquoted.parse::<bool>()?),
                     }
                 }
                 "peers-suffix-max-length" => {
-                    config["peersSuffixMaxLength"] = json!(value.parse::<usize>()?)
+                    config["peersSuffixMaxLength"] = json!(ini_value(value).parse::<usize>()?)
                 }
-                "pnpmfile" => config["pnpmfile"] = json!(value),
+                "pnpmfile" => config["pnpmfile"] = json!(unquoted),
                 _ => (),
             }
         }
@@ -445,20 +453,19 @@ fn legacy_settings(text: &str, config: &mut Value) -> Result<()> {
     Ok(())
 }
 
-fn ini_bool(value: &str) -> std::result::Result<bool, std::str::ParseBoolError> {
+fn ini_value(value: &str) -> &str {
     let value = value.trim();
     if let Some(quote @ ('"' | '\'')) = value.chars().next()
         && let Some((quoted, rest)) = value[1..].split_once(quote)
     {
         let rest = rest.trim_start();
         if rest.is_empty() || rest.starts_with(['#', ';']) {
-            return quoted.parse();
+            return quoted;
         }
     }
     value
         .split_once(['#', ';'])
         .map_or(value, |(flag, _)| flag.trim_end())
-        .parse()
 }
 
 const GLOB_OPTIONS: MatchOptions = MatchOptions {

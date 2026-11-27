@@ -752,6 +752,63 @@ fn explicit_cli_context_selects_pins_without_a_git_checkout() {
 }
 
 #[test]
+fn explicit_cli_context_defaults_omitted_patches_to_an_empty_map() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(
+        root,
+        "lock.yaml",
+        "lockfileVersion: '9.0'\nimporters: {'.': {}}\n",
+    );
+    let context = json!({
+        "target": "ours", "manifests": {".": {}},
+        "configurations": [{}, {}, {}], "configuration": {}
+    });
+    let merge = |context: &Value| {
+        write_input(root, "context.json", context);
+        Command::new(CLI)
+            .current_dir(root)
+            .args([
+                "merge",
+                "lock.yaml",
+                "lock.yaml",
+                "lock.yaml",
+                "--context",
+                "context.json",
+            ])
+            .output()
+            .unwrap()
+    };
+    let implicit = merge(&context);
+    assert!(implicit.status.success(), "{}", report(&implicit));
+
+    let mut configured = context.clone();
+    configured["configuration"]["patchedDependencies"] = json!({"pkg": "patches/pkg.patch"});
+    let missing = merge(&configured);
+    assert_eq!(missing.status.code(), Some(1), "{}", report(&missing));
+    assert!(missing.stdout.is_empty());
+    assert!(report(&missing).contains("missing patch contents: patches/pkg.patch"));
+
+    let mut explicit = context;
+    explicit["patches"] = json!({});
+    let empty = merge(&explicit);
+    assert!(empty.status.success(), "{}", report(&empty));
+    assert_eq!(implicit.stdout, empty.stdout);
+    Lockfile::parse(&String::from_utf8(implicit.stdout).unwrap())
+        .unwrap()
+        .validate()
+        .unwrap();
+
+    for invalid in [Value::Null, json!({"patches/pkg.patch": 1})] {
+        explicit["patches"] = invalid;
+        let result = merge(&explicit);
+        assert_eq!(result.status.code(), Some(2), "{}", report(&result));
+        assert!(result.stdout.is_empty());
+        assert!(report(&result).contains("invalid type"));
+    }
+}
+
+#[test]
 fn a_pnpm_upgrade_preserves_the_new_resolvers_peers_and_mainline_additions() {
     let dir = tempfile::tempdir().unwrap();
     let base = json!({"lockfileVersion":"9.0",
@@ -1967,6 +2024,56 @@ fn validate_rejects_a_dedupe_peers_setting_mismatch() {
         );
         check_workspace(root, status, settings);
     }
+}
+
+#[test]
+fn validate_reads_pnpm9_peer_suffix_limit_from_npmrc() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(
+        root,
+        "package.json",
+        json!({
+            "packageManager": "pnpm@9.15.9",
+            "pnpm": {"peersSuffixMaxLength": 32}
+        }),
+    );
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        "packages: []\npeersSuffixMaxLength: 48\n",
+    );
+    let mut lock = json!({"lockfileVersion": "9.0", "importers": {".": {}}});
+    write_input(root, "pnpm-lock.yaml", &lock);
+    check_workspace(
+        root,
+        0,
+        "pnpm 9 ignores the limit in package.json and workspace YAML",
+    );
+
+    write_input(
+        root,
+        ".npmrc",
+        "peers-suffix-max-length=64 # peer suffix limit\n",
+    );
+    let result = check_workspace(root, 1, "missing the limit configured in .npmrc");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("peersSuffixMaxLength"));
+
+    lock["settings"] = json!({"peersSuffixMaxLength": 64});
+    write_input(root, "pnpm-lock.yaml", &lock);
+    check_workspace(root, 0, "the lock records the .npmrc value");
+
+    write_input(
+        root,
+        ".npmrc",
+        "peers-suffix-max-length=\"72\" ; updated limit\n",
+    );
+    let result = check_workspace(root, 1, "the peer suffix limit changed");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("peersSuffixMaxLength"));
+
+    lock["settings"]["peersSuffixMaxLength"] = json!(72);
+    write_input(root, "pnpm-lock.yaml", &lock);
+    check_workspace(root, 0, "the lock records the quoted .npmrc value");
 }
 
 #[test]
