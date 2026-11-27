@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde_json::{Map, json};
 
-use crate::{Lockfile, LockfileError, Value, assembly, catalog, graph, manifest, pin, schema};
+use crate::{Lockfile, LockfileError, Value, catalog, graph, manifest, pin, schema};
 
+mod assembly;
 mod installed;
 mod peers;
 mod workspace;
@@ -234,7 +235,8 @@ pub fn converge_with_recorded_baselines(
     if let Some(config) = options.configuration {
         let project = result.project().expect("converged project");
         config.check_recorded_settings(project)?;
-        let mut plan = crate::extensions::plan(project, config, candidate.project(), None)?;
+        let mut plan =
+            crate::reconcile::extensions::plan(project, config, candidate.project(), None)?;
         if !plan.is_empty() {
             let project = std::sync::Arc::make_mut(
                 result
@@ -249,7 +251,8 @@ pub fn converge_with_recorded_baselines(
                 .and_then(|change| change.after);
             workspace::checked_overrides(project, config, root)?;
             while plan.apply(project) {
-                plan = crate::extensions::plan(project, config, candidate.project(), None)?;
+                plan =
+                    crate::reconcile::extensions::plan(project, config, candidate.project(), None)?;
             }
             graph::prune_scoped(
                 project,

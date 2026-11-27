@@ -5,6 +5,8 @@ use locksmith::MergeContext;
 use tempfile::NamedTempFile;
 
 use crate::{Result, git, workspace};
+
+use super::merge;
 use workspace::{Members, Project};
 
 fn project_conflicts(
@@ -109,7 +111,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         .filter(|p| p.as_slice() != path.as_bytes())
         .cloned()
         .collect();
-    let locks = crate::merge::Sources::read(files)?;
+    let locks = merge::Sources::read(files)?;
     let target = git::preferred_target(&inputs)?;
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
     let (root_name, root) =
@@ -164,6 +166,6 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = crate::merge::with_context(&merge, &context, &project.config, network)?;
+    let result = merge::with_context(&merge, &context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

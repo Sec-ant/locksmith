@@ -8,7 +8,7 @@ use crate::{
 
 /// Assemble a graph from independently selected importer edges. The large
 /// input graphs stay borrowed until their selected records are copied once.
-pub(crate) fn from_edges(
+pub(super) fn from_edges(
     (mut base, donor): (Lockfile, &Lockfile),
     original: &Value,
     importers: Value,
@@ -106,7 +106,7 @@ pub(crate) fn from_edges(
 }
 
 // A registry deprecation notice may change after the immutable artifact was published.
-pub(crate) fn same_package(a: &Value, b: &Value) -> bool {
+pub(super) fn same_package(a: &Value, b: &Value) -> bool {
     a == b
         || a["resolution"]["integrity"].is_string()
             && a.get("deprecated") != b.get("deprecated")
@@ -320,7 +320,7 @@ fn same_child_context(base: &Value, old: &str, installed: &Value, new: &str, nam
         && installed["packages"][current]["resolution"]["integrity"].is_string()
 }
 
-pub(crate) fn ordinary(doc: &Value, key: &str) -> bool {
+pub(super) fn ordinary(doc: &Value, key: &str) -> bool {
     !key.contains('(')
         && doc["snapshots"].get(key).is_some()
         && doc["packages"][key]["resolution"]["integrity"].is_string()

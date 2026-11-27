@@ -164,8 +164,12 @@ impl RepairInput {
                     graph::closure(&result, DocumentKind::Project, &roots)?
                 }
             };
-            let plan =
-                crate::extensions::plan(&result, context.configuration, None, Some(&closure))?;
+            let plan = crate::reconcile::extensions::plan(
+                &result,
+                context.configuration,
+                None,
+                Some(&closure),
+            )?;
             if !plan.is_empty() {
                 plan.apply(result.to_mut());
                 continue;

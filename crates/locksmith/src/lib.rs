@@ -23,37 +23,58 @@
 
 #![warn(missing_docs)]
 
-mod assembly;
-mod catalog;
-mod checksum;
-mod config;
-mod diagnostics;
-mod error;
-mod extensions;
-mod graph;
-mod inspect;
-mod lockfile;
-mod manifest;
-mod merge;
-mod patch;
-mod peer;
-mod pin;
+// Layer 0: Foundation
 #[cfg(feature = "bench-profile")]
 #[doc(hidden)]
 pub mod profile;
-mod reconcile;
-mod recovery;
+
+mod error;
 mod registry;
-mod repair;
+
+// Layer 1: Schema & Checksums
+mod catalog;
+mod patch;
+
+mod checksum;
 mod schema;
-mod scope;
+
+mod pin;
+
+// Layer 2: YAML & Source
 mod source;
 mod verify;
+
+// Layer 3: Workspace Rules, Graph & Lockfile
+mod config;
 mod workspace_links;
+
+mod manifest;
+
+mod graph;
+mod lockfile;
+
+// Layer 4: Diagnostics & Inspection
+mod diagnostics;
+mod inspect;
+
+// Layer 5: Peer & Resolution Engines
+mod peer;
+mod reconcile;
+mod recovery;
+
+// Layer 6: Public Workflows
+mod converge;
+mod repair;
+
+mod merge;
 
 pub use config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
     PatchEncoding, ResolutionSettings, WorkspaceConfig,
+};
+pub use converge::{
+    ConvergeOptions, ManifestChange, converge, converge_with_patches,
+    converge_with_recorded_baselines,
 };
 pub use diagnostics::{
     Disposition, PeerIssue, PeerRules, PeerStatus, PeerVersionMatching, UnknownReason,
@@ -70,8 +91,4 @@ pub use merge::{ContextualMerge, MergeInput, merge};
 pub use reconcile::{MergeContext, MergeTarget};
 pub use registry::{RegistryMetadata, RegistryRequest};
 pub use repair::{RepairContext, RepairInput, repair};
-pub use scope::{
-    ConvergeOptions, ManifestChange, converge, converge_with_patches,
-    converge_with_recorded_baselines,
-};
 pub use serde_json::Value;

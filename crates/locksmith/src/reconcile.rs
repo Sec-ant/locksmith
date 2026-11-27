@@ -3,6 +3,7 @@ mod assembly;
 pub(crate) mod bootstrap;
 mod dedupe;
 mod expand;
+pub(crate) mod extensions;
 mod importers;
 pub(crate) mod metadata;
 mod preference;

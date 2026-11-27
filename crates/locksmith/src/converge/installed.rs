@@ -2,10 +2,10 @@
 //! graphs would give one instance incompatible contents.
 use std::collections::{BTreeSet, HashSet};
 
-use super::{ChangeSet, ManifestChange};
+use super::{ChangeSet, ManifestChange, assembly};
 use crate::{
-    DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, assembly, catalog, config,
-    graph, manifest, patch, peer, pin, reconcile, schema,
+    DocumentKind, Lockfile, LockfileError, Value, WorkspaceConfig, catalog, config, graph,
+    manifest, patch, peer, pin, reconcile, schema,
 };
 
 pub(super) fn converge(

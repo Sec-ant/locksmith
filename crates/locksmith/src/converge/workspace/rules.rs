@@ -2,27 +2,27 @@
 //! catalog pins and importer edges required by the edited rules.
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::converge::importer_dependency;
 use crate::error::missing;
-use crate::scope::importer_dependency;
 use crate::{
     LockfileError, Value, WorkspaceConfig, catalog, graph, manifest, pin, reconcile, schema,
 };
 
 #[derive(PartialEq, Eq)]
-pub(in crate::scope) enum RootChoice {
+pub(in crate::converge) enum RootChoice {
     Baseline,
     Installed,
     /// A peer-free baseline release usable by a new catalog consumer.
     CatalogPin(Value),
 }
-pub(in crate::scope) type RootChoices = BTreeMap<String, BTreeMap<String, RootChoice>>;
+pub(in crate::converge) type RootChoices = BTreeMap<String, BTreeMap<String, RootChoice>>;
 
 fn catalog_name(spec: &str) -> Option<&str> {
     spec.strip_prefix("catalog:")
         .map(|s| if s.is_empty() { "default" } else { s })
 }
 
-pub(in crate::scope) fn checked_overrides(
+pub(in crate::converge) fn checked_overrides(
     doc: &Value,
     config: &WorkspaceConfig,
     root: Option<&Value>,
@@ -196,7 +196,7 @@ pub(super) fn catalogs(
     Ok(choices)
 }
 
-pub(in crate::scope) fn override_names(docs: [&Value; 2]) -> BTreeSet<&str> {
+pub(in crate::converge) fn override_names(docs: [&Value; 2]) -> BTreeSet<&str> {
     let groups = docs.map(|d| {
         let mut by_name = BTreeMap::<_, Vec<_>>::new();
         for (selector, value) in graph::section(d, "overrides").into_iter().flatten() {
@@ -317,7 +317,7 @@ pub(super) fn importer_choices(
 
 /// Check the installed records used as a unit. A package extension fills
 /// missing published fields. An unconditional override can replace that value.
-pub(in crate::scope) fn check_installed_rules(
+pub(in crate::converge) fn check_installed_rules(
     [base, donor]: [&Value; 2],
     [before, after]: [&WorkspaceConfig; 2],
     policy: &crate::config::ResolutionCompatibility<'_>,
