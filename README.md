@@ -50,7 +50,7 @@ Pass the common ancestor, your lockfile, and the other branch's lockfile in that
 pnpm locksmith merge base.yaml ours.yaml theirs.yaml > merged.yaml
 ```
 
-If both branches changed the same dependency, the final workspace manifests decide which version to keep. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`; see [Merge context](docs/design.md#merge-context). Without context, Locksmith performs a three-way comparison and reports a conflict when a reachable record disagrees.
+If both branches changed the same dependency, the final workspace manifests decide which version to keep. The Git driver collects them automatically. Scripts can supply the same information with `--context FILE`; see [Merge context](docs/design.md#merge-context). If the selected lockfile settings differ from the final workspace, a contextual merge reports the setting that needs a regenerated lockfile. Without context, Locksmith performs a three-way comparison and reports a conflict when a reachable record disagrees.
 
 ### Configure the Git merge driver
 

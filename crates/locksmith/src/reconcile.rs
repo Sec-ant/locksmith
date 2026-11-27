@@ -288,6 +288,14 @@ fn resolve_sources(
     let metadata = metadata::resolve(docs, order, context)?;
     if prefer_baseline {
         metadata::check_repair_configuration(docs[2], &metadata, context.configuration)?;
+    } else {
+        metadata::check_recorded_settings(&metadata, context.configuration)?;
+        if let Some(field) = context.configuration.frozen_settings_mismatch(&metadata) {
+            return Err(missing(
+                &["settings", field],
+                "lockfile setting differs from the workspace; regenerate the lockfile with pnpm",
+            ));
+        }
     }
     let environment = match bootstrap {
         Bootstrap::Select(selected) => Some(bootstrap::environment_source(
