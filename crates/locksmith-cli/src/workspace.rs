@@ -133,7 +133,10 @@ pub(super) fn bootstrap_configuration(
 
 impl Project {
     pub fn configuration(&self) -> Result<locksmith::WorkspaceConfig> {
-        Ok(crate::policy::Policy::from_project(self).configuration(&self.config)?)
+        Ok(match &self.pnpm_version {
+            Some(v) => locksmith::WorkspaceConfig::from_pnpm_version(&self.config, v)?,
+            None => locksmith::WorkspaceConfig::from_pnpm(&self.config)?,
+        })
     }
 
     pub fn bootstrap_configuration(

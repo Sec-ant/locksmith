@@ -434,6 +434,8 @@ fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
 /// The single cat-file process reads just the configuration blobs requested.
 pub struct Blobs {
     pub conflicts: BTreeSet<Vec<u8>>,
+    config_files: &'static [&'static str],
+    hook_files: &'static [&'static str],
     directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
@@ -441,7 +443,10 @@ pub struct Blobs {
     output: BufReader<ChildStdout>,
 }
 impl Blobs {
-    pub fn open() -> Result<Self> {
+    pub fn open(
+        config_files: &'static [&'static str],
+        hook_files: &'static [&'static str],
+    ) -> Result<Self> {
         let mut child = Command::new("git")
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
@@ -451,6 +456,8 @@ impl Blobs {
         let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
         Ok(Self {
             conflicts: BTreeSet::new(),
+            config_files,
+            hook_files,
             directories: BTreeMap::new(),
             config_entries: BTreeMap::new(),
             child,

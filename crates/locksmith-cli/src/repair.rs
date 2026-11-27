@@ -14,7 +14,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     #[cfg(feature = "bench-profile")]
     drop(revision_span);
     let file = format!("{prefix}pnpm-lock.yaml");
-    let mut blobs = git::Blobs::open()?;
+    let mut blobs = git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let text = blobs
         .read(commit, &file)?
         .ok_or_else(|| format!("missing {reference}:{file}"))?;
@@ -48,7 +48,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         Err(LockfileError::ResolutionRequired { .. }) => {
             input.validate_bootstrap(&context)?;
             let revisions = git::output(&["rev-list", "--parents", "-1", commit])?;
-            let mut blobs = git::Blobs::open()?;
+            let mut blobs =
+                git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
             let mut evidence = Vec::new();
             for parent in revisions.split_whitespace().skip(1) {
                 if let Some(source) = blobs.read(parent, &file)?
@@ -113,7 +114,7 @@ fn recover_merge_snapshots(
         return Ok(None);
     };
     let base = git::merge_base(ours, theirs)?;
-    let mut blobs = git::Blobs::open()?;
+    let mut blobs = git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let file = format!("{prefix}pnpm-lock.yaml");
     let [base, ours, theirs] = [base.as_str(), ours, theirs].map(|revision| -> Result<_> {
         let text = blobs

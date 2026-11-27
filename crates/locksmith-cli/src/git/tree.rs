@@ -55,10 +55,10 @@ impl Blobs {
             return Ok(directory.get(name).cloned());
         }
         let config_names = || {
-            crate::workspace::CONFIG_FILES
+            self.config_files
                 .iter()
                 .copied()
-                .chain(crate::workspace::DEFAULT_HOOK_FILES)
+                .chain(self.hook_files.iter().copied())
                 .chain(["pnpm-lock.yaml"])
         };
         let restricted = config_names().any(|path| path.as_bytes() == name);

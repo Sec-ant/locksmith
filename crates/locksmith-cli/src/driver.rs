@@ -89,7 +89,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let inputs = git::revisions(files, path)?;
     let revisions = &inputs.revisions;
     let (tree, conflicts) = git::merged_tree(&inputs)?;
-    let mut blobs = git::Blobs::open()?;
+    let mut blobs = git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let [base, ours, theirs] = revisions
         .each_ref()
         .map(|r| Project::read(&mut blobs, r, prefix, None));

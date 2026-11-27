@@ -30,7 +30,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let (tree, prefix) = (tree.as_str(), prefix.as_str());
     #[cfg(feature = "bench-profile")]
     drop(revision_span);
-    let mut blobs = Blobs::open()?;
+    let mut blobs = Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_project(&working);
