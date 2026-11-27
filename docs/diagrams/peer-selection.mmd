@@ -1,5 +1,5 @@
 flowchart TB
   a["a: *<br/>ours: 2.0.0<br/>theirs: 3.0.0"] -->|theirs| a3["a@3.0.0"]
-  b["b: 2.0.0<br/>ours: 1.0.0<br/>theirs: 2.0.0"] -->|theirs| b2["b@2.0.0"]
+  b["b: 2.0.0<br/>ours: 2.0.0<br/>theirs: 1.0.0"] -->|ours| b2["b@2.0.0"]
   a3 --> lib["lib@1.0.0(a@3.0.0)(b@2.0.0)"]
   b2 --> lib

@@ -146,9 +146,9 @@ import { convergeWorkspace } from 'es-locksmith'
 const yaml = await convergeWorkspace('origin/main', { cwd: process.cwd() })
 ```
 
-`repairWorkspace(ref?, options?)` reads a committed lockfile (defaulting `ref` to `'HEAD'`). `convergeWorkspace` and `repairWorkspace` accept `cwd`, `signal`, and `allowNetwork`, while `inspectWorkspace` accepts `cwd` and `signal`; all three use the bundled CLI. `getCliPath()` returns its executable path.
+`repairWorkspace(ref, options)` reads a committed lockfile. Both workspace methods accept `cwd`, `signal`, and `allowNetwork` and use the bundled CLI. `getCliPath()` returns its executable path.
 
-For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual `merge` or to `repair` (which accepts YAML text) to allow duplicate-key recovery.
+For in-memory work, `merge(base, ours, theirs, context?)`, `converge(baseline, candidate, changes, options?)`, and `repair(yaml, context)` use the Rust engine directly and return a promise for the resulting YAML. Supply workspace manifests, effective pnpm settings, patch contents and any registry evidence in the context. Pass raw YAML to a contextual merge or repair to allow duplicate-key recovery.
 
 Use `await inspect(lock)` for YAML or a parsed lockfile, or `await inspectWorkspace({ cwd })` for a workspace on disk. Both return an `Inspection` report. The optional second argument to `inspect` supplies workspace configuration and manifests. Both `inspect` and `inspectPeers` compare the supported pnpm policies when the pnpm version is unknown.
 
@@ -191,4 +191,4 @@ Pull requests time `merge`, `converge`, `repair`, and `inspect` on a 314-project
 
 With Knope installed, run `just change` to record a user-facing change and its version bump in `.changeset/`. Commit that file with the change. When the changeset reaches `main`, Knope Bot opens or updates a release PR with the next version, `Cargo.lock`, and `CHANGELOG.md`. See the [changeset style guide](CONTRIBUTING.md#changesets).
 
-Review and merge the release PR to publish. GitHub Actions builds the macOS, Linux, and Windows binaries, publishes the release artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io and npm.
+Review and merge the release PR to publish. GitHub Actions builds the macOS and Linux binaries, publishes the release with its artifacts, updates the Homebrew formula, and publishes `es-locksmith` to crates.io and npm.

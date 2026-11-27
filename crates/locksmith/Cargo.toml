@@ -1,6 +1,6 @@
 [package]
 name = "es-locksmith"
-description = "Merge, converge, repair, validate, and inspect pnpm lockfiles"
+description = "Merge and converge pnpm lockfiles"
 repository = "https://github.com/Sec-ant/locksmith"
 version.workspace = true
 edition.workspace = true

@@ -1,8 +1,6 @@
 # How Locksmith works
 
-This document explains the problem Locksmith solves, how a pnpm v9 lockfile represents a dependency graph, and how `merge`, `converge`, `repair`, `validate`, and `inspect` operate on that graph. It assumes you have used pnpm but have not read `pnpm-lock.yaml` closely. Installation and command usage are in the [README](../README.md).
-
-![Locksmith architecture](diagrams/architecture.svg)
+This document explains the problem Locksmith solves, how a pnpm v9 lockfile represents a dependency graph, and how `merge`, `converge`, and `repair` change that graph. It assumes you have used pnpm but have not read `pnpm-lock.yaml` closely. Installation and command usage are in the [README](../README.md).
 
 ## 1. Why a lockfile is not a text file
 
@@ -22,7 +20,7 @@ The usual workaround is to run `pnpm install` after the conflict and let pnpm re
 
 Lockfile diffs are rarely reviewed, so these changes enter the branch silently.
 
-Locksmith takes a third path. It reads the lockfile as a graph, uses the final manifests and workspace settings as constraints, and keeps every record those constraints still accept. It queries the registry only when the lockfiles do not contain enough evidence. The rest of this document describes that model and the operations built on it.
+Locksmith takes a third path. It reads the lockfile as a graph, uses the final manifests and workspace settings as constraints, and keeps every record those constraints still accept. It queries the registry only when the lockfiles do not contain enough evidence. The rest of this document describes that model and the three operations built on it.
 
 ## 2. The data model
 
@@ -179,8 +177,6 @@ The app depends on `lib@1.0.0`, which gets its peers `a` and `b` from the app. B
 
 The result is one `lib@1.0.0(a@3.0.0)(b@2.0.0)` snapshot. The app's importer entry points to that snapshot, and the snapshot records `a: 3.0.0` and `b: 2.0.0`. A branch preference applies to each dependency individually; that is what allows the result to take `a` from theirs and `b` from theirs in this case, or from different branches when the constraints require it.
 
-![Peer selection example](diagrams/peer-selection.svg)
-
 ### Failure modes
 
 - **Conflict**: a reachable record disagrees and no final declaration can settle it. No lockfile is returned.
@@ -191,13 +187,13 @@ The result is one `lib@1.0.0(a@3.0.0)(b@2.0.0)` snapshot. The app's importer ent
 
 `converge` starts from an installed candidate and removes the changes the edit did not require. It is the operation behind "edit one dependency, keep the rest of the lockfile".
 
-For a pnpm version upgrade (major, minor, or patch), declare the exact pnpm version in each root manifest. Convergence checks the installed candidate against the final workspace and patch contents, prefers compatible baseline pins and peer bindings, and takes the bootstrap graph from the new pnpm version. Rust callers pass all final manifests and both versioned configurations to `converge`. For a patched workspace, set `ConvergeOptions::patches` to the final patch contents.
+For a cross-major pnpm upgrade, declare the exact pnpm version in each root manifest. Convergence checks the installed candidate against the final workspace and patch contents, prefers compatible baseline pins and peer bindings, and takes the bootstrap graph from the new pnpm version. Rust callers supply all final manifests, both versioned configurations, and the patch contents through `converge_with_patches` for a patched workspace.
 
 ### Inputs
 
 - The baseline lockfile and the installed candidate.
 - Before/after manifests for every changed importer.
-- The baseline and final workspace configuration when catalogs, overrides, package extensions, `configDependencies`, or pnpm upgrade settings changed.
+- The baseline and final workspace configuration when catalogs, overrides, or package extensions changed.
 - Optional registry metadata for missing published ranges.
 
 ### Algorithm
@@ -238,8 +234,8 @@ Baseline: `foo@1.0.0` depends on `leaf@1.0.0`; the app also depends on `bar@1.0.
 
 ### Algorithm
 
-1. Parse the lock. Identical duplicate records in `packages` and `snapshots` are accepted; conflicting duplicate `snapshots` records need a decision (and the CLI automatically resolves two-parent merge commits via `RepairInput::parse_with_merge_witness`).
-2. Check configuration consistency: bootstrap `configDependencies`/`packageManager`, recorded header settings (`peersSuffixMaxLength`, `injectWorkspacePackages`, `addMissingPeerTypes`), `settings`, `overrides`, `patchedDependencies`, `packageExtensionsChecksum`, `pnpmfileChecksum`, and `ignoredOptionalDependencies`. If the lock was generated with different rules, repair refuses; the effects extend beyond a broken record.
+1. Parse the lock. Identical duplicate snapshot records are accepted; different contents under the same key need a decision.
+2. Check configuration consistency: `settings`, `overrides`, `patchedDependencies`, `packageExtensionsChecksum`, `pnpmfileChecksum`, and `ignoredOptionalDependencies`. If the lock was generated with different rules, repair refuses; the effects extend beyond a broken record.
 3. Reconcile importer declarations with the manifests: update stale version references, remove dependencies no longer declared, and add new declarations from the available evidence.
 4. Compute the reachable closure from the importers. For each missing snapshot or package record, look for evidence in this order:
    - An agreeing parent lock. All parents that contain the record must agree, and their configurations must be compatible.
@@ -258,14 +254,9 @@ Baseline: `foo@1.0.0` depends on `leaf@1.0.0`; the app also depends on `bar@1.0.
 - **Unresolved record**: no parent, registry entry, or contextual resolution can supply a missing record.
 - **Disagreeing parents**: the available parents contain different contents for the same missing key.
 
-## 6. validate and inspect
+## 6. Tradeoffs and boundaries
 
-- **`validate`** checks YAML syntax, duplicate keys, format version, and every recorded reference across `importers`, `packages`, and `snapshots` (including unreachable orphans). With `--workspace`, it also checks member manifests, workspace `link:` targets, recorded settings, catalogs, overrides, patches, and `packageManager` bootstrap graphs.
-- **`inspect`** validates the project graph, evaluates peer dependency contracts under the selected pnpm policy (`Pnpm9`, `Pnpm10`, `Pnpm11`, `Pnpm12`, `Semver`, or `Unspecified`), computes direct/reachable workspaces and shortest example paths, and reports multi-instance releases and external links.
-
-## 7. Tradeoffs and boundaries
-
-### Distinct workflow commands
+### Three commands
 
 Each operation has a different preference model. `merge` prefers the target branch, `converge` prefers the baseline, and `repair` prefers the current lock. The inputs also differ: three locks, two locks plus manifest changes, or one lock plus workspace evidence. A single command would need a mode switch that obscures these differences.
 
@@ -305,13 +296,10 @@ On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text
 
 ### Code map
 
-The core modules in `crates/locksmith/src/` are grouped by responsibility. Some of these groups share contracts. For example, `Lockfile` delegates parsing to `source`, which uses `DocumentKind` from `lockfile`. Contextual merge and duplicate-key recovery also share the `MergeInput` and `ContextualMerge` types.
-
 | Area | Modules | Responsibility |
 | --- | --- | --- |
-| Foundation & Schema | `error`, `registry`, `schema`, `catalog`, `patch`, `checksum`, `pin` | Typed errors, registry metadata, lockfile keys, patch/extension hashing |
-| Parsing & Output | `source`, `verify` | YAML documents, source reuse, streaming output comparison |
-| Rules, Graph & Lockfile | `config`, `workspace_links`, `manifest`, `graph`, `lockfile` | pnpm config decoding, workspace links, reachability, validation |
-| Diagnostics & Inspection | `diagnostics`, `inspect` | Peer policy checks (`Pnpm9`–`Pnpm12`), reachability impact reports |
-| Resolution Engines | `peer`, `reconcile`, `recovery` | Peer binding/search, candidate selection, expansion, duplicate-key recovery |
-| Public Workflows | `converge`, `repair`, `merge` | Scoped convergence (`converge/*`), lockfile repair, three-way/contextual merge |
+| Parsing and output | `source`, `verify` | YAML documents, source reuse, output comparison |
+| Graph | `graph` | reachability, closure, reference validation |
+| Selection | `scope`, `peer`, `reconcile` | importer edges, peer bindings, candidate selection |
+| Assembly | `assembly`, `reconcile::dedupe` | snapshot and package assembly, deduplication |
+| Repair | `repair` | evidence search and importer reconciliation |

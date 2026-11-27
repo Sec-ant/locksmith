@@ -1,7 +1,6 @@
 class Locksmith < Formula
-  desc "Merge, converge, repair, validate, and inspect pnpm lockfiles"
+  desc "Merge, repair, and converge pnpm lockfiles"
   homepage "https://github.com/Sec-ant/locksmith"
-  license "MIT"
   version "0.3.9"
 
   on_macos do
