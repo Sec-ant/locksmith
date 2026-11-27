@@ -2010,6 +2010,61 @@ fn validate_rejects_mismatched_recorded_resolution_settings() {
 }
 
 #[test]
+fn validate_compares_pnpm12_recorded_resolution_and_integrity_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_input(
+        root,
+        "package.json",
+        json!({"packageManager": "pnpm@12.15.0"}),
+    );
+    let workspace = "packages: []\npmOnFail: ignore\n";
+    let enabled = "lockfile: {includeResolutionSettings: true, integrityTarget: tar}\n";
+    let lock = json!({"lockfileVersion": "9.0", "importers": {".": {}}, "settings": {
+        "autoDedupe": false,
+        "dedupeInjectedDeps": true,
+        "dedupePeerDependents": true,
+        "linkWorkspacePackages": false,
+        "integrityTarget": "tar"
+    }});
+    write_input(root, "pnpm-lock.yaml", &lock);
+    write_input(root, "pnpm-workspace.yaml", format!("{workspace}{enabled}"));
+    check_workspace(root, 0, "matching settings");
+
+    for (field, configured) in [
+        ("autoDedupe", "true"),
+        ("dedupeInjectedDeps", "false"),
+        ("dedupePeerDependents", "false"),
+        ("linkWorkspacePackages", "deep"),
+    ] {
+        write_input(
+            root,
+            "pnpm-workspace.yaml",
+            format!("{workspace}{enabled}{field}: {configured}\n"),
+        );
+        let result = check_workspace(root, 1, field);
+        assert!(String::from_utf8_lossy(&result.stderr).contains(field));
+    }
+    write_input(
+        root,
+        "pnpm-workspace.yaml",
+        format!("{workspace}lockfile: {{integrityTarget: tar}}\nautoDedupe: true\n"),
+    );
+    check_workspace(root, 0, "resolution settings are no longer checked");
+
+    write_input(root, "pnpm-workspace.yaml", workspace);
+    let result = check_workspace(root, 1, "changed integrity target");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("integrityTarget"));
+
+    let mut unrecorded = lock;
+    unrecorded["settings"] = json!({"integrityTarget": "tar"});
+    write_input(root, "pnpm-lock.yaml", &unrecorded);
+    write_input(root, "pnpm-workspace.yaml", format!("{workspace}{enabled}"));
+    let result = check_workspace(root, 1, "enabled but absent settings");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("autoDedupe"));
+}
+
+#[test]
 fn validate_detects_added_changed_and_removed_package_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

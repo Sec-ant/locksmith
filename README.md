@@ -110,7 +110,7 @@ When the workspace omits `packages` and the pnpm version is unknown, Locksmith s
 
 In a merge gate, validate the final candidate lockfile. Validation checks every recorded snapshot, including those unused by the workspace. A frozen install also checks package availability and integrity.
 
-Mixed `ignoredOptionalDependencies` rules can expose a difference between fresh and frozen installs. For example, pnpm 11.21 and later on the 11.x line keeps `is-number` on a fresh install with `["*", "!is-number"]`, then rejects that lock on a frozen install. Locksmith's writing commands preserve the fresh resolution. `validate --workspace` follows the frozen check for the workspace's pnpm version.
+Mixed `ignoredOptionalDependencies` rules can expose a difference between fresh and frozen installs. For example, pnpm 11.21 and later on the 11.x line keeps `is-number` on a fresh install with `["*", "!is-number"]`, then rejects that lock on a frozen install. Locksmith's writing commands preserve the fresh resolution. `validate --workspace` follows the frozen check for the workspace's pnpm version. This includes the additional pnpm 12.10+ settings when `lockfile.includeResolutionSettings` is enabled and the `lockfile.integrityTarget` setting in pnpm 12.15+.
 
 ## Inspect peer bindings and package instances
 
@@ -126,9 +126,9 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 ## Scripting contract
 
-- On success, `merge`, `converge`, and `repair` write YAML to stdout. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
+- On success, `merge`, `converge`, and `repair` write YAML to stdout. In Git driver mode, `merge` writes the result to Git's `OURS` input file. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
 - Diagnostics go to stderr.
-- `validate` is silent on success (`0`). It returns `1` for an invalid lockfile or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check.
+- `validate` is silent on success (`0`). It returns `1` for invalid lockfile content or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check, including when the lockfile format version is unsupported.
 - For other commands, exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
 - The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
 

@@ -193,8 +193,9 @@ impl Lockfile {
     /// Check the graph and compare its importers against the complete set of
     /// workspace manifests and configured patch files, keyed by declared path.
     /// External members are paths inside the workspace whose symlinks lead outside the root.
-    /// Callers supply effective manifests if hooks apply. For a range pinned to a
-    /// directory outside the member set, `read_linked` supplies its manifest,
+    /// If hooks apply, supply their effective manifests and the hook checksum
+    /// or contents in `config`. For a range pinned to a directory outside the
+    /// member set, `read_linked` supplies its manifest,
     /// `None` for an absent directory, or an error for unreadable inputs.
     ///
     /// # Errors
@@ -231,6 +232,13 @@ impl Lockfile {
             ));
         }
         crate::reconcile::metadata::check_recorded_settings(document, config)?;
+        if let Some(field) = config.frozen_settings_mismatch(document) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                format!("settings/{field} differs"),
+            ));
+        }
         if let Some(catalogs) = document.get("catalogs") {
             for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
                 crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
@@ -276,6 +284,16 @@ impl Lockfile {
                 ".",
                 "workspace",
                 "packageExtensionsChecksum differs",
+            ));
+        }
+        if !crate::checksum::hooks_match(
+            config.resolution.pnpmfile_checksum.as_ref(),
+            document.get("pnpmfileChecksum"),
+        ) {
+            return Err(crate::manifest::mismatch(
+                ".",
+                "workspace",
+                "pnpmfileChecksum differs",
             ));
         }
         if !config

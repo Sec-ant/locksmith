@@ -2,6 +2,9 @@
 use crate::{LockfileError, Value};
 use std::collections::BTreeMap;
 
+const INCLUDE_RESOLUTION_SETTINGS: &str = "lockfile.includeResolutionSettings";
+const INTEGRITY_TARGET: &str = "lockfile.integrityTarget";
+
 /// Which declaration wins when matching override ranges have equal priority.
 /// pnpm 9–11 prefer the last matching declaration; pnpm 12 prefers the first.
 /// Callers select this explicitly; graph operations do not infer a pnpm version.
@@ -405,6 +408,50 @@ impl WorkspaceConfig {
         settings
     }
 
+    pub(crate) fn frozen_settings_mismatch(&self, document: &Value) -> Option<&'static str> {
+        let settings = &document["settings"];
+        let parameters = &self.resolution.parameters;
+        let version = self.pnpm_version.as_ref();
+        if parameters.get(INCLUDE_RESOLUTION_SETTINGS) == Some(&Value::Bool(true))
+            && version.is_none_or(|version| version >= &node_semver::Version::from((12, 10, 0)))
+        {
+            let enabled = Value::Bool(true);
+            let disabled = Value::Bool(false);
+            let expected = [
+                ("autoDedupe", &Value::Bool(self.auto_dedupe)),
+                (
+                    "dedupeInjectedDeps",
+                    parameters.get("dedupeInjectedDeps").unwrap_or(&enabled),
+                ),
+                (
+                    "dedupePeerDependents",
+                    &Value::Bool(self.resolution.dedupe_peer_dependents),
+                ),
+                (
+                    "linkWorkspacePackages",
+                    parameters.get("linkWorkspacePackages").unwrap_or(&disabled),
+                ),
+            ];
+            for (name, value) in expected {
+                if settings.get(name) != Some(value) {
+                    return Some(name);
+                }
+            }
+        }
+        let recorded_integrity = settings
+            .get("integrityTarget")
+            .map_or(Some("resource"), Value::as_str);
+        let configured_integrity = parameters
+            .get(INTEGRITY_TARGET)
+            .map_or(Some("resource"), Value::as_str);
+        if version.is_none_or(|version| version >= &node_semver::Version::from((12, 15, 0)))
+            && recorded_integrity != configured_integrity
+        {
+            return Some("integrityTarget");
+        }
+        None
+    }
+
     pub(crate) fn matches_optional_header_for_repair(
         &self,
         document: &Value,
@@ -502,6 +549,33 @@ impl WorkspaceConfig {
         let dedupe_peer_dependents = decode(value, "dedupePeerDependents")?.unwrap_or(true);
         let project_scoped_optional_peers =
             decode(value, "projectScopedOptionalPeers")?.unwrap_or(false);
+        let mut parameters: BTreeMap<_, _> = [
+            "peersSuffixMaxLength",
+            "addMissingPeerTypes",
+            "linkWorkspacePackages",
+            "preferWorkspacePackages",
+        ]
+        .into_iter()
+        .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
+        .collect();
+        if decode::<bool>(value, "dedupeInjectedDeps")? == Some(false) {
+            parameters.insert("dedupeInjectedDeps".into(), Value::Bool(false));
+        }
+        let lockfile = &value["lockfile"];
+        if decode::<bool>(lockfile, "includeResolutionSettings")? == Some(true) {
+            parameters.insert(INCLUDE_RESOLUTION_SETTINGS.into(), Value::Bool(true));
+        }
+        match decode::<String>(lockfile, "integrityTarget")?.as_deref() {
+            None | Some("resource") => {}
+            Some("tar") => {
+                parameters.insert(INTEGRITY_TARGET.into(), Value::String("tar".into()));
+            }
+            Some(_) => {
+                return Err(LockfileError::InvalidDocument(format!(
+                    "pnpm configuration {INTEGRITY_TARGET}: expected resource or tar"
+                )));
+            }
+        }
         Ok(Self {
             auto_dedupe: decode(value, "autoDedupe")?.unwrap_or(false),
             resolution: ResolutionSettings {
@@ -529,15 +603,7 @@ impl WorkspaceConfig {
                     (!patterns.is_empty()).then(|| Value::from(patterns))
                 },
                 pnpmfile_checksum: value.get("pnpmfileChecksum").cloned(),
-                parameters: [
-                    "peersSuffixMaxLength",
-                    "addMissingPeerTypes",
-                    "linkWorkspacePackages",
-                    "preferWorkspacePackages",
-                ]
-                .into_iter()
-                .filter_map(|field| value.get(field).map(|v| (field.into(), v.clone())))
-                .collect(),
+                parameters,
             },
             catalogs,
             config_registries,
@@ -728,6 +794,11 @@ impl<'a> ResolutionCompatibility<'a> {
         target: &'a ResolutionSettings,
         document: &'a Value,
     ) -> Self {
+        let affects_resolution = |(key, value): &(&String, &Value)| {
+            // The flag controls recording and frozen checks; it changes no pins.
+            key.as_str() != INCLUDE_RESOLUTION_SETTINGS
+                && (key.as_str() != "linkWorkspacePackages" || *value == "deep")
+        };
         let global = source.lock == target.lock
             && source.dedupe_peer_dependents == target.dedupe_peer_dependents
             && source.optional_peer_scope == target.optional_peer_scope
@@ -738,11 +809,8 @@ impl<'a> ResolutionCompatibility<'a> {
             && source
                 .parameters
                 .iter()
-                .filter(|(k, v)| k.as_str() != "linkWorkspacePackages" || *v == "deep")
-                .eq(target
-                    .parameters
-                    .iter()
-                    .filter(|(k, v)| k.as_str() != "linkWorkspacePackages" || *v == "deep"));
+                .filter(affects_resolution)
+                .eq(target.parameters.iter().filter(affects_resolution));
         let mut result = Self {
             global,
             extensions: BTreeMap::new(),
