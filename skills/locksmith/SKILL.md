@@ -7,7 +7,7 @@ description: Resolves, repairs, and validates pnpm lockfiles, including checking
 
 Locksmith preserves pins and peer bindings allowed by the dependency declarations. It supports `lockfileVersion: '9.0'` (pnpm 9–12).
 
-For peer warnings or excess instances in an existing lockfile, run `locksmith inspect --json` from the workspace. Read the declaration and binding alongside `examplePath`. A null path means no workspace reaches that binding. Check `reason` on unknown findings. Matching locked versions are candidates for review.
+For peer warnings or excess instances in an existing lockfile, run `locksmith inspect --json` from the workspace (or pass `--pnpm-version VERSION` for a standalone lockfile). Read the declaration and binding alongside `examplePath`. A null path means no workspace reaches that binding. Check `reason` on unknown findings. Matching locked versions are candidates for review.
 
 ## Validate a lockfile
 
@@ -59,7 +59,7 @@ From the workspace root, choose the commit that contains the lockfile and declar
 locksmith converge --allow-network "$baseline_ref" > "$scratch/candidate.yaml"
 ```
 
-Each lockfile must match its own declarations. For a pnpm major upgrade, use the pre-upgrade baseline and the lock installed with the new version. Keep the exact `packageManager` in both root manifests. If overlapping overrides select a different release, check their order under the new pnpm version. If convergence rejects a workspace setting, membership, `.npmrc`, or patch change, check the baseline and merge parent. Keep and verify the pnpm-generated lock when the rejected change is intentional.
+Each lockfile must match its own declarations. For a pnpm upgrade (major, minor, or patch), use the pre-upgrade baseline and the lock installed with the new version. Keep the exact `packageManager` in both root manifests. If overlapping overrides select a different release, check their order under the new pnpm version. If convergence rejects a workspace setting, membership, `.npmrc`, or patch change, check the baseline and merge parent. Keep and verify the pnpm-generated lock when the rejected change is intentional.
 
 ## Repair a committed lockfile
 

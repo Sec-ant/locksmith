@@ -75,7 +75,8 @@ export type LockfileError = Error & (
   | { code: 'GLOBAL_CONFIGURATION_CHANGED'; details: { importer: string; field: string } }
   | { code: 'UNSUPPORTED_VERSION'; details: { version: unknown } }
   | { code: 'UNMET_PEERS'; details: { issues: PeerIssue[] } }
-  | { code: 'INVALID_YAML' | 'INVALID_DOCUMENT' | 'WORKSPACE_INPUT' | 'SERIALIZATION_FAILED' | 'OUTPUT_MISMATCH'; details: null }
+  | { code: 'INVALID_YAML' | 'INVALID_DOCUMENT' | 'WORKSPACE_INPUT' | 'OUTPUT_MISMATCH'; details: null }
+  | { code: 'CLI_FAILED'; exitCode: number | null; signal: NodeJS.Signals | null }
 )
 
 export function parse(yaml: string): Promise<Lockfile>
@@ -126,3 +127,20 @@ export function getCliPath(): string
 export function inspectWorkspace(options?: Pick<WorkspaceOptions, 'cwd' | 'signal'>): Promise<Inspection>
 export function convergeWorkspace(ref: string, options?: WorkspaceOptions): Promise<string>
 export function repairWorkspace(ref?: string, options?: WorkspaceOptions): Promise<string>
+
+declare const api: {
+  Lockfile: typeof Lockfile
+  parse: typeof parse
+  validate: typeof validate
+  merge: typeof merge
+  converge: typeof converge
+  repair: typeof repair
+  dependencyClosure: typeof dependencyClosure
+  inspect: typeof inspect
+  inspectPeers: typeof inspectPeers
+  getCliPath: typeof getCliPath
+  inspectWorkspace: typeof inspectWorkspace
+  convergeWorkspace: typeof convergeWorkspace
+  repairWorkspace: typeof repairWorkspace
+}
+export default api

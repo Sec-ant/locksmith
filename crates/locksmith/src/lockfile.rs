@@ -208,6 +208,15 @@ impl Lockfile {
     /// Check all importer and snapshot edges, package records and catalog pins.
     /// Local `link:` references may refer to directories outside the workspace.
     ///
+    /// # Examples
+    /// ```
+    /// use locksmith::Lockfile;
+    ///
+    /// let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}}\n")?;
+    /// lock.validate()?;
+    /// # Ok::<(), locksmith::LockfileError>(())
+    /// ```
+    ///
     /// # Errors
     /// Returns [`LockfileError::InvalidGraph`] with the paths of invalid records or references.
     pub fn validate(&self) -> Result<(), LockfileError> {
@@ -383,7 +392,7 @@ impl Lockfile {
     ///
     /// An unchanged input is returned byte for byte, including CRLF and comments.
     /// Rewritten sections use pnpm's sorted entry order. Non-block YAML is emitted
-    /// with the YAML serializer. Output is verified with a streaming comparison
+    /// with the built-in YAML renderer. Output is verified with a streaming comparison
     /// against the existing data, without building another document tree.
     ///
     /// # Errors

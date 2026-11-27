@@ -145,6 +145,16 @@ pub struct PeerGroup {
 
 /// Validate the graph and inspect its recorded peer contracts and package instances.
 ///
+/// # Examples
+/// ```
+/// use locksmith::{Lockfile, PeerRules, inspect};
+///
+/// let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}}\n")?;
+/// let report = inspect(&lock, &PeerRules::default(), None)?;
+/// assert_eq!(report.summary.workspaces, 1);
+/// # Ok::<(), locksmith::LockfileError>(())
+/// ```
+///
 /// # Errors
 /// Returns an error for an invalid graph or a lock without a project document.
 pub fn inspect(

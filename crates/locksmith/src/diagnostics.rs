@@ -56,7 +56,7 @@ pub struct PeerRules {
 }
 impl PeerRules {
     /// Decode pnpm peer exceptions with an explicitly chosen matching rule.
-    /// This does not read packageManager or strictPeerDependencies.
+    /// This does not read `packageManager` or `strictPeerDependencies`.
     ///
     /// # Errors
     /// Returns an error when the peer rules or their pattern lists have an invalid shape.

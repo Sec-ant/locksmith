@@ -138,7 +138,7 @@ impl Default for ResolutionSettings {
 }
 
 /// Normalized workspace data. Callers can supply explicit conventions or
-/// decode settings for a particular pnpm release with `from_pnpm_version`.
+/// decode settings for a particular pnpm release with [`Self::from_pnpm_version`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     /// Consolidate compatible locked releases when the workspace enables pnpm auto-deduplication.

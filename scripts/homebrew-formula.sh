@@ -35,8 +35,9 @@ fi
 
 cat <<RUBY
 class Locksmith < Formula
-  desc "Merge, repair, and converge pnpm lockfiles"
+  desc "Merge, converge, repair, validate, and inspect pnpm lockfiles"
   homepage "https://github.com/Sec-ant/locksmith"
+  license "MIT"
   version "$version"
 RUBY
 for os in macos linux; do

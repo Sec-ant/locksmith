@@ -19,9 +19,13 @@ fmt:
 fmt-check:
     cargo fmt --all --check
 
-# Lint all Rust targets and treat warnings as errors.
+# Lint all Rust targets and features, treating warnings as errors.
 lint:
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+# Verify rustdoc builds without warnings.
+doc-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
 # Build the library and CLI.
 build:
@@ -66,7 +70,7 @@ test:
     cargo test --workspace --exclude locksmith-node --doc --locked
 
 # Run the same changeset and Rust checks as CI.
-check: check-changesets fmt-check lint test
+check: check-changesets fmt-check lint doc-check test
 
 # Run the native pnpm integration tests with pnpm on PATH or the given PNPM_BIN.
 test-pnpm:

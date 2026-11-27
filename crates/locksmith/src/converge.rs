@@ -89,6 +89,16 @@ impl ChangeSet<'_> {
 /// resolution settings must agree. Registry evidence can supply the published
 /// child ranges of a new parent release or of a removed override.
 ///
+/// # Examples
+/// ```
+/// use locksmith::{ConvergeOptions, Lockfile, converge};
+///
+/// let baseline = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}}\n")?;
+/// let converged = converge(&baseline, &baseline, &[], ConvergeOptions::default())?;
+/// assert_eq!(converged.to_yaml()?, baseline.to_yaml()?);
+/// # Ok::<(), locksmith::LockfileError>(())
+/// ```
+///
 /// # Errors
 /// Mismatched manifests or incompatible configuration changes return an error. Missing
 /// locked evidence can produce a resolution request. Incompatible graph records produce a conflict.

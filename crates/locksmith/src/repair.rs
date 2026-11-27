@@ -44,6 +44,26 @@ pub struct RepairInput(Lockfile);
 /// Records outside the workspace dependency closure are preserved. Use
 /// [`Lockfile::validate`] to check references in the entire output.
 ///
+/// # Examples
+/// ```
+/// use std::collections::BTreeMap;
+/// use locksmith::{RepairContext, Value, WorkspaceConfig, repair};
+///
+/// let mut manifests = BTreeMap::new();
+/// manifests.insert(".".into(), Value::Object(Default::default()));
+/// let configuration = WorkspaceConfig::default();
+/// let context = RepairContext {
+///     manifests: &manifests,
+///     configuration: &configuration,
+///     patches: &BTreeMap::new(),
+///     parents: &[],
+///     registry: None,
+/// };
+/// let repaired = repair("lockfileVersion: '9.0'\nimporters:\n  .: {}\n", &context)?;
+/// assert!(repaired.project().is_some());
+/// # Ok::<(), locksmith::LockfileError>(())
+/// ```
+///
 /// # Errors
 /// Invalid YAML or an unsupported format fails during parsing. Incompatible settings,
 /// missing resolutions or ambiguous repairs return [`LockfileError::ResolutionRequired`].
