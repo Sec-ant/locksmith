@@ -76,7 +76,7 @@ export type LockfileError = Error & (
   | { code: 'UNSUPPORTED_VERSION'; details: { version: unknown } }
   | { code: 'UNMET_PEERS'; details: { issues: PeerIssue[] } }
   | { code: 'INVALID_YAML' | 'INVALID_DOCUMENT' | 'WORKSPACE_INPUT' | 'OUTPUT_MISMATCH'; details: null }
-  | { code: 'CLI_FAILED'; exitCode: number | null; signal: NodeJS.Signals | null }
+  | { code: 'CLI_FAILED'; exitCode: number | null; signal: string | null }
 )
 
 export function parse(yaml: string): Promise<Lockfile>
