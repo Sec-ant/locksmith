@@ -539,16 +539,20 @@ fn check_references(
     issues: &mut Vec<ValidationIssue>,
 ) {
     let snapshots = section(document, "snapshots");
+    let mut named = String::new();
     for (_, name, reference) in references(record, kind, source, key, true, issues) {
         if reference.starts_with("link:") {
             continue;
         }
-        let target = snapshot_key(name, reference, snapshots);
-        if !snapshots.is_some_and(|map| map.contains_key(&target)) {
+        named.clear();
+        named.push_str(name);
+        named.push('@');
+        named.push_str(reference);
+        if !snapshots.is_some_and(|map| map.contains_key(&named) || map.contains_key(reference)) {
             issues.push(issue(
                 kind,
                 &[source, key, name],
-                format!("missing snapshot {target}"),
+                format!("missing snapshot {named}"),
             ));
         }
     }

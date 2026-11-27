@@ -430,7 +430,8 @@ pub(crate) fn render(
         } else if SECTIONS.contains(&key.as_str())
             && value.as_object().is_some_and(|map| !map.is_empty())
         {
-            output.push_str(&format!("{key}:\n\n"));
+            output.push_str(key);
+            output.push_str(":\n\n");
             let map = value.as_object().expect("section is a mapping");
             let entries = if let Some(order) = order.filter(|_| key == "importers") {
                 order.keys().map(|k| (k, &map[k])).collect()

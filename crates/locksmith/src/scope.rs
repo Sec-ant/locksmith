@@ -1048,6 +1048,7 @@ fn affected_by(document: &Value, seed: impl Fn(&str) -> bool) -> BTreeSet<String
         .map(|(id, (key, _))| (key.as_str(), id))
         .collect();
     let mut reverse = vec![Vec::new(); records.len()];
+    let mut scratch = String::new();
     for (id, (_, record)) in records.iter().enumerate() {
         for group in ["dependencies", "optionalDependencies"] {
             for (name, reference) in record
@@ -1056,12 +1057,16 @@ fn affected_by(document: &Value, seed: impl Fn(&str) -> bool) -> BTreeSet<String
                 .into_iter()
                 .flatten()
             {
-                if let Some(reference) = reference.as_str()
-                    && let Some(target) = index
-                        .get(format!("{name}@{reference}").as_str())
-                        .or_else(|| index.get(reference))
-                {
-                    reverse[*target].push(id);
+                if let Some(reference) = reference.as_str() {
+                    scratch.clear();
+                    scratch.push_str(name);
+                    scratch.push('@');
+                    scratch.push_str(reference);
+                    if let Some(target) =
+                        index.get(scratch.as_str()).or_else(|| index.get(reference))
+                    {
+                        reverse[*target].push(id);
+                    }
                 }
             }
         }

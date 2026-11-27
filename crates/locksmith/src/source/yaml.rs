@@ -69,35 +69,38 @@ pub(super) fn write_entry(output: &mut String, section: Option<&str>, key: &str,
     if level == 1 {
         output.push_str("  ");
     }
-    if let Some(priority) = priority {
-        let mut sorted = value.clone();
-        order_fields(&mut sorted, priority);
-        render_entry_into(output, key, &sorted, level);
-    } else {
-        render_entry_into(output, key, value, level);
-    }
+    render_entry_with_priority(output, key, value, level, priority);
 }
 
 pub(super) fn scalar(value: &str) -> String {
     write_scalar(value, 0, true, true)
 }
 
-fn order_fields(value: &mut Value, priority: &[&str]) {
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
-            entries.sort_unstable_by(|(a, _), (b, _)| priority_cmp(priority, a, b));
-            for (key, mut value) in entries {
-                order_fields(&mut value, priority);
-                map.insert(key, value);
-            }
+fn write_entries<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    priority: Option<&[&str]>,
+    mut visit: impl FnMut(&'a str, &'a Value),
+) {
+    if let Some(priority) = priority
+        && map.len() > 1
+        && !(priority.is_empty() && {
+            let mut prev: Option<&str> = None;
+            map.keys().all(|k| {
+                let ordered = prev.is_none_or(|p| p <= k.as_str());
+                prev = Some(k.as_str());
+                ordered
+            })
+        })
+    {
+        let mut entries: Vec<(&str, &Value)> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| priority_cmp(priority, a, b));
+        for (key, value) in entries {
+            visit(key, value);
         }
-        Value::Array(items) => {
-            for item in items {
-                order_fields(item, priority);
-            }
+    } else {
+        for (key, value) in map {
+            visit(key, value);
         }
-        _ => {}
     }
 }
 
@@ -123,47 +126,100 @@ fn priority_cmp(priority: &[&str], left: &str, right: &str) -> Ordering {
 ///   single-line and blank-line decisions.
 /// - `force_single_line` — propagated `singleLineOnly`: forces single-line
 ///   scalar styling for keys and for values nested in a single-line map.
-fn render(
+#[allow(clippy::too_many_arguments)]
+fn render_into(
+    out: &mut String,
     value: &Value,
     level: usize,
     block: bool,
     compact: bool,
     object_key: Option<&str>,
     force_single_line: bool,
-) -> String {
+    priority: Option<&[&str]>,
+    space_before_inline: bool,
+) {
     match value {
-        Value::Object(map) => render_map(map, level, block, compact, object_key),
+        Value::Object(map) => render_map_into(
+            out,
+            map,
+            level,
+            block,
+            compact,
+            object_key,
+            priority,
+            space_before_inline,
+        ),
         Value::Array(seq) => {
             let single_line = object_key.is_some_and(is_single_line_key);
             if block && !seq.is_empty() && !single_line {
-                write_block_sequence(seq, level, compact)
+                write_block_sequence_into(out, seq, level, compact, priority, space_before_inline);
             } else {
-                write_flow_sequence(seq, level)
+                if space_before_inline {
+                    out.push(' ');
+                }
+                write_flow_sequence_into(out, seq, level, priority);
             }
         }
-        Value::String(string) => write_scalar(string, level, force_single_line, block),
-        Value::Bool(boolean) => if *boolean { "true" } else { "false" }.to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::Null => "null".to_string(),
+        Value::String(string) => {
+            if space_before_inline {
+                out.push(' ');
+            }
+            write_scalar_into(out, string, level, force_single_line, block);
+        }
+        Value::Bool(boolean) => {
+            if space_before_inline {
+                out.push(' ');
+            }
+            out.push_str(if *boolean { "true" } else { "false" });
+        }
+        Value::Number(number) => {
+            use std::fmt::Write as _;
+            if space_before_inline {
+                out.push(' ');
+            }
+            let _ = write!(out, "{number}");
+        }
+        Value::Null => {
+            if space_before_inline {
+                out.push(' ');
+            }
+            out.push_str("null");
+        }
     }
 }
 
 /// The lockfile's top-level sections and their entries are separated by a
 /// blank line; everything nested inside them is not.
-fn render_map(
+#[allow(clippy::too_many_arguments)]
+fn render_map_into(
+    out: &mut String,
     map: &serde_json::Map<String, Value>,
     level: usize,
     block: bool,
     compact: bool,
     object_key: Option<&str>,
-) -> String {
+    priority: Option<&[&str]>,
+    space_before_inline: bool,
+) {
     let single_line = is_single_line_map(object_key, map);
     if !block || map.is_empty() || single_line {
-        return write_flow_mapping(map, level, single_line);
+        if space_before_inline {
+            out.push(' ');
+        }
+        write_flow_mapping_into(out, map, level, single_line, priority);
+        return;
     }
     let double_line =
         level == 0 || matches!(object_key, Some("packages" | "importers" | "snapshots"));
-    write_block_mapping(map, level, compact, double_line)
+    write_block_mapping_into(
+        out,
+        map,
+        level,
+        compact,
+        double_line,
+        priority,
+        space_before_inline,
+    );
 }
 
 fn is_single_line_key(key: &str) -> bool {
@@ -186,13 +242,12 @@ fn is_single_line_map(object_key: Option<&str>, map: &serde_json::Map<String, Va
 
 /// `generateNextLine`: a newline (doubled when `double_line`) plus this level's
 /// indent.
-fn next_line(level: usize, double_line: bool) -> String {
-    let mut line = String::from("\n");
+fn push_next_line(out: &mut String, level: usize, double_line: bool) {
+    out.push('\n');
     if double_line {
-        line.push('\n');
+        out.push('\n');
     }
-    line.extend(std::iter::repeat_n(' ', INDENT * level));
-    line
+    out.extend(std::iter::repeat_n(' ', INDENT * level));
 }
 
 /// A rendered key longer than this (measured in UTF-16 code units,
@@ -201,94 +256,141 @@ fn next_line(level: usize, double_line: bool) -> String {
 /// 1024 characters, so an inline key of that length would not re-parse.
 const EXPLICIT_KEY_THRESHOLD: usize = 1024;
 
-fn write_block_mapping(
+fn write_block_mapping_into(
+    out: &mut String,
     map: &serde_json::Map<String, Value>,
     level: usize,
     compact: bool,
     double_line: bool,
-) -> String {
-    let mut result = String::new();
-    for (key, value) in map {
-        if !compact || !result.is_empty() {
-            result.push_str(&next_line(level, double_line));
+    priority: Option<&[&str]>,
+    space_before_inline: bool,
+) {
+    let mut first = true;
+    write_entries(map, priority, |key, value| {
+        if !compact || !first {
+            push_next_line(out, level, double_line);
+        } else if space_before_inline {
+            out.push(' ');
         }
-        render_entry_into(&mut result, key, value, level);
-    }
-    if result.is_empty() {
-        "{}".to_string()
-    } else {
-        result
-    }
+        first = false;
+        render_entry_with_priority(out, key, value, level, priority);
+    });
 }
 
 pub(super) fn render_entry_into(result: &mut String, key: &str, value: &Value, level: usize) {
-    let rendered_key = write_scalar(key, level + 1, true, true);
-    let explicit_pair = rendered_key.encode_utf16().count() > EXPLICIT_KEY_THRESHOLD;
+    render_entry_with_priority(result, key, value, level, None);
+}
+
+fn render_entry_with_priority(
+    result: &mut String,
+    key: &str,
+    value: &Value,
+    level: usize,
+    priority: Option<&[&str]>,
+) {
+    let key_start = result.len();
+    write_scalar_into(result, key, level + 1, true, true);
+    let key_bytes = result.len() - key_start;
+    let explicit_pair = key_bytes > EXPLICIT_KEY_THRESHOLD
+        && result[key_start..].encode_utf16().count() > EXPLICIT_KEY_THRESHOLD;
     if explicit_pair {
-        result.push_str("? ");
-        result.push_str(&rendered_key);
-        result.push_str(&next_line(level, false));
-    } else {
-        result.push_str(&rendered_key);
+        result.insert_str(key_start, "? ");
+        push_next_line(result, level, false);
     }
-    let rendered = render(value, level + 1, true, explicit_pair, Some(key), false);
     result.push(':');
-    if !rendered.starts_with('\n') {
-        result.push(' ');
-    }
-    result.push_str(&rendered);
+    render_into(
+        result,
+        value,
+        level + 1,
+        true,
+        explicit_pair,
+        Some(key),
+        false,
+        priority,
+        true,
+    );
 }
 
-fn write_block_sequence(seq: &[Value], level: usize, compact: bool) -> String {
-    let mut result = String::new();
-    for value in seq {
-        let rendered = render(value, level + 1, true, true, None, false);
-        if !compact || !result.is_empty() {
-            result.push_str(&next_line(level, false));
+fn write_block_sequence_into(
+    out: &mut String,
+    seq: &[Value],
+    level: usize,
+    compact: bool,
+    priority: Option<&[&str]>,
+    space_before_inline: bool,
+) {
+    for (index, value) in seq.iter().enumerate() {
+        if !compact || index > 0 {
+            push_next_line(out, level, false);
+        } else if space_before_inline {
+            out.push(' ');
         }
-        result.push('-');
-        if !rendered.starts_with('\n') {
-            result.push(' ');
-        }
-        result.push_str(&rendered);
-    }
-    if result.is_empty() {
-        "[]".to_string()
-    } else {
-        result
+        out.push('-');
+        render_into(
+            out,
+            value,
+            level + 1,
+            true,
+            true,
+            None,
+            false,
+            priority,
+            true,
+        );
     }
 }
 
-fn write_flow_mapping(
+fn write_flow_mapping_into(
+    out: &mut String,
     map: &serde_json::Map<String, Value>,
     level: usize,
     single_line: bool,
-) -> String {
-    let mut result = String::new();
-    for (key, value) in map {
-        if !result.is_empty() {
-            result.push_str(", ");
+    priority: Option<&[&str]>,
+) {
+    out.push('{');
+    let mut first = true;
+    write_entries(map, priority, |key, value| {
+        if !first {
+            out.push_str(", ");
         }
-        result.push_str(&write_scalar(key, level, single_line, false));
-        result.push_str(": ");
-        result.push_str(&render(value, level, false, false, None, single_line));
-    }
-    format!("{{{result}}}")
+        first = false;
+        write_scalar_into(out, key, level, single_line, false);
+        out.push_str(": ");
+        render_into(
+            out,
+            value,
+            level,
+            false,
+            false,
+            None,
+            single_line,
+            priority,
+            false,
+        );
+    });
+    out.push('}');
 }
 
-fn write_flow_sequence(seq: &[Value], level: usize) -> String {
-    let mut result = String::new();
-    for value in seq {
-        if !result.is_empty() {
-            result.push_str(", ");
+fn write_flow_sequence_into(
+    out: &mut String,
+    seq: &[Value],
+    level: usize,
+    priority: Option<&[&str]>,
+) {
+    out.push('[');
+    for (index, value) in seq.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
         }
-        result.push_str(&render(value, level, false, false, None, false));
+        render_into(
+            out, value, level, false, false, None, false, priority, false,
+        );
     }
-    format!("[{result}]")
+    out.push(']');
 }
 
 mod implicit;
 use implicit::resolves_implicitly;
 
 mod scalars;
-use scalars::write_scalar;
+use scalars::{write_scalar, write_scalar_into};
