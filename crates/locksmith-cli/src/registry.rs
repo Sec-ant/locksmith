@@ -452,6 +452,7 @@ fn apply_registry_config(
     config: &mut Value,
     rc: &BTreeMap<String, String>,
     pnpm_major: Option<u64>,
+    environment: impl Fn(&str) -> Option<String>,
 ) -> Result<u64> {
     for (key, field) in [
         ("minimum_release_age", "minimumReleaseAge"),
@@ -466,7 +467,7 @@ fn apply_registry_config(
         ("trust_policy_exclude", "trustPolicyExclude"),
         ("lockfile_include_tarball_url", "lockfileIncludeTarballUrl"),
     ] {
-        let value = env_config("pnpm", key).or_else(|| env_config("npm", key));
+        let value = environment(key);
         let legacy = key.replace('_', "-");
         if let Some(v) = value.as_deref().or_else(|| {
             config
@@ -475,8 +476,9 @@ fn apply_registry_config(
                 .then(|| rc.get(&legacy).map(String::as_str))
                 .flatten()
         }) {
-            config[field] = serde_json::from_str(v).unwrap_or_else(|_| {
-                if matches!(field, "minimumReleaseAgeExclude" | "trustPolicyExclude") {
+            let parsed = serde_json::from_str::<Value>(v);
+            config[field] = if matches!(field, "minimumReleaseAgeExclude" | "trustPolicyExclude") {
+                parsed.ok().filter(Value::is_array).unwrap_or_else(|| {
                     Value::Array(
                         v.split(',')
                             .map(str::trim)
@@ -484,10 +486,10 @@ fn apply_registry_config(
                             .map(Value::from)
                             .collect(),
                     )
-                } else {
-                    Value::from(v)
-                }
-            });
+                })
+            } else {
+                parsed.unwrap_or_else(|_| Value::from(v))
+            };
         }
     }
     match config.get("minimumReleaseAge") {
@@ -505,7 +507,10 @@ fn apply_registry_config(
 impl Registry {
     fn new(workspace: &Value, pnpm_major: Option<u64>, project: ProjectRc<'_>) -> Result<Self> {
         let mut settings = RegistrySettings::load(workspace, project)?;
-        let min_age = apply_registry_config(&mut settings.config, &settings.rc, pnpm_major)?;
+        let min_age =
+            apply_registry_config(&mut settings.config, &settings.rc, pnpm_major, |key| {
+                env_config("pnpm", key).or_else(|| env_config("npm", key))
+            })?;
         let rc = &settings.rc;
         let mut builder = Agent::config_builder()
             .max_redirects(0)
@@ -571,7 +576,13 @@ impl Registry {
         }
         let mut res = request
             .call()
-            .map_err(|e| format!("registry metadata for {name}: {e}"))?;
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                if matches!(error, ureq::Error::StatusCode(429)) {
+                    error.into()
+                } else {
+                    format!("registry metadata for {name}: {error}").into()
+                }
+            })?;
         if !res.status().is_success() {
             return Err(format!("registry metadata for {name}: HTTP {}", res.status()).into());
         }
@@ -608,18 +619,22 @@ impl Registry {
                         let mut agent = Agent::new_with_config(config.clone());
                         let mut route = String::new();
                         while let Some(&name) = requests.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            let result = client
-                                .package_base(name)
-                                .and_then(|base| {
-                                    if !route.is_empty() && route != base {
-                                        agent = Agent::new_with_config(config.clone());
-                                    }
-                                    route.clone_from(&base);
-                                    let packument = client.fetch_package(&agent, name, &base)?;
-                                    Ok((base, packument))
-                                })
-                                .map_err(|error| error.to_string());
-                            fetched.push((name.to_owned(), result));
+                            let result = client.package_base(name).and_then(|base| {
+                                if !route.is_empty() && route != base {
+                                    agent = Agent::new_with_config(config.clone());
+                                }
+                                route.clone_from(&base);
+                                let packument = client.fetch_package(&agent, name, &base)?;
+                                Ok((base, packument))
+                            });
+                            // A concurrent prefetch can be throttled even when a
+                            // serial request would succeed. Fetch it on demand.
+                            if !matches!(
+                                result.as_ref().err().and_then(|e| e.downcast_ref()),
+                                Some(ureq::Error::StatusCode(429))
+                            ) {
+                                fetched.push((name.to_owned(), result.map_err(|e| e.to_string())));
+                            }
                         }
                         fetched
                     })
@@ -647,7 +662,13 @@ impl Registry {
                     let packument = self.fetch_package(&self.agent, name, &base)?;
                     Ok((base, packument))
                 })
-                .map_err(|error| error.to_string());
+                .map_err(|error| {
+                    if matches!(error.downcast_ref(), Some(ureq::Error::StatusCode(429))) {
+                        format!("registry metadata for {name}: {error}")
+                    } else {
+                        error.to_string()
+                    }
+                });
             self.packages.insert(name.to_owned(), result);
         }
         let (base, doc) = self.packages[name].as_ref().map_err(String::as_str)?;
@@ -686,22 +707,28 @@ minimum-release-age=60
 minimum-release-age-exclude=pkg-a, @org/pkg-b
 minimum-release-age-ignore-missing-time=true
 trust-policy=no-downgrade
-trust-policy-exclude=trusted-pkg
+trust-policy-exclude=123
 ";
         project_rc(&mut rc, text, false);
         assert_eq!(rc["minimum-release-age"], "60");
         assert_eq!(rc["minimum-release-age-exclude"], "pkg-a, @org/pkg-b");
         assert_eq!(rc["minimum-release-age-ignore-missing-time"], "true");
-        assert_eq!(rc["trust-policy-exclude"], "trusted-pkg");
+        assert_eq!(rc["trust-policy-exclude"], "123");
 
         let mut config = serde_json::json!({});
-        let min_age = apply_registry_config(&mut config, &rc, Some(12)).unwrap();
+        let min_age = apply_registry_config(&mut config, &rc, Some(12), |_| None).unwrap();
         assert_eq!(min_age, 60);
         assert_eq!(
             config["minimumReleaseAgeExclude"],
             json!(["pkg-a", "@org/pkg-b"])
         );
         assert_eq!(config["minimumReleaseAgeIgnoreMissingTime"], json!(true));
-        assert_eq!(config["trustPolicyExclude"], json!(["trusted-pkg"]));
+        assert_eq!(config["trustPolicyExclude"], json!(["123"]));
+        let mut config = json!({});
+        apply_registry_config(&mut config, &rc, Some(12), |key| {
+            (key == "trust_policy_exclude").then(|| r#"["123"]"#.into())
+        })
+        .unwrap();
+        assert_eq!(config["trustPolicyExclude"], json!(["123"]));
     }
 }

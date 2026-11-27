@@ -29,7 +29,14 @@ struct Registry {
 }
 
 impl Registry {
-    fn serve(mut packages: BTreeMap<&'static str, Value>) -> Self {
+    fn serve(packages: BTreeMap<&'static str, Value>) -> Self {
+        Self::serve_with_throttle(packages, |_| false)
+    }
+
+    fn serve_with_throttle(
+        mut packages: BTreeMap<&'static str, Value>,
+        mut throttle: impl FnMut(&str) -> bool + Send + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let base = format!("http://{address}");
@@ -65,11 +72,15 @@ impl Registry {
                     path: format!("{registry}/{name}"),
                     auth,
                 });
-                let (status, body) = packages
-                    .get(name.as_ref())
-                    .map_or(("404 Not Found", "{}".to_owned()), |doc| {
-                        ("200 OK", doc.to_string())
-                    });
+                let (status, body) = if throttle(&name) {
+                    ("429 Too Many Requests", "{}".to_owned())
+                } else {
+                    packages
+                        .get(name.as_ref())
+                        .map_or(("404 Not Found", "{}".to_owned()), |doc| {
+                            ("200 OK", doc.to_string())
+                        })
+                };
                 write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
             requests
@@ -345,6 +356,57 @@ fn a_missing_package_is_requested_once_for_multiple_selectors() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("404"));
     assert_eq!(registry.finish().len(), 1);
+}
+
+#[test]
+fn merge_retries_a_throttled_prefetch_after_the_batch() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut throttled = false;
+    let registry = Registry::serve_with_throttle(
+        BTreeMap::from([
+            ("one", json!({"name":"one", "versions":{"1.0.0":{}}})),
+            ("two", json!({"name":"two", "versions":{"1.0.0":{}}})),
+        ]),
+        move |name| name == "two" && !std::mem::replace(&mut throttled, true),
+    );
+    let config = json!({"registry": registry.base});
+    write(
+        root,
+        "ctx",
+        &json!({"target":"ours", "manifests":{".":{"dependencies":{"one":"1.0.0","two":"1.0.0"}}},
+            "configuration":config,"configurations":[config,config,config],"patches":{}}),
+    );
+    write(
+        root,
+        "lock",
+        &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
+    );
+    let result = run(
+        root,
+        CLI,
+        &[
+            "merge",
+            "lock",
+            "lock",
+            "lock",
+            "--context",
+            "ctx",
+            "--allow-network",
+        ],
+    );
+    let mut paths: Vec<_> = registry.finish().into_iter().map(|r| r.path).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/one", "/two", "/two"]);
+    let graph = output(result);
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["one"]["version"],
+        "1.0.0"
+    );
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["two"]["version"],
+        "1.0.0"
+    );
 }
 
 #[test]
@@ -685,49 +747,62 @@ fn repair_resolves_missing_catalog_entries_in_lowest_direct_mode() {
 
 #[test]
 fn project_rc_exclusion_and_missing_time_settings_apply_during_lookup() {
-    let dir = tempdir().unwrap();
-    let root = dir.path();
-    let registry = Registry::serve(BTreeMap::from([(
-        "exempt",
-        json!({"name": "exempt", "dist-tags": {"latest": "1.0.0"}, "versions": {"1.0.0": {}}}),
-    )]));
-    fs::write(
+    for (excluded, ignore_missing_time) in [(true, false), (false, true), (false, false)] {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let registry = Registry::serve(BTreeMap::from([(
+            "123",
+            json!({"name": "123", "dist-tags": {"latest": "1.0.0"}, "versions": {"1.0.0": {}}}),
+        )]));
+        fs::write(
         root.join(".npmrc"),
         format!(
-            "registry={}\nminimum-release-age=1440\nminimum-release-age-exclude=exempt\nminimum-release-age-ignore-missing-time=true\ntrust-policy=no-downgrade\ntrust-policy-exclude=exempt\n",
-            registry.base
+            "registry={}\nminimum-release-age=1440\nminimum-release-age-exclude={}\nminimum-release-age-ignore-missing-time={ignore_missing_time}\ntrust-policy=no-downgrade\ntrust-policy-exclude=123\n",
+            registry.base, if excluded { "123" } else { "other" }
         ),
     )
     .unwrap();
-    write(
-        root,
-        "package.json",
-        &json!({"dependencies": {"exempt": "1.0.0"}}),
-    );
-    write(
-        root,
-        "pnpm-lock.yaml",
-        &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
-    );
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=test",
-            "-c",
-            "user.email=test@example.org",
-            "commit",
-            "-qm",
-            "base",
-        ],
-    ] {
-        assert!(run(root, "git", &args).status.success());
+        write(
+            root,
+            "package.json",
+            &json!({"dependencies": {"123": "1.0.0"}}),
+        );
+        write(
+            root,
+            "pnpm-lock.yaml",
+            &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
+        );
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        ] {
+            assert!(run(root, "git", &args).status.success());
+        }
+        let result = run(root, CLI, &["repair", "HEAD", "--allow-network"]);
+        let requests = registry.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/123");
+        if excluded || ignore_missing_time {
+            let graph = output(result);
+            assert_eq!(
+                graph["importers"]["."]["dependencies"]["123"]["version"],
+                "1.0.0"
+            );
+        } else {
+            assert_eq!(result.status.code(), Some(1));
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("missing publish time for 123@1.0.0")
+            );
+        }
     }
-    let graph = output(run(root, CLI, &["repair", "HEAD", "--allow-network"]));
-    assert_eq!(
-        graph["importers"]["."]["dependencies"]["exempt"]["version"],
-        "1.0.0"
-    );
-    let _ = registry.finish();
 }

@@ -447,7 +447,15 @@ impl Blobs {
         config_files: &'static [&'static str],
         hook_files: &'static [&'static str],
     ) -> Result<Self> {
-        let mut child = Command::new("git")
+        Self::spawn(Command::new("git"), config_files, hook_files)
+    }
+
+    fn spawn(
+        mut command: Command,
+        config_files: &'static [&'static str],
+        hook_files: &'static [&'static str],
+    ) -> Result<Self> {
+        let mut child = command
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -528,20 +536,46 @@ mod tests {
 
     #[test]
     fn blobs_stays_synchronized_after_non_blob_object() {
-        let head = output(&["rev-parse", "HEAD"]).unwrap().trim().to_owned();
-        let tree = output(&["rev-parse", "HEAD^{tree}"])
-            .unwrap()
-            .trim()
-            .to_owned();
-        let mut blobs = Blobs::open(&["package.json"], &[".pnpmfile.mjs"]).unwrap();
-        let commit_err = blobs.read_object(&head).unwrap_err().to_string();
-        assert!(commit_err.contains("expected a Git blob"));
-        let tree_err = blobs.read_object(&tree).unwrap_err().to_string();
-        assert!(tree_err.contains("expected a Git blob"));
-        let cargo_toml = blobs
-            .read(&head, "crates/locksmith-cli/Cargo.toml")
-            .unwrap()
-            .unwrap();
-        assert!(cargo_toml.contains("locksmith-cli"));
+        let dir = tempfile::tempdir().unwrap();
+        let git = || {
+            let mut command = Command::new("git");
+            command
+                .current_dir(dir.path())
+                .env_clear()
+                .env("PATH", env::var_os("PATH").unwrap())
+                .env("HOME", dir.path())
+                .env("XDG_CONFIG_HOME", dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+            command
+        };
+        checked(git().args(["init", "-q"])).unwrap();
+        let contents = "known blob contents\n";
+        std::fs::write(dir.path().join("fixture.txt"), contents).unwrap();
+        checked(git().args(["add", "fixture.txt"])).unwrap();
+        checked(git().args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "fixture",
+        ]))
+        .unwrap();
+
+        let head = checked(git().args(["rev-parse", "HEAD"])).unwrap();
+        let tree = checked(git().args(["rev-parse", "HEAD^{tree}"])).unwrap();
+        let mut blobs = Blobs::spawn(git(), &[], &[]).unwrap();
+        for object in [head.trim(), tree.trim()] {
+            let error = blobs.read_object(object).unwrap_err().to_string();
+            assert!(error.contains("expected a Git blob"));
+        }
+        assert_eq!(
+            blobs
+                .read_object(&format!("{}:fixture.txt", head.trim()))
+                .unwrap()
+                .as_deref(),
+            Some(contents)
+        );
     }
 }
