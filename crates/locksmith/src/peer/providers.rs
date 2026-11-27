@@ -62,22 +62,22 @@ pub(crate) fn bound_reference<'a>(
     if let Some(value) = lookup(name) {
         return Some(value.into());
     }
-    let (target, _) = pin::package_key(actual).rsplit_once('@')?;
+    let (target, _) = canonical_binding(name, actual);
     let value = lookup(target)?;
-    Some(
-        if value.starts_with("link:") || pin::package_key(value).contains('@') {
-            value.into()
-        } else {
-            format!("{target}@{value}")
-        },
-    )
+    let (_, version) = canonical_binding(target, value);
+    Some(if value.starts_with("link:") || version != value {
+        value.into()
+    } else {
+        format!("{target}@{value}")
+    })
 }
 
 pub(crate) fn canonical_binding<'a>(name: &'a str, reference: &'a str) -> (&'a str, &'a str) {
-    if reference.starts_with("link:") {
+    if reference.starts_with("link:") || reference.starts_with("file:") {
         return (name, reference);
     }
-    if let Some((actual, _)) = pin::package_key(reference).rsplit_once('@') {
+    let key = pin::package_key(reference);
+    if let Some((actual, _)) = key.split_once("@file:").or_else(|| key.rsplit_once('@')) {
         (actual, &reference[actual.len() + 1..])
     } else {
         (name, reference)
@@ -94,8 +94,9 @@ mod tests {
             ("2.0.0", "@org/real@2.0.0"),
             ("replacement@2.0.0", "replacement@2.0.0"),
             ("link:packages/real", "link:packages/real"),
+            ("file:vendor/new@2.0.0", "@org/real@file:vendor/new@2.0.0"),
         ] {
-            let reference = bound_reference("compat", "@org/real@1.0.0", |name| {
+            let reference = bound_reference("compat", "@org/real@file:vendor/old@1.0.0", |name| {
                 (name == "@org/real").then_some(binding)
             });
             assert_eq!(reference.as_deref(), Some(expected));

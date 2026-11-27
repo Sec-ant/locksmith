@@ -746,6 +746,56 @@ fn repair_resolves_missing_catalog_entries_in_lowest_direct_mode() {
 }
 
 #[test]
+fn repair_can_use_registry_evidence_when_parent_workspace_configuration_is_invalid() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([(
+        "dep",
+        json!({"name": "dep", "versions": {"1.0.0": {}}}),
+    )]));
+    let git = |args: &[&str]| {
+        let result = run(root, "git", args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "test"]);
+    git(&["config", "user.email", "test@example.org"]);
+    write(
+        root,
+        "package.json",
+        &json!({"dependencies":{"dep":"1.0.0"}}),
+    );
+    let lock = json!({"lockfileVersion":"9.0","importers":{".":{}}});
+    let mut parent_lock = lock.clone();
+    parent_lock["snapshots"]["unused@1.0.0"] = json!({});
+    write(root, "pnpm-lock.yaml", &parent_lock);
+    fs::write(root.join("pnpm-workspace.yaml"), "packages: [\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "parent"]);
+
+    write(root, "pnpm-lock.yaml", &lock);
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        &json!({"registry":registry.base,"minimumReleaseAge":0}),
+    );
+    git(&["commit", "-qam", "repair target"]);
+    let result = run(root, CLI, &["repair", "HEAD", "--allow-network"]);
+    let requests = registry.finish();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/dep");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skipping unusable parent"));
+    assert_eq!(
+        output(result)["importers"]["."]["dependencies"]["dep"]["version"],
+        "1.0.0"
+    );
+}
+
+#[test]
 fn project_rc_exclusion_and_missing_time_settings_apply_during_lookup() {
     for (excluded, ignore_missing_time) in [(true, false), (false, true), (false, false)] {
         let dir = tempdir().unwrap();

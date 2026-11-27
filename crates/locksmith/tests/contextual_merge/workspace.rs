@@ -801,6 +801,48 @@ fn registry_pin_and_matching_workspace_release_follow_final_link_policy() {
 }
 
 #[test]
+fn merge_prefers_a_legacy_catalog_self_link_over_a_registry_release() {
+    let config = cfg(&json!({"catalog":{"app":"^1"},"linkWorkspacePackages":true}));
+    let manifests = BTreeMap::from([
+        (".".into(), json!({})),
+        (
+            "app".into(),
+            json!({"name":"app","version":"1.2.0","dependencies":{"app":"catalog:"}}),
+        ),
+    ]);
+    let local = Lockfile::parse(&json!({
+        "lockfileVersion":"9.0",
+        "catalogs":{"default":{"app":{"specifier":"^1","version":"^1"}}},
+        "importers":{".":{},"app":{"dependencies":{"app":{"specifier":"catalog:","version":"link:"}}}}
+    }).to_string()).unwrap();
+    let registry = Lockfile::parse(&json!({
+        "lockfileVersion":"9.0",
+        "catalogs":{"default":{"app":{"specifier":"^1","version":"1.9.0"}}},
+        "importers":{".":{},"app":{"dependencies":{"app":{"specifier":"catalog:","version":"1.9.0"}}}},
+        "packages":{"app@1.9.0":{"resolution":{}}},
+        "snapshots":{"app@1.9.0":{}}
+    }).to_string()).unwrap();
+    let merged = merge(
+        &local,
+        &local,
+        &registry,
+        Some(&MergeContext {
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configurations: [&config; 3],
+            configuration: &config,
+            patches: &BTreeMap::new(),
+            registry: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        merged.project().unwrap()["importers"]["app"]["dependencies"]["app"]["version"],
+        "link:"
+    );
+}
+
+#[test]
 fn catalog_links_use_the_local_manifest_version_with_context() {
     let config = cfg(&json!({"catalogs":{"local":{"lib":"^1"}},"linkWorkspacePackages":true}));
     let mut value = json!({"lockfileVersion":"9.0","catalogs":{"local":{"lib":{"specifier":"^1","version":"1.2.0"}}},

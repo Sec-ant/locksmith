@@ -440,7 +440,7 @@ pub struct Blobs {
     config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
     input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    output: Option<BufReader<ChildStdout>>,
 }
 impl Blobs {
     pub fn open(
@@ -461,7 +461,9 @@ impl Blobs {
             .stdout(Stdio::piped())
             .spawn()?;
         let input = Some(child.stdin.take().expect("piped git stdin"));
-        let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
+        let output = Some(BufReader::new(
+            child.stdout.take().expect("piped git stdout"),
+        ));
         Ok(Self {
             conflicts: BTreeSet::new(),
             config_files,
@@ -484,8 +486,9 @@ impl Blobs {
         let input = self.input.as_mut().expect("cat-file stdin open");
         writeln!(input, "{object}")?;
         input.flush()?;
+        let output = self.output.as_mut().expect("cat-file stdout open");
         let mut header = String::new();
-        self.output.read_line(&mut header)?;
+        output.read_line(&mut header)?;
         if header.trim_end() == format!("{object} missing") {
             return Ok(None);
         }
@@ -505,15 +508,15 @@ impl Blobs {
             let mut scratch = [0u8; 4096];
             while remaining > 0 {
                 let chunk = remaining.min(scratch.len());
-                self.output.read_exact(&mut scratch[..chunk])?;
+                output.read_exact(&mut scratch[..chunk])?;
                 remaining -= chunk;
             }
             return Err(format!("expected a Git blob at {object}").into());
         }
         let mut bytes = vec![0; length];
-        self.output.read_exact(&mut bytes)?;
+        output.read_exact(&mut bytes)?;
         let mut delimiter = [0];
-        self.output.read_exact(&mut delimiter)?;
+        output.read_exact(&mut delimiter)?;
         if delimiter[0] != b'\n' {
             return Err("invalid git cat-file response".into());
         }
@@ -523,6 +526,7 @@ impl Blobs {
 impl Drop for Blobs {
     fn drop(&mut self) {
         drop(self.input.take());
+        drop(self.output.take());
         if self.child.wait().is_err() {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -533,6 +537,30 @@ impl Drop for Blobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn blobs_closes_stdout_when_a_response_header_is_invalid() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "read -r request; printf 'invalid header\\n'; exec yes payload",
+        ]);
+        let mut blobs = Blobs::spawn(command, &[], &[]).unwrap();
+        let pid = blobs.child.id().to_string();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let malformed = blobs.read_object("HEAD").is_err();
+            drop(blobs);
+            finished.send(malformed).unwrap();
+        });
+        let cleared = completion.recv_timeout(std::time::Duration::from_secs(5));
+        if cleared.is_err() {
+            Command::new("kill").args(["-KILL", &pid]).status().unwrap();
+        }
+        reader.join().unwrap();
+        assert_eq!(cleared, Ok(true));
+    }
 
     #[test]
     fn blobs_stays_synchronized_after_non_blob_object() {
@@ -545,7 +573,8 @@ mod tests {
                 .env("PATH", env::var_os("PATH").unwrap())
                 .env("HOME", dir.path())
                 .env("XDG_CONFIG_HOME", dir.path())
-                .env("GIT_CONFIG_NOSYSTEM", "1");
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_ATTR_NOSYSTEM", "1");
             command
         };
         checked(git().args(["init", "-q"])).unwrap();

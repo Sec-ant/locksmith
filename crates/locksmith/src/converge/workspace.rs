@@ -64,10 +64,10 @@ pub(super) fn checked_checksum(doc: &Value, cfg: &WorkspaceConfig) -> Result<(),
 pub(super) fn apply(
     baseline: &Lockfile,
     candidate: &Lockfile,
-    before: &WorkspaceConfig,
-    after: &WorkspaceConfig,
+    [before, after]: [&WorkspaceConfig; 2],
     inputs: super::ChangeSet<'_>,
     registry: Option<&crate::RegistryMetadata>,
+    inferred: bool,
 ) -> Result<Option<(Lockfile, Projection)>, ProjectionError> {
     fn rules(c: &WorkspaceConfig) -> Option<&serde_json::Map<String, Value>> {
         c.resolution
@@ -104,7 +104,9 @@ pub(super) fn apply(
         .clone_from(&after.resolution.package_extensions);
     expected.catalogs.clone_from(&after.catalogs);
     expected.overrides.clone_from(&after.overrides);
-    if expected != *after || base["settings"] != donor["settings"] {
+    let same_settings = base["settings"] == donor["settings"]
+        || inferred && after.equivalent_recorded_settings(base, donor)?;
+    if expected != *after || !same_settings {
         return Err(missing(
             &["configuration"],
             "other workspace resolution settings changed",

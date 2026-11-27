@@ -148,6 +148,49 @@ impl WorkspaceConfig {
         settings
     }
 
+    pub(crate) fn equivalent_recorded_settings(
+        &self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<bool, LockfileError> {
+        if LockSettings::from_document(left, self.pnpm_version.as_ref())?
+            != LockSettings::from_document(right, self.pnpm_version.as_ref())?
+        {
+            return Ok(false);
+        }
+        let defaults = [
+            ("peersSuffixMaxLength", Value::from(1000)),
+            ("injectWorkspacePackages", Value::Bool(false)),
+            ("addMissingPeerTypes", Value::Bool(false)),
+            ("autoDedupe", Value::Bool(false)),
+            ("dedupeInjectedDeps", Value::Bool(true)),
+            ("dedupePeerDependents", Value::Bool(true)),
+            ("linkWorkspacePackages", Value::Bool(false)),
+            ("integrityTarget", Value::from("resource")),
+        ];
+        let [left, right] = [left, right].map(|document| {
+            let mut settings = document["settings"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            for name in [
+                "autoInstallPeers",
+                "dedupePeers",
+                "projectScopedOptionalPeers",
+                "excludeLinksFromLockfile",
+            ] {
+                settings.remove(name);
+            }
+            for (name, default) in &defaults {
+                if settings.get(*name) == Some(default) {
+                    settings.remove(*name);
+                }
+            }
+            settings
+        });
+        Ok(left == right)
+    }
+
     pub(crate) fn check_recorded_peer_suffix(&self, doc: &Value) -> Result<(), LockfileError> {
         let key = "peersSuffixMaxLength";
         let default_suffix = Value::from(1000);

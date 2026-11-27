@@ -84,24 +84,12 @@ pub(crate) fn parse_for_repair(
         let Some(fields) = blocks(raw, 0) else {
             continue;
         };
-        let kind = match fields.iter().find(|(key, _)| key == "importers") {
-            None => Some(DocumentKind::Project),
-            Some((_, range)) => {
-                let slice = &raw[range.clone()];
-                serde_saphyr::from_str_with_options::<Value>(slice, options(slice.len()))
-                    .ok()
-                    .map(|value| {
-                        let root = &value["importers"]["."];
-                        if root.get("configDependencies").is_some()
-                            || root.get("packageManagerDependencies").is_some()
-                        {
-                            DocumentKind::Environment
-                        } else {
-                            DocumentKind::Project
-                        }
-                    })
-            }
-        };
+        let kind = reference.and_then(|_| {
+            let mut opts = options(raw.len());
+            opts.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::PassThrough;
+            let mut value = serde_saphyr::from_str_with_options::<Value>(raw, opts).ok()?;
+            super::document_kind(value.as_object_mut()?, &BTreeMap::new()).ok()
+        });
         for (section, field) in fields {
             duplicate_entries(raw, &section, field, start, kind, reference, &mut removals)?;
         }

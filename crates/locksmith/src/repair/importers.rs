@@ -107,7 +107,7 @@ pub(super) fn repair<'a>(
             };
             let retained = prior.and_then(|dep| dep["version"].as_str()).filter(|v| {
                 if let Some((link, _)) = &workspace_link {
-                    return link == v || link == "link:." && *v == "link:";
+                    return crate::workspace_links::same_link_pin(link, v);
                 }
                 if (spec.starts_with("workspace:") || catalog.is_some()) && v.starts_with("link:") {
                     return false;
@@ -289,12 +289,13 @@ fn prune_catalogs(
                     .get(catalog)
                     .and_then(|m| m.get(name))
                     .is_none_or(|r| {
+                        let (target, _) = context.configuration.registry_request(name, r);
                         !(catalog_fits(r, entry)
                             || catalog::link_entry_fits(r, entry)
                                 && context
                                     .manifests
                                     .values()
-                                    .any(|m| m["name"].as_str() == Some(name.as_str())))
+                                    .any(|m| m["name"].as_str() == Some(target)))
                     })
             {
                 let catalogs = result.to_mut()["catalogs"]

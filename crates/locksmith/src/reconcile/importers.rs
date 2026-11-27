@@ -2,7 +2,7 @@
 use super::{GraphSources, MergeContext, opaque, peer_names};
 use crate::{
     LockfileError, Value, graph, manifest, patch, peer, pin, schema,
-    workspace_links::{WorkspaceLinks, injected},
+    workspace_links::{WorkspaceLinks, injected, same_link_pin},
 };
 use crate::{catalog::accepts_pin, error::missing, pin::reference};
 use serde_json::{Map, json};
@@ -321,7 +321,7 @@ impl PinSelector<'_, '_> {
             let Some(reference) = dep.get("version").and_then(Value::as_str) else {
                 continue;
             };
-            if local.map(String::as_str) != Some(reference)
+            if !local.is_some_and(|pin| same_link_pin(pin, reference))
                 && !accepts_pin(
                     name,
                     specifier,

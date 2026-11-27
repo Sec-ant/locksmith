@@ -60,15 +60,18 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                         if let Some(source) = blobs.read(&parent, &file)?
                             && source != text
                         {
-                            let lock = match Lockfile::try_from(source) {
-                                Ok(lock) => lock,
+                            let parent_evidence = (|| -> Result<_> {
+                                let lock = Lockfile::try_from(source)?;
+                                let config =
+                                    parent_configuration(&mut blobs, &parent, prefix, &lock)?;
+                                Ok(ParentEvidence { lock, config })
+                            })();
+                            match parent_evidence {
+                                Ok(parent) => evidence.push(parent),
                                 Err(e) => {
                                     eprintln!("locksmith: skipping unusable parent {parent}: {e}");
-                                    continue;
                                 }
-                            };
-                            let config = parent_configuration(&mut blobs, &parent, prefix, &lock)?;
-                            evidence.push(ParentEvidence { lock, config });
+                            }
                         }
                     }
                     evidence

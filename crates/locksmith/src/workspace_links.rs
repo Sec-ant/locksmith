@@ -7,6 +7,10 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+pub(crate) fn same_link_pin(left: &str, right: &str) -> bool {
+    left == right || matches!((left, right), ("link:", "link:.") | ("link:.", "link:"))
+}
+
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
     manifest
         .get("dependenciesMeta")

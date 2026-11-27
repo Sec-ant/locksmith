@@ -34,9 +34,40 @@ fn catalog_pin_fits(
     if let Some(path) = pin.strip_prefix("link:") {
         links.contains_target(importer, path)
             && entry.is_none_or(|entry| catalog::link_entry_fits(spec, entry))
+            && catalog_link_destination(spec, importer, config).is_none_or(|(from, declared)| {
+                graph::linked_importer(importer, path) == graph::linked_importer(from, declared)
+            })
     } else {
         catalog::consumer_fits(name, spec, pin, entry, Some(config))
     }
+}
+
+fn catalog_link_destination<'a>(
+    spec: &'a str,
+    importer: &'a str,
+    config: &WorkspaceConfig,
+) -> Option<(&'a str, &'a str)> {
+    if let Some(path) = spec
+        .strip_prefix("workspace:")
+        .map(str::trim)
+        .filter(|path| path.starts_with('.'))
+    {
+        // pnpm 12.18 rebases relative workspace catalog paths to the catalog's root.
+        let from = if config
+            .pnpm_version
+            .as_ref()
+            .is_none_or(|version| version >= &(12, 18, 0).into())
+        {
+            "."
+        } else {
+            importer
+        };
+        return Some((from, path));
+    }
+    spec.strip_prefix("link:")
+        .or_else(|| spec.starts_with('.').then_some(spec))
+        .filter(|path| !path.starts_with('/'))
+        .map(|path| (".", path))
 }
 
 pub(in crate::converge) fn checked_overrides(

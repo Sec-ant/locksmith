@@ -772,34 +772,58 @@ fn repair_preserves_legacy_catalog_self_link_without_registry_evidence() {
 
 #[test]
 fn repair_preserves_unused_workspace_link_catalog_entries() {
-    let manifests = BTreeMap::from([
+    let mut manifests = BTreeMap::from([
         (".".into(), json!({})),
         ("sdk".into(), json!({"name": "sdk", "version": "1.2.0"})),
     ]);
     let config = WorkspaceConfig::from_pnpm(
-        &json!({"catalog": {"sdk": "^1"}, "linkWorkspacePackages": true}),
+        &json!({"catalog": {"sdk": "^1", "compat": "npm:sdk@^1"}, "linkWorkspacePackages": true}),
     )
     .unwrap();
     let doc = json!({
         "lockfileVersion": "9.0",
-        "catalogs": {"default": {"sdk": {"specifier": "^1", "version": "^1"}}},
+        "catalogs": {"default": {
+            "sdk": {"specifier": "^1", "version": "^1"},
+            "compat": {"specifier": "npm:sdk@^1", "version": "npm:sdk@^1"}
+        }},
         "importers": {".": {}, "sdk": {}}
     });
-    let repaired = repair(
-        &doc.to_string(),
-        &RepairContext {
-            manifests: &manifests,
-            configuration: &config,
-            patches: &BTreeMap::new(),
-            parents: &[],
-            registry: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        repaired.project().unwrap()["catalogs"]["default"]["sdk"],
-        json!({"specifier": "^1", "version": "^1"})
+    for expected in [Some(&doc["catalogs"]), None] {
+        let repaired = repair(
+            &doc.to_string(),
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(repaired.project().unwrap().get("catalogs"), expected);
+        manifests.get_mut("sdk").unwrap()["name"] = "other".into();
+    }
+}
+
+#[test]
+fn snapshot_witness_recovers_project_duplicates_with_importer_aliases() {
+    use locksmith::RepairInput;
+
+    let duplicates = "snapshots:\n  dep@1.0.0: {}\n  dep@1.0.0: {optional: true}\n";
+    let project = "lockfileVersion: '9.0'\nx-root: &root {}\nimporters: {'.': *root}\n";
+    let witness = Lockfile::parse(&format!("{project}snapshots: {{dep@1.0.0: {{}}}}\n")).unwrap();
+    assert!(
+        RepairInput::parse_with_snapshot_reference(&format!("{project}{duplicates}"), &witness)
+            .is_ok()
     );
+
+    let environment =
+        "lockfileVersion: '9.0'\nx-root: &root {configDependencies: {}}\nimporters: {'.': *root}\n";
+    let problem = format!("{environment}{duplicates}---\n{project}");
+    assert!(matches!(
+        RepairInput::parse_with_snapshot_reference(&problem, &witness),
+        Err(LockfileError::ResolutionRequired { path, .. }) if path == ["snapshots", "dep@1.0.0"]
+    ));
 }
 
 #[test]

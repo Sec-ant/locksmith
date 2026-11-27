@@ -35,3 +35,4 @@ module.exports = {
   convergeWorkspace: (ref, options) => runWorkspace('converge', revisionArgs(ref, options), options),
   repairWorkspace: (ref = 'HEAD', options) => runWorkspace('repair', revisionArgs(ref, options), options),
 };
+Object.defineProperty(module.exports, 'default', { value: module.exports });

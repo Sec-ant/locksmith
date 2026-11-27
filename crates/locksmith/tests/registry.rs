@@ -564,6 +564,7 @@ fn published_optional_peer_rebinds_and_alias_full_keys_survive_expansion() {
                     ".": {
                         "dependencies": {
                             "helper": {"specifier": helper_version, "version": helper_version},
+                            "alias": {"specifier": "npm:plugin@1.0.0", "version": plugin_key},
                             "plugin": {"specifier": "1.0.0", "version": format!("1.0.0(helper@{helper_version})")}
                         }
                     }
@@ -586,7 +587,7 @@ fn published_optional_peer_rebinds_and_alias_full_keys_survive_expansion() {
     let config = WorkspaceConfig::default();
     let manifests = BTreeMap::from([(
         ".".into(),
-        json!({"dependencies": {"helper": "2.0.0", "plugin": "1.0.0", "widget": "1.0.0"}}),
+        json!({"dependencies": {"helper": "2.0.0", "alias": "npm:plugin@1.0.0", "plugin": "1.0.0", "widget": "1.0.0"}}),
     )]);
     let result = merge(
         &base,
@@ -604,6 +605,10 @@ fn published_optional_peer_rebinds_and_alias_full_keys_survive_expansion() {
     .unwrap();
     result.validate().unwrap();
     let doc = result.project().unwrap();
+    assert_eq!(
+        doc["importers"]["."]["dependencies"]["alias"]["version"],
+        "plugin@1.0.0(helper@2.0.0)"
+    );
     assert_eq!(
         doc["snapshots"]["widget@1.0.0(plugin@1.0.0(helper@2.0.0))"]["optionalDependencies"]["plugin"],
         "1.0.0(helper@2.0.0)"

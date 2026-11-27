@@ -307,7 +307,25 @@ fn select(
                 "the final workspace configuration is required",
             )
         })?;
-        match workspace::apply(baseline, candidate, before, after, inputs, options.registry) {
+        let inferred = options.baseline_configuration.is_none();
+        if inferred && let Some(environment) = baseline.environment() {
+            let issues = graph::validate_with_config(
+                environment,
+                crate::DocumentKind::Environment,
+                Some(before),
+            );
+            if !issues.is_empty() {
+                return Err(LockfileError::InvalidGraph(issues));
+            }
+        }
+        match workspace::apply(
+            baseline,
+            candidate,
+            [before, after],
+            inputs,
+            options.registry,
+            inferred,
+        ) {
             Ok(plan) => plan,
             Err(workspace::ProjectionError::Input(error)) => return Err(error),
             Err(workspace::ProjectionError::MixedPeers) => {
