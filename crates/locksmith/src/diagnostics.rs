@@ -2,7 +2,7 @@
 
 mod range;
 
-use crate::{Lockfile, LockfileError, Value, graph, manifest, pin};
+use crate::{Lockfile, LockfileError, Value, graph, pin, schema};
 use node_semver::Version;
 pub(crate) use range::PeerRange;
 use serde::Serialize;
@@ -192,7 +192,9 @@ pub(crate) fn scan(
             .into_iter()
             .flatten()
         {
-            let wanted = declaration.as_str().expect("validated peer declaration");
+            let Some(wanted) = declaration.as_str() else {
+                continue;
+            };
             let binding = graph::dependency(body, name).map(|(_, r)| r);
             if binding.is_none() && package["peerDependenciesMeta"][name]["optional"] == true {
                 continue;
@@ -216,7 +218,7 @@ pub(crate) fn scan(
                 None => (name.as_str(), None),
             };
             let parsed = version.and_then(|v| Version::parse(v).ok());
-            let (mut status, mut disposition, reason) = if binding.is_none() {
+            let (mut status, mut disposition, mut reason) = if binding.is_none() {
                 (PeerStatus::Missing, Disposition::Rejected, None)
             } else if let Some(v) = &parsed {
                 let range = ranges
@@ -249,6 +251,11 @@ pub(crate) fn scan(
                     }
                     _ => Disposition::Accepted,
                 };
+                if disposition == Disposition::Accepted {
+                    reason = None;
+                } else if rules.version_matching == PeerVersionMatching::Unspecified {
+                    reason.get_or_insert(UnknownReason::PackageManager);
+                }
             }
             records.push(Record {
                 issue: PeerIssue {
@@ -288,15 +295,19 @@ fn allowed_peer(
     }
     let version = version?;
     let parent_version = parent_version.and_then(|v| Version::parse(v).ok());
-    let mut global = None;
-    let mut scoped = None;
+    let mut global = Vec::new();
+    let mut scoped = Vec::new();
     for (rule, range) in &rules.allowed_versions {
-        let (selector, peer, _) = manifest::override_selector(rule);
+        let (selector, peer, peer_range) = schema::override_selector(rule);
         if peer != name {
             continue;
         }
         match selector {
-            None => global = Some((rule, range)),
+            None => {
+                if peer_range.is_none() {
+                    global.push((rule, range));
+                }
+            }
             Some(s) => {
                 let (name, wanted) = pin::selector(s);
                 if name == parent
@@ -305,15 +316,39 @@ fn allowed_peer(
                             .as_ref()
                             .is_some_and(|v| range::satisfies_semver(v, r))
                     })
+                    && peer_range.is_none_or(|r| range::satisfies_semver(version, r))
                 {
-                    scoped = Some((rule, range));
+                    scoped.push((rule, range));
                 }
             }
         }
     }
-    [global, scoped]
+    global
         .into_iter()
-        .flatten()
+        .chain(scoped)
         .find(|(_, r)| range::satisfies_semver(version, r))
         .map(|(rule, _)| format!("allowedVersions/{rule}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DocumentKind;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn inspect_peers_skips_non_string_peer_declarations_without_panicking() {
+        let doc = json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {"dependencies": {"plugin": {"specifier": "1.0.0", "version": "1.0.0"}}}},
+            "packages": {"plugin@1.0.0": {"resolution": {}, "peerDependencies": {"host": ["^1"]}}},
+            "snapshots": {"plugin@1.0.0": {}}
+        });
+        let lock = Lockfile::with_documents(
+            BTreeMap::from([(DocumentKind::Project, Arc::new(doc))]),
+            &[],
+        );
+        assert!(inspect_peers(&lock, &PeerRules::default(), None).is_empty());
+    }
 }
