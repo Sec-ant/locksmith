@@ -161,8 +161,9 @@ pub(crate) fn document_ranges(text: &str) -> Vec<Range<usize>> {
         let end = text[offset..]
             .find('\n')
             .map_or(text.len(), |newline| offset + newline + 1);
-        let suffix = text[offset + 3..end].trim_end();
-        if suffix.is_empty() || suffix.starts_with(" #") {
+        let suffix = text[offset + 3..end].trim_end_matches(['\r', '\n']);
+        let indicator = suffix.trim_start_matches([' ', '\t']);
+        if indicator.is_empty() || (suffix.starts_with([' ', '\t']) && indicator.starts_with('#')) {
             parts.push(start..offset);
             start = end;
         }

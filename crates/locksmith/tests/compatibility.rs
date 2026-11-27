@@ -49,3 +49,22 @@ compatibility!(pnpm_9, "pnpm9");
 compatibility!(pnpm_10, "pnpm10");
 compatibility!(pnpm_11, "pnpm11");
 compatibility!(pnpm_12, "pnpm12");
+
+#[test]
+fn parses_and_retains_comments_on_yaml_document_markers() {
+    for space in ["  ", "\t"] {
+        let text = format!(
+            "---{space}# bootstrap\nlockfileVersion: '9.0'\nimporters: {{'.': {{packageManagerDependencies: {{}}}}}}\n\
+             ---{space}# project\nlockfileVersion: '9.0'\nimporters: {{app: {{}}}}\n"
+        );
+        let lockfile = Lockfile::parse(&text).unwrap();
+        lockfile.validate().unwrap();
+        assert!(lockfile.environment().is_some());
+        assert!(
+            lockfile.project().unwrap()["importers"]
+                .get("app")
+                .is_some()
+        );
+        assert_eq!(lockfile.to_yaml().unwrap(), text);
+    }
+}
