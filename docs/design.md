@@ -305,9 +305,9 @@ On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text
 
 ### Code map
 
-Modules in `crates/locksmith/src/` are strictly layered (lower-triangular dependencies, zero upward cycles):
+The core modules in `crates/locksmith/src/` are grouped by responsibility. Some of these groups share contracts. For example, `Lockfile` delegates parsing to `source`, which uses `DocumentKind` from `lockfile`. Contextual merge and duplicate-key recovery also share the `MergeInput` and `ContextualMerge` types.
 
-| Layer | Modules | Responsibility |
+| Area | Modules | Responsibility |
 | --- | --- | --- |
 | Foundation & Schema | `error`, `registry`, `schema`, `catalog`, `patch`, `checksum`, `pin` | Typed errors, registry metadata, lockfile keys, patch/extension hashing |
 | Parsing & Output | `source`, `verify` | YAML documents, source reuse, streaming output comparison |
