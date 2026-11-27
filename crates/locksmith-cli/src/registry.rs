@@ -192,7 +192,10 @@ pub fn resolve(
             else {
                 return Err(error.into());
             };
-            let direct = path.first().is_some_and(|s| s == "importers");
+            let direct = matches!(
+                path.first().map(String::as_str),
+                Some("importers" | "catalogs")
+            );
             let failure = attempts
                 .entry((request.as_ref().clone(), direct))
                 .or_insert_with(|| {

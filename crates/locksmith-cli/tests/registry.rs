@@ -627,6 +627,63 @@ fn lowest_direct_mode_separates_direct_and_transitive_attempts() {
 }
 
 #[test]
+fn repair_resolves_missing_catalog_entries_in_lowest_direct_mode() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let registry = Registry::serve(BTreeMap::from([(
+        "dep",
+        json!({"name": "dep", "dist-tags": {"latest": "1.2.0"}, "versions": {"1.0.0": {}, "1.2.0": {}}}),
+    )]));
+    write(
+        root,
+        "package.json",
+        &json!({"packageManager": "pnpm@10.34.9", "dependencies": {"dep": "catalog:"}}),
+    );
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        &json!({
+            "catalog": {"dep": "^1"},
+            "registry": registry.base,
+            "minimumReleaseAge": 0,
+            "resolutionMode": "lowest-direct"
+        }),
+    );
+    write(
+        root,
+        "pnpm-lock.yaml",
+        &json!({"lockfileVersion": "9.0", "importers": {".": {}}}),
+    );
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(run(root, "git", &args).status.success());
+    }
+
+    let result = run(root, CLI, &["repair", "HEAD", "--allow-network"]);
+    assert_eq!(registry.finish().len(), 1);
+    let graph = output(result);
+    assert_eq!(
+        graph["catalogs"]["default"]["dep"],
+        json!({"specifier": "^1", "version": "1.0.0"})
+    );
+    assert_eq!(
+        graph["importers"]["."]["dependencies"]["dep"],
+        json!({"specifier": "catalog:", "version": "1.0.0"})
+    );
+}
+
+#[test]
 fn project_rc_exclusion_and_missing_time_settings_apply_during_lookup() {
     let dir = tempdir().unwrap();
     let root = dir.path();
