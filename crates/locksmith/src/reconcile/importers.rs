@@ -663,12 +663,15 @@ impl<'graph> PinSelector<'_, 'graph> {
             sources, output, ..
         } = self;
         for (name, pin) in roots {
-            if pin.reference.starts_with("link:") || sources.authorized_patch(&pin.key, output) {
+            if pin.reference.starts_with("link:") {
                 continue;
             }
             let hash = sources
                 .desired_patch(&pin.key, output)
-                .expect("selected patch");
+                .map_err(|_| missing(&["importers", id, name], "competing patch selectors"))?;
+            if hash == patch::hash_in_key(&pin.key) {
+                continue;
+            }
             pin.key = peers.repatch(pin.side, &pin.key, hash).ok_or_else(|| {
                 missing(
                     &["importers", id, name],
