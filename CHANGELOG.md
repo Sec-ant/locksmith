@@ -1,3 +1,9 @@
+## 0.3.11 (2026-11-28)
+
+### Fixes
+
+- Organize core modules into a layered DAG and add architecture diagrams.
+
 ## 0.3.10 (2026-11-28)
 
 ### Features
