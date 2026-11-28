@@ -8,6 +8,7 @@ pub(crate) mod metadata;
 mod preference;
 pub(crate) mod published;
 mod rebuild;
+pub(crate) mod recovery;
 mod rewrite;
 
 use crate::{

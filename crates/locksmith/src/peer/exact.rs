@@ -55,9 +55,11 @@ impl Merger<'_> {
                     .and_then(Value::as_str)
                     .zip(pin::package_key(pin).parse::<node_semver::Version>().ok())
                     .is_some_and(|(range, v)| {
-                        crate::ops::inspect::peers::PeerRange::new(
+                        super::range::PeerRange::new(
                             range,
-                            crate::PeerVersionMatching::for_pnpm(config.pnpm_version.as_ref()),
+                            super::range::PeerVersionMatching::for_pnpm(
+                                config.pnpm_version.as_ref(),
+                            ),
                         )
                         .accepts(&v)
                     });

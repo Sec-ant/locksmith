@@ -86,7 +86,7 @@ impl RepairInput {
     /// project document needs repair.
     #[must_use]
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
-        crate::yaml::recovery::bootstrap_lockfile(text)?
+        crate::resolve::recovery::bootstrap_lockfile(text)?
             .0
             .recorded_pnpm_version()
     }

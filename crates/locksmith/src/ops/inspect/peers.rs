@@ -1,46 +1,11 @@
 //! Pure peer diagnostics, separate from graph construction and acceptance.
 
-use super::range;
-
+use crate::peer::range;
 use crate::{Lockfile, LockfileError, Value, model::graph, model::pin, model::schema};
 use node_semver::Version;
 pub(crate) use range::PeerRange;
-use serde::Serialize;
+pub use range::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
 use std::{collections::BTreeMap, fmt};
-
-/// Package-manager policy for comparing a peer declaration with its provider.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Hash)]
-#[non_exhaustive]
-#[serde(rename_all = "camelCase")]
-pub enum PeerVersionMatching {
-    /// Standard npm semver, including its prerelease filtering.
-    #[default]
-    Semver,
-    /// Yarn-compatible peer comparison used by the pnpm 10 resolver.
-    #[serde(rename = "pnpm10")]
-    Pnpm10,
-    /// pnpm 9 applies configured exceptions to displayed warnings only.
-    Pnpm9,
-    /// JS resolver with scheme ranges.
-    Pnpm11,
-    /// Native resolver and install-time peer check.
-    Pnpm12,
-    /// Report a definite result when all supported resolvers agree.
-    Unspecified,
-}
-impl PeerVersionMatching {
-    /// Select the matching policy for a pnpm release, or compare across supported policies when unspecified.
-    #[must_use]
-    pub fn for_pnpm(version: Option<&node_semver::Version>) -> Self {
-        match version.map(|v| v.major()) {
-            Some(9) => Self::Pnpm9,
-            Some(10) => Self::Pnpm10,
-            Some(11) => Self::Pnpm11,
-            Some(12) => Self::Pnpm12,
-            _ => Self::Unspecified,
-        }
-    }
-}
 
 /// Version matching and workspace exceptions used to evaluate peer requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,48 +96,6 @@ pub fn inspect_peers(
         .collect();
     issues.sort();
     issues
-}
-
-/// What the lock and configured exceptions say about a peer binding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
-#[non_exhaustive]
-#[serde(rename_all = "camelCase")]
-pub enum PeerStatus {
-    /// The requester has no binding for a required peer.
-    Missing,
-    /// The provider version falls outside the requested range.
-    OutOfRange,
-    /// Available evidence does not determine whether the binding satisfies the declaration.
-    Unknown,
-    /// The peer matches an explicit workspace exception. See [`Disposition`] for install-time acceptance.
-    Allowed,
-}
-
-/// Whether the selected peer policy accepts this binding. Unknown evidence
-/// (for example, an external link without its manifest) stays explicit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
-#[non_exhaustive]
-#[serde(rename_all = "camelCase")]
-pub enum Disposition {
-    /// The selected package-manager policy accepts the binding.
-    Accepted,
-    /// The selected policy reports an unmet peer.
-    Rejected,
-    /// The outcome depends on evidence or a package-manager version the caller did not supply.
-    Unknown,
-}
-
-/// Evidence missing for a definitive version comparison.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Hash)]
-#[non_exhaustive]
-#[serde(rename_all = "camelCase")]
-pub enum UnknownReason {
-    /// The linked or otherwise opaque provider has no known version.
-    ProviderVersion,
-    /// The requested specifier cannot be compared as a version range.
-    OpaqueSpecifier,
-    /// Supported pnpm policies disagree and no specific policy was selected.
-    PackageManager,
 }
 
 pub(crate) struct Record {

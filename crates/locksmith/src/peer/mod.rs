@@ -12,6 +12,7 @@ mod exact;
 mod identity;
 mod index;
 mod providers;
+pub(crate) mod range;
 mod rebind;
 mod three_way;
 

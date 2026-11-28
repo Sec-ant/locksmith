@@ -51,7 +51,7 @@
 <path d="M75 531V669" stroke="#A96712" stroke-width="3.2" stroke-linecap="round"/>
 <text x="88" y="549" fill="#182D45" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Duplicate-Key Recovery</tspan></text>
 <text x="88" y="570" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Raw YAML with duplicate</tspan><tspan x="88" dy="17.5">snapshot keys: collects</tspan><tspan x="88" dy="17.5">distinct alternatives</tspan><tspan x="88" dy="17.5">Runs ≤16 combos; accepts</tspan><tspan x="88" dy="17.5">only unanimous graph</tspan></text>
-<text x="302" y="666" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="302" dy="0">yaml::recovery</tspan></text>
+<text x="302" y="666" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="302" dy="0">resolve::recovery</tspan></text>
 <rect x="74" y="704" width="240" height="138" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
 <path d="M75 711V835" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
 <text x="88" y="729" fill="#182D45" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Rules &amp; Graph Index</tspan></text>

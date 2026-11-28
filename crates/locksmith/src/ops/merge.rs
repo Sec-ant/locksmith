@@ -20,7 +20,7 @@ impl<'a> MergeInput<'a> {
     pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, Vec<String>) {
         match self {
             Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), Vec::new()),
-            Self::Yaml(text) => crate::yaml::recovery::bootstrap_lockfile(text)
+            Self::Yaml(text) => crate::resolve::recovery::bootstrap_lockfile(text)
                 .map(|(lock, duplicates)| (Some(Cow::Owned(lock)), duplicates))
                 .unwrap_or_default(),
         }
@@ -99,7 +99,7 @@ impl ContextualMerge<'_> {
                 MergeInput::Parsed(o),
                 MergeInput::Parsed(t),
             ] => crate::resolve::resolve([b, o, t], context, self.bootstrap),
-            inputs => crate::yaml::recovery::resolve(inputs, context, self.bootstrap),
+            inputs => crate::resolve::recovery::resolve(inputs, context, self.bootstrap),
         }
     }
 

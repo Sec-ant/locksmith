@@ -1,7 +1,6 @@
 //! Read-only diagnostics and inspection for a validated project lockfile.
 mod impact;
 pub(crate) mod peers;
-mod range;
 
 use crate::{
     Disposition, Lockfile, LockfileError, PeerRules, PeerStatus, Value, model::graph, model::pin,

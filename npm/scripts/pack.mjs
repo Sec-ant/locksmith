@@ -38,7 +38,7 @@ const native = join(output, 'native');
 for (const dir of [root, native]) {
   mkdirSync(dir, { recursive: true });
   copyFileSync('LICENSE', join(dir, 'LICENSE'));
-  copyFileSync('crates/locksmith/src/source/yaml/LICENSE', join(dir, 'LICENSE.yaml'));
+  copyFileSync('crates/locksmith/src/yaml/LICENSE', join(dir, 'LICENSE.yaml'));
 }
 const { scripts, ...pkg } = JSON.parse(readFileSync('npm/package.json', 'utf8'));
 const gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
