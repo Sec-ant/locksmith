@@ -1,10 +1,22 @@
-//! Non-interactive Git low-level merge driver for pnpm lockfiles.
-use std::{collections::BTreeSet, ffi::OsString, io::Write, path::Path, process::Command};
+//! Non-interactive Git low-level merge driver and setup helper for pnpm lockfiles.
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    io::{self, Write},
+    path::Path,
+    process::Command,
+};
 
 use locksmith::MergeContext;
 use tempfile::NamedTempFile;
 
-use crate::{Result, git, workspace};
+use crate::{
+    ExitStatus, Result,
+    args::DriverSetupArgs,
+    git,
+    ui::{Ui, write_atomic},
+    workspace,
+};
 
 use super::merge;
 use workspace::{Members, Project};
@@ -37,25 +49,84 @@ fn project_conflicts(
     Ok(inputs)
 }
 
-pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()> {
+pub fn setup(args: &DriverSetupArgs, ui: &Ui) -> Result<()> {
+    let bin = match &args.bin {
+        Some(bin) => bin.clone(),
+        None if !args.global && Path::new("node_modules/.bin/locksmith").exists() => {
+            "./node_modules/.bin/locksmith".to_string()
+        }
+        None => "locksmith".to_string(),
+    };
+    let network = if args.allow_network {
+        " --allow-network"
+    } else {
+        ""
+    };
+    let driver_cmd = format!("{bin} driver run %O %A %B %P{network}");
+    let gitattributes_line = format!("{} merge=locksmith", args.lockfile);
+    let scope_flag = if args.global { "--global" } else { "--local" };
+
+    if args.apply {
+        let name_status = Command::new("git")
+            .args([
+                "config",
+                scope_flag,
+                "merge.locksmith.name",
+                "locksmith pnpm lockfile merge driver",
+            ])
+            .status()?;
+        if !name_status.success() {
+            return Err("failed to write merge.locksmith.name to git config".into());
+        }
+        let driver_status = Command::new("git")
+            .args(["config", scope_flag, "merge.locksmith.driver", &driver_cmd])
+            .status()?;
+        if !driver_status.success() {
+            return Err("failed to write merge.locksmith.driver to git config".into());
+        }
+        let mut out = io::stdout().lock();
+        writeln!(out, "Configured git ({scope_flag}):")?;
+        writeln!(out, "  merge.locksmith.driver = {driver_cmd}")?;
+        writeln!(out, "\nEnsure .gitattributes contains:")?;
+        writeln!(out, "  {gitattributes_line}")?;
+        return Ok(());
+    }
+
+    let mut out = io::stdout().lock();
+    writeln!(out, "# 1. Add to .gitattributes:")?;
+    writeln!(out, "{gitattributes_line}")?;
+    writeln!(out)?;
+    writeln!(out, "# 2. Register the Git merge driver:")?;
+    writeln!(
+        out,
+        "git config {scope_flag} merge.locksmith.name 'locksmith pnpm lockfile merge driver'"
+    )?;
+    writeln!(
+        out,
+        "git config {scope_flag} merge.locksmith.driver '{driver_cmd}'"
+    )?;
+    ui.hint("pass --apply to write the git config entries automatically");
+    Ok(())
+}
+
+pub fn run(files: [&OsString; 3], path: &str, allow_network: bool, ui: &Ui) -> Result<()> {
     let prefix = path
         .strip_suffix("pnpm-lock.yaml")
         .filter(|p| p.is_empty() || p.ends_with('/'))
         .ok_or("expected the Git path of pnpm-lock.yaml")?;
     let destination = Path::new(files[1]);
-    let dir = destination
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temp = NamedTempFile::new_in(dir)?;
-    match resolve(files, path, prefix, allow_network) {
+    match resolve(files, path, prefix, allow_network, ui) {
         Ok(yaml) => {
-            temp.write_all(yaml.as_bytes())?;
-            temp.persist(destination)?;
+            write_atomic(destination, yaml.as_bytes())?;
             Ok(())
         }
         Err(reason) => {
-            eprintln!("locksmith: {reason}");
+            ui.print_error(&*reason);
+            let dir = destination
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let temp = NamedTempFile::new_in(dir)?;
             let [base, ours, theirs] = files;
             let result = Command::new("git")
                 .args([
@@ -85,13 +156,20 @@ pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()>
                     .into());
                 }
             };
-            temp.persist(destination)?;
-            Err(format!("{path}: {message}").into())
+            temp.persist(destination).map_err(|e| e.error)?;
+            ui.hint(format!("{path}: {message}"));
+            Err(Box::new(ExitStatus(1)))
         }
     }
 }
 
-fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool) -> Result<String> {
+fn resolve(
+    files: [&OsString; 3],
+    path: &str,
+    prefix: &str,
+    allow_network: bool,
+    ui: &Ui,
+) -> Result<String> {
     let inputs = git::revisions(files, path)?;
     let revisions = &inputs.revisions;
     let (tree, conflicts) = git::merged_tree(&inputs)?;
@@ -166,6 +244,6 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = merge::with_context(&merge, &context, &project.config, network)?;
+    let result = merge::with_context(&merge, &context, &project.config, network, ui)?;
     Ok(result.to_yaml()?)
 }

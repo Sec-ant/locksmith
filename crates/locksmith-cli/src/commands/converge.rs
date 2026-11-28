@@ -12,6 +12,7 @@ use crate::{
     Result,
     git::{self, Blobs},
     policy::Policy,
+    ui::Ui,
     workspace::{self, Members, Project},
 };
 
@@ -23,7 +24,7 @@ fn working_file(path: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
+pub fn run(reference: &str, allow_network: bool, ui: &Ui) -> Result<(String, Lockfile)> {
     #[cfg(feature = "bench-profile")]
     let revision_span = locksmith::profile::span("git_revision");
     let (tree, prefix) = git::revision_and_prefix(reference)?;
@@ -99,6 +100,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     base_config
         .config_registries
         .clone_from(&config.config_registries);
+    let original_working = working_text.clone();
     let candidate_text = (baseline_text != working_text).then_some(working_text);
 
     #[cfg(feature = "bench-profile")]
@@ -147,6 +149,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         allow_network.then_some(crate::registry::ProjectRc::Working),
         &working.config,
         working.pnpm_version.as_ref().map(|v| v.major()),
+        ui,
         |registry| {
             locksmith::converge(
                 &baseline,
@@ -163,8 +166,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             .map_err(|e| vec![e])
         },
     )?;
-    policy.check_peers(&working.config, &result, &after)?;
-    Ok(result)
+    policy.check_peers(&working.config, &result, &after, ui)?;
+    Ok((original_working, result))
 }
 
 fn workspace_manifests(

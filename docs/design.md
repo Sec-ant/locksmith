@@ -302,7 +302,7 @@ Locksmith does not install packages, does not support older lockfile formats, an
 
 ### Failure contract
 
-On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text or JSON report, including when it finds unmet peers. `validate` is silent on success and returns `1` for an invalid lock or workspace mismatch. For the other standalone commands, `1` indicates a conflict, unresolved selection or unmet peer requirement. Errors that prevent a command from completing use `2`. Diagnostics go to stderr. On failure the Git driver returns `1` and writes Git’s text merge to the lockfile, leaving the conflict for the user.
+On success, `merge`, `converge`, and `repair` write YAML to stdout unless `-o`/`--output`, `-w`/`--write`, `--diff`, or `--check` is passed. `inspect` writes a text or JSON report (`--json` / `--format json`), including when it finds unmet peers. `validate` is silent on success in text mode, supports `--json` / `--format json`, and returns `1` for an invalid lock or workspace mismatch. For the other standalone commands, `1` indicates a conflict, unresolved selection, unmet peer requirement, or a `--check` mismatch. Errors that prevent a command from completing use `2`. Diagnostics and TTY progress updates go to stderr (controlled via `-q`/`--quiet`, `-v`/`--verbose`, `--color`, `NO_COLOR`, and `FORCE_COLOR`). `driver run` is the Git merge driver entry point (configured via `driver setup`): on failure it returns `1` and writes Git’s text merge to the lockfile, leaving the conflict for the user.
 
 ### Code map
 

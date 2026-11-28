@@ -4,6 +4,8 @@ use std::error::Error;
 use locksmith::{Lockfile, LockfileError, PeerRules, PeerVersionMatching, WorkspaceConfig};
 use serde_json::Value;
 
+use crate::ui::{Ui, plural};
+
 pub struct Policy(Option<node_semver::Version>);
 
 impl Policy {
@@ -20,6 +22,7 @@ impl Policy {
         raw: &Value,
         result: &Lockfile,
         manifests: &std::collections::BTreeMap<String, Value>,
+        ui: &Ui,
     ) -> Result<(), Box<dyn Error>> {
         let strict = match raw.get("strictPeerDependencies") {
             None => false,
@@ -37,10 +40,11 @@ impl Policy {
             return Err(LockfileError::UnmetPeers(issues).into());
         }
         if !issues.is_empty() {
-            eprintln!(
-                "{} peer issues allowed by the configured policy",
-                issues.len()
-            );
+            ui.warning(format!(
+                "{} {} allowed by the configured policy",
+                issues.len(),
+                plural(issues.len(), "peer issue", "peer issues")
+            ));
         }
         Ok(())
     }

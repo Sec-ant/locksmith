@@ -2,13 +2,14 @@ use crate::{
     Result, git,
     policy::Policy,
     registry,
+    ui::Ui,
     workspace::{self, Project},
 };
 use locksmith::{
     Lockfile, LockfileError, MergeContext, MergeTarget, RepairContext, RepairInput, WorkspaceConfig,
 };
 
-pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
+pub fn run(reference: &str, allow_network: bool, ui: &Ui) -> Result<(String, Lockfile)> {
     #[cfg(feature = "bench-profile")]
     let revision_span = locksmith::profile::span("git_revision");
     let (commit, prefix) = git::revision_and_prefix(reference)?;
@@ -69,7 +70,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                             match parent_evidence {
                                 Ok(parent) => evidence.push(parent),
                                 Err(e) => {
-                                    eprintln!("locksmith: skipping unusable parent {parent}: {e}");
+                                    ui.warning(format!("skipping unusable parent {parent}: {e}"));
                                 }
                             }
                         }
@@ -95,6 +96,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                     }),
                 &project.config,
                 project.pnpm_version.as_ref().map(|v| v.major()),
+                ui,
                 |registry| {
                     input
                         .apply(&RepairContext {
@@ -111,8 +113,8 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
             other?
         }
     };
-    policy.check_peers(&project.config, &result, &manifests)?;
-    Ok(result)
+    policy.check_peers(&project.config, &result, &manifests, ui)?;
+    Ok((text, result))
 }
 
 struct ParentEvidence {

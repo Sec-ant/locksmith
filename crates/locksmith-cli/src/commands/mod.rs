@@ -1,13 +1,17 @@
 use std::{
     error::Error,
     io::{self, Write},
+    path::Path,
 };
 
-use bpaf::Args;
+use clap::CommandFactory;
+use clap_complete::generate;
+use clap_mangen::Man;
 
 use crate::{
-    Result,
-    args::{self, Command, Merge},
+    ExitStatus, Result, UsageError,
+    args::{Cli, Command, DriverCommand, MergeMode, OutputModeArgs},
+    ui::{Ui, write_atomic},
 };
 
 mod converge;
@@ -17,53 +21,135 @@ mod merge;
 mod repair;
 mod validate;
 
-pub(super) fn run(command: Command) -> Result<()> {
-    let result = match command {
-        Command::Merge(Merge::Files(inputs)) => {
-            let [base, ours, theirs] =
-                merge::read_three(inputs.files()).map_err(|e| e as Box<dyn Error>)?;
-            locksmith::merge(&base, &ours, &theirs, None)?
+pub(super) fn run(command: Command, ui: &Ui) -> Result<()> {
+    match command {
+        Command::Merge(args) => match args.into_mode().map_err(UsageError)? {
+            MergeMode::Files { files, output } => {
+                let refs = [&files[0], &files[1], &files[2]];
+                let [base, ours, theirs] =
+                    merge::read_three(refs).map_err(|e| e as Box<dyn Error>)?;
+                let result = locksmith::merge(&base, &ours, &theirs, None)?;
+                emit_yaml(&result.to_yaml()?, output.as_deref(), ui)
+            }
+            MergeMode::Workspace {
+                files,
+                context,
+                allow_network,
+                output,
+            } => {
+                let refs = [&files[0], &files[1], &files[2]];
+                let result = merge::from_file(refs, &context, allow_network, ui)?;
+                emit_yaml(&result.to_yaml()?, output.as_deref(), ui)
+            }
+        },
+        Command::Converge(args) => {
+            let (original, result) = converge::run(&args.reference, args.allow_network, ui)?;
+            let yaml = result.to_yaml()?;
+            emit_transformed(
+                &original,
+                &yaml,
+                "a/pnpm-lock.yaml",
+                "b/pnpm-lock.yaml",
+                Path::new("pnpm-lock.yaml"),
+                &args.output_mode,
+                "converge",
+                ui,
+            )
         }
-        Command::Merge(Merge::Workspace {
-            inputs,
-            context,
-            allow_network,
-        }) => merge::from_file(inputs.files(), &context, allow_network)?,
-        Command::Merge(Merge::Git {
-            inputs,
-            path,
-            allow_network,
-            ..
-        }) => return driver::run(inputs.files(), &path, allow_network),
-        Command::Converge {
-            reference,
-            allow_network,
-        } => converge::run(&reference, allow_network)?,
-        Command::Repair {
-            reference,
-            allow_network,
-        } => repair::run(&reference, allow_network)?,
-        Command::Validate { file, workspace } => return validate::run(&file, workspace),
-        Command::Inspect {
-            json,
-            pnpm_version,
-            file,
-        } => return inspect::run(&file, pnpm_version, json),
-        Command::Version => {
-            println!("locksmith {}", env!("CARGO_PKG_VERSION"));
+        Command::Repair(args) => {
+            let (original, result) = repair::run(&args.reference, args.allow_network, ui)?;
+            let yaml = result.to_yaml()?;
+            emit_transformed(
+                &original,
+                &yaml,
+                &format!("{}:pnpm-lock.yaml", args.reference),
+                "repaired/pnpm-lock.yaml",
+                Path::new("pnpm-lock.yaml"),
+                &args.output_mode,
+                "repair",
+                ui,
+            )
+        }
+        Command::Validate(args) => {
+            let json = args.is_json();
+            validate::run(&args.file, args.workspace, json, ui)
+        }
+        Command::Inspect(args) => {
+            let json = args.is_json();
+            inspect::run(&args.file, args.pnpm_version, json, ui)
+        }
+        Command::Driver(args) => match args.command {
+            DriverCommand::Setup(setup) => driver::setup(&setup, ui),
+            DriverCommand::Run(run_args) => {
+                let files = [&run_args.base, &run_args.ours, &run_args.theirs];
+                driver::run(files, &run_args.path, run_args.allow_network, ui)
+            }
+        },
+        Command::Completions(args) => {
+            let mut cmd = Cli::command();
+            generate(args.shell, &mut cmd, "locksmith", &mut io::stdout().lock());
+            Ok(())
+        }
+        Command::Man(args) => {
+            let root = Cli::command();
+            let target = match args.command.as_deref() {
+                None => root,
+                Some(name) => root
+                    .find_subcommand(name)
+                    .cloned()
+                    .ok_or_else(|| UsageError(format!("unknown subcommand '{name}'")))?,
+            };
+            Man::new(target).render(&mut io::stdout().lock())?;
+            Ok(())
+        }
+    }
+}
+
+fn emit_yaml(yaml: &str, output: Option<&Path>, ui: &Ui) -> Result<()> {
+    match output {
+        Some(path) => {
+            write_atomic(path, yaml.as_bytes())?;
+            ui.verbose(format!("wrote {}", path.display()));
+            Ok(())
+        }
+        None => {
+            io::stdout().lock().write_all(yaml.as_bytes())?;
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_transformed(
+    original: &str,
+    yaml: &str,
+    old_label: &str,
+    new_label: &str,
+    default_target: &Path,
+    mode: &OutputModeArgs,
+    verb: &str,
+    ui: &Ui,
+) -> Result<()> {
+    if mode.check {
+        if original == yaml {
             return Ok(());
         }
-        Command::Help { topic } => {
-            let args: Vec<_> = topic.as_deref().into_iter().chain(["--help"]).collect();
-            args::parser()
-                .run_inner(Args::from(args.as_slice()).set_name("locksmith"))
-                .expect_err("a help request produces the generated help")
-                .print_message(100);
-            return Ok(());
+        ui.error(format!(
+            "pnpm-lock.yaml would change after {verb} (re-run with --diff to inspect or --write to apply)"
+        ));
+        return Err(Box::new(ExitStatus(1)));
+    }
+    if mode.diff {
+        if original != yaml {
+            let mut out = io::stdout().lock();
+            ui.write_unified_diff(&mut out, old_label, original, new_label, yaml)?;
         }
-    };
-    io::stdout()
-        .lock()
-        .write_all(result.to_yaml()?.as_bytes())?;
-    Ok(())
+        return Ok(());
+    }
+    if mode.write {
+        write_atomic(default_target, yaml.as_bytes())?;
+        ui.verbose(format!("updated {}", default_target.display()));
+        return Ok(());
+    }
+    emit_yaml(yaml, mode.output.as_deref(), ui)
 }
