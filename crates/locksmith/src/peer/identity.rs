@@ -2,8 +2,9 @@
 use super::{WorkspaceLinks, canonical_binding};
 use crate::{
     LinkedPeerEncoding,
-    checksum::{HashStyle, digest},
-    graph, pin,
+    model::checksum::{HashStyle, digest},
+    model::graph,
+    model::pin,
 };
 use std::collections::BTreeMap;
 

@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="1216" viewBox="0 0 1720 1216" role="img" aria-labelledby="title desc" font-family="Arial, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">
+<title id="title">Locksmith Internal Architecture &amp; Resolution Flows</title>
+<desc id="desc">Shows the outer I/O boundary (CLI, Git driver, Node-API, opt-in registry) and the internal execution flows of crates/locksmith: YAML parsing with source-span tracking and duplicate-snapshot recovery, contextual merge with bounded preference flip-retry, scoped converge and pnpm migration, repair stabilization with evidence search and byte-for-byte fast path, read-only validate and inspect, and source-reusing verified YAML emission.</desc>
+<defs>
+  <marker id="arr-ink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1.5 1.5 8.5 5 1.5 8.5" fill="none" stroke="#182D45" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-ink-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M8.5 1.5 1.5 5 8.5 8.5" fill="none" stroke="#182D45" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-teal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1.5 1.5 8.5 5 1.5 8.5" fill="none" stroke="#067A73" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-teal-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M8.5 1.5 1.5 5 8.5 8.5" fill="none" stroke="#067A73" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1.5 1.5 8.5 5 1.5 8.5" fill="none" stroke="#A96712" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-amber-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M8.5 1.5 1.5 5 8.5 8.5" fill="none" stroke="#A96712" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1.5 1.5 8.5 5 1.5 8.5" fill="none" stroke="#2B64C6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  <marker id="arr-blue-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M8.5 1.5 1.5 5 8.5 8.5" fill="none" stroke="#2B64C6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect x="0" y="0" width="1720" height="1216" fill="#FFFFFF"/>
+<rect x="36" y="26" width="44" height="44" rx="10" fill="#152F4B"/>
+<g transform="translate(45 35) scale(0.8)" fill="none" stroke="#FFFFFF" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 13 13M22 22l4-4M25 25l4-4"/></g>
+<text x="94" y="53" fill="#182D45" font-size="29" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="94" dy="0">Locksmith Architecture &amp; Core Engine Flows</tspan></text>
+<text x="94" y="77" fill="#53677E" font-size="15.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="94" dy="0">Thin I/O adapters around a pure in-memory Rust library — how merge, converge, repair, validate &amp; inspect execute internally</tspan></text>
+<path d="M36 98H1684" stroke="#CBD7E4" stroke-width="1.3"/>
+<rect x="36" y="116" width="1648" height="86" rx="10" fill="#F5F8FC" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="54" y="140" fill="#152F4B" font-size="13" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="54" dy="0">OUTER I/O ADAPTERS  (filesystem · Git · optional network)</tspan></text>
+<text x="1666" y="140" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="end" xml:space="preserve"><tspan x="1666" dy="0">Offline by default</tspan></text>
+<rect x="54" y="150" width="386" height="40" rx="6" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.3"/>
+<text x="66" y="175" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="66" dy="0">locksmith-cli</tspan></text>
+<text x="184" y="175" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="184" dy="0">manifests, rules, patches, Git %O %A %B %P</tspan></text>
+<rect x="456" y="150" width="346" height="40" rx="6" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.3"/>
+<text x="468" y="175" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="468" dy="0">locksmith-node</tspan></text>
+<text x="596" y="175" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="596" dy="0">N-API worker tasks &amp; CLI wrapper</tspan></text>
+<rect x="818" y="150" width="300" height="40" rx="6" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.3"/>
+<text x="830" y="175" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="830" dy="0">Rust callers</tspan></text>
+<text x="926" y="175" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="926" dy="0">es-locksmith in-memory API</tspan></text>
+<rect x="1134" y="150" width="532" height="40" rx="6" fill="#FFF6E8" stroke="#E2C49F" stroke-width="1.3"/>
+<text x="1148" y="175" fill="#A96712" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1148" dy="0">Optional Registry (--allow-network)</tspan></text>
+<text x="1408" y="175" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">fulfills RegistryRequest on retry</tspan></text>
+<path d="M36 226H1684" stroke="#067A73" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect x="660" y="213" width="400" height="26" rx="13" fill="#EAF7F4" stroke="#ABD2C9" stroke-width="1.2"/>
+<text x="860" y="231" fill="#067A73" font-size="12" font-weight="600" text-anchor="middle" xml:space="preserve"><tspan x="860" dy="0">IN-MEMORY BOUNDARY · ZERO I/O BELOW THIS LINE</tspan></text>
+<rect x="36" y="252" width="1648" height="908" rx="13" fill="#F5F8FC" stroke="#152F4B" stroke-width="1.7"/>
+<path d="M49 252H1671Q1684 252 1684 265V298H36V265Q36 252 49 252Z" fill="#152F4B"/>
+<g transform="translate(54 263) scale(0.66)" fill="none" stroke="#FFFFFF" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="18" height="18" rx="3"/><rect x="12" y="12" width="8" height="8"/><path d="M11 2v5M21 2v5M11 25v5M21 25v5M2 11h5M2 21h5M25 11h5M25 21h5"/></g>
+<text x="84" y="281" fill="#FFFFFF" font-size="17.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="84" dy="0">crates/locksmith — Pure In-Memory Engine (model → yaml → peer → resolve → ops)</tspan></text>
+<text x="1338" y="280" fill="#CCDAEA" font-size="13" font-weight="400" text-anchor="end" xml:space="preserve"><tspan x="1338" dy="0">v9.0 project + pnpm 11–12 env doc · raw YAML byte spans</tspan></text>
+<rect x="58" y="320" width="272" height="664" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="74" y="346" fill="#2B64C6" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="74" dy="0">1  INGEST &amp; MODEL</tspan></text>
+<rect x="74" y="362" width="240" height="134" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M75 369V489" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="88" y="387" fill="#182D45" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">YAML &amp; Source Parser</tspan></text>
+<text x="88" y="408" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Parses project + env docs</tspan><tspan x="88" dy="17.5">Records raw byte spans for</tspan><tspan x="88" dy="17.5">every unchanged block</tspan><tspan x="88" dy="17.5">Checks format version 9.0</tspan></text>
+<text x="302" y="486" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="302" dy="0">yaml::source · model::schema</tspan></text>
+<rect x="74" y="524" width="240" height="152" rx="7" fill="#FFF6E8" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M75 531V669" stroke="#A96712" stroke-width="3.2" stroke-linecap="round"/>
+<text x="88" y="549" fill="#182D45" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Duplicate-Key Recovery</tspan></text>
+<text x="88" y="570" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Raw YAML with duplicate</tspan><tspan x="88" dy="17.5">snapshot keys: collects</tspan><tspan x="88" dy="17.5">distinct alternatives</tspan><tspan x="88" dy="17.5">Runs ≤16 combos; accepts</tspan><tspan x="88" dy="17.5">only unanimous graph</tspan></text>
+<text x="302" y="666" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="302" dy="0">resolve::recovery</tspan></text>
+<rect x="74" y="704" width="240" height="138" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M75 711V835" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
+<text x="88" y="729" fill="#182D45" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Rules &amp; Graph Index</tspan></text>
+<text x="88" y="750" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="88" dy="0">Normalizes settings, catalogs,</tspan><tspan x="88" dy="17.5">overrides, patches &amp; hashes</tspan><tspan x="88" dy="17.5">Builds 3-layer graph &amp;</tspan><tspan x="88" dy="17.5">PeerIndex across sources</tspan></text>
+<text x="302" y="832" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="302" dy="0">model::* · peer::index</tspan></text>
+<text x="194" y="892" fill="#53677E" font-size="12.5" font-weight="400" text-anchor="middle" xml:space="preserve"><tspan x="194" dy="0">Shared foundation used by</tspan><tspan x="194" dy="17.2">all 5 public operations</tspan></text>
+<rect x="364" y="320" width="980" height="248" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="382" y="346" fill="#2B64C6" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="382" dy="0">2A  MERGE &amp; CONTEXTUAL RESOLVE ENGINE</tspan></text>
+<text x="1326" y="345" fill="#53677E" font-size="12" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1326" dy="0">ops::merge · resolve · peer</tspan></text>
+<rect x="382" y="362" width="206" height="118" rx="7" fill="#F5F8FC" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M383 369V473" stroke="#53677E" stroke-width="3.2" stroke-linecap="round"/>
+<text x="396" y="387" fill="#182D45" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">No context: 3-way</tspan></text>
+<text x="396" y="408" fill="#53677E" font-size="12" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">Path/edge diff +</tspan><tspan x="396" dy="17.5">peer::three_way</tspan><tspan x="396" dy="17.5">Disagreement → Conflict</tspan></text>
+<text x="576" y="470" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="576" dy="0">merge::three_way</tspan></text>
+<rect x="610" y="362" width="716" height="190" rx="8" fill="#EDF4FF" stroke="#B8CEF0" stroke-width="1.4"/>
+<text x="624" y="383" fill="#2B64C6" font-size="12.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="624" dy="0">With final workspace context  —  resolve::resolve_sources  (bounded flip-retry loop)</tspan></text>
+<rect x="624" y="394" width="152" height="112" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M625 401V499" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="638" y="419" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="638" dy="0">Rank &amp; Metadata</tspan></text>
+<text x="638" y="440" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="638" dy="0">Order target/other/</tspan><tspan x="638" dy="17.5">base/published by</tspan><tspan x="638" dy="17.5">matching settings</tspan></text>
+<text x="764" y="496" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="764" dy="0">metadata</tspan></text>
+<rect x="796" y="394" width="162" height="112" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M797 401V499" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="810" y="419" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="810" dy="0">Select Importers</tspan></text>
+<text x="810" y="440" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="810" dy="0">Per-edge pin choice</tspan><tspan x="810" dy="17.5">against final ranges</tspan><tspan x="810" dy="17.5">using Preferences</tspan></text>
+<text x="946" y="496" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="946" dy="0">importers</tspan></text>
+<rect x="978" y="394" width="162" height="112" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M979 401V499" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="992" y="419" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="992" dy="0">Assemble &amp; Peers</tspan></text>
+<text x="992" y="440" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="992" dy="0">Walk closure, rewrite</tspan><tspan x="992" dy="17.5">&amp; rebuild peers via</tspan><tspan x="992" dy="17.5">PeerIndex &amp; extensions</tspan></text>
+<text x="1128" y="496" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1128" dy="0">assembly · rebuild</tspan></text>
+<rect x="1160" y="394" width="152" height="112" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1161 401V499" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1174" y="419" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1174" dy="0">Dedupe &amp; Check</tspan></text>
+<text x="1174" y="440" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1174" dy="0">Optional autoDedupe,</tspan><tspan x="1174" dy="17.5">graph::complete &amp;</tspan><tspan x="1174" dy="17.5">manifest::check</tspan></text>
+<text x="1300" y="496" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1300" dy="0">dedupe · graph</tspan></text>
+<path d="M1236 506 L1236 536 L877 536 L877 508" fill="none" stroke="#A96712" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-amber)"/>
+<rect x="920" y="525" width="276" height="20" rx="4" fill="#EDF4FF"/>
+<text x="1058" y="539" fill="#A96712" font-size="11.5" font-weight="600" text-anchor="middle" xml:space="preserve"><tspan x="1058" dy="0">Failure → preferences.extend() flips edges &amp; retries</tspan></text>
+<rect x="364" y="588" width="980" height="172" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="382" y="613" fill="#2B64C6" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="382" dy="0">2B  CONVERGE ENGINE  (baseline + installed candidate → minimal edit diff)</tspan></text>
+<text x="1326" y="612" fill="#53677E" font-size="12" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1326" dy="0">ops::converge::*</tspan></text>
+<rect x="382" y="628" width="214" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M383 635V735" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="396" y="653" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">Check &amp; Project Rules</tspan></text>
+<text x="396" y="674" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">Verify manifests match locks</tspan><tspan x="396" dy="17.5">Project catalog, override &amp;</tspan><tspan x="396" dy="17.5">extension edits onto baseline</tspan></text>
+<text x="584" y="732" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="584" dy="0">projection::*</tspan></text>
+<rect x="620" y="628" width="232" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M621 635V735" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="634" y="653" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="634" dy="0">Restore Baseline Pins</tspan></text>
+<text x="634" y="674" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="634" dy="0">Keep baseline pin if new range</tspan><tspan x="634" dy="17.5">accepts it; else take candidate</tspan><tspan x="634" dy="17.5">Rebind affected consumer peers</tspan></text>
+<text x="840" y="732" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="840" dy="0">peers · assembly</tspan></text>
+<rect x="876" y="628" width="210" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M877 635V735" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
+<text x="890" y="653" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="890" dy="0">Scoped Prune</tspan></text>
+<text x="890" y="674" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="890" dy="0">Drop records orphaned by</tspan><tspan x="890" dy="17.5">the edit; keep pre-existing</tspan><tspan x="890" dy="17.5">unrelated baseline orphans</tspan></text>
+<text x="1074" y="732" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1074" dy="0">graph</tspan></text>
+<rect x="1110" y="628" width="216" height="114" rx="7" fill="#FFF6E8" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1111 635V735" stroke="#A96712" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1124" y="653" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1124" dy="0">pnpm Upgrade Path</tspan></text>
+<text x="1124" y="674" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1124" dy="0">Cross-major migration runs</tspan><tspan x="1124" dy="17.5">resolve::converge_upgrade</tspan><tspan x="1124" dy="17.5">fixed-point loop (SHA-256)</tspan></text>
+<text x="1314" y="732" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1314" dy="0">prefer_baseline</tspan></text>
+<rect x="364" y="780" width="980" height="204" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="382" y="805" fill="#2B64C6" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="382" dy="0">2C  REPAIR ENGINE  (committed lock + workspace evidence → stabilization loop)</tspan></text>
+<text x="1326" y="804" fill="#53677E" font-size="12" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1326" dy="0">ops::repair::*</tspan></text>
+<rect x="382" y="820" width="184" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M383 827V927" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="396" y="845" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">Check &amp; Importers</tspan></text>
+<text x="396" y="866" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="396" dy="0">Validate bootstrap &amp;</tspan><tspan x="396" dy="17.5">config match; reconcile</tspan><tspan x="396" dy="17.5">stale importer entries</tspan></text>
+<text x="554" y="924" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="554" dy="0">importers</tspan></text>
+<rect x="588" y="820" width="266" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M589 827V927" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="602" y="845" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="602" dy="0">Closure &amp; Evidence Fill</tspan></text>
+<text x="602" y="866" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="602" dy="0">graph::closure from roots; fill missing:</tspan><tspan x="602" dy="17.5">1. Agreeing parent locks</tspan><tspan x="602" dy="17.5">2. Registry   3. ≤2-parent reconcile</tspan></text>
+<text x="842" y="924" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="842" dy="0">repair::evidence</tspan></text>
+<rect x="876" y="820" width="212" height="114" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M877 827V927" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="890" y="845" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="890" dy="0">Extensions &amp; Peers</tspan></text>
+<text x="890" y="866" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="890" dy="0">Apply extensions::plan;</tspan><tspan x="890" dy="17.5">rebind peers::affected</tspan><tspan x="890" dy="17.5">Repeat until stable</tspan></text>
+<text x="1076" y="924" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1076" dy="0">extensions · peers</tspan></text>
+<rect x="1110" y="820" width="216" height="114" rx="7" fill="#EAF7F4" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1111 827V927" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1124" y="845" fill="#182D45" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1124" dy="0">Zero-Copy Fast Path</tspan></text>
+<text x="1124" y="866" fill="#53677E" font-size="11.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1124" dy="0">Cow::Borrowed: if closure</tspan><tspan x="1124" dy="17.5">needs no edits, returns</tspan><tspan x="1124" dy="17.5">original lock byte-for-byte</tspan></text>
+<text x="1314" y="924" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1314" dy="0">yaml::edit</tspan></text>
+<path d="M982 934 L982 964 L721 964 L721 936" fill="none" stroke="#2B64C6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-blue)"/>
+<rect x="748" y="953" width="212" height="20" rx="4" fill="#FFFFFF"/>
+<text x="854" y="967" fill="#2B64C6" font-size="11.5" font-weight="600" text-anchor="middle" xml:space="preserve"><tspan x="854" dy="0">Changed? Repeat until stable</tspan></text>
+<rect x="1378" y="320" width="284" height="664" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.5"/>
+<text x="1394" y="346" fill="#067A73" font-size="13.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1394" dy="0">3  VERIFY, INSPECT &amp; EMIT</tspan></text>
+<rect x="1394" y="366" width="252" height="140" rx="7" fill="#EAF7F4" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1395 373V499" stroke="#067A73" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1408" y="391" fill="#182D45" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Source-Reuse YAML Emitter</tspan></text>
+<text x="1408" y="412" fill="#53677E" font-size="12" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Copies unchanged YAML byte</tspan><tspan x="1408" dy="17.5">blocks verbatim from source;</tspan><tspan x="1408" dy="17.5">renders only modified entries</tspan><tspan x="1408" dy="17.5">&amp; preserves override order</tspan></text>
+<text x="1634" y="496" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1634" dy="0">yaml::source · yaml::format</tspan></text>
+<rect x="1394" y="534" width="252" height="120" rx="7" fill="#FFF6E8" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1395 541V647" stroke="#A96712" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1408" y="559" fill="#182D45" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Output Self-Verification</tspan></text>
+<text x="1408" y="580" fill="#53677E" font-size="12" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Re-parses rendered YAML and</tspan><tspan x="1408" dy="17.5">compares against intended doc</tspan><tspan x="1408" dy="17.5">Any mismatch fails as an error</tspan></text>
+<text x="1634" y="644" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1634" dy="0">yaml::verify</tspan></text>
+<path d="M1394 684H1646" stroke="#CBD7E4" stroke-width="1.2" stroke-dasharray="4 4"/>
+<text x="1394" y="710" fill="#2B64C6" font-size="12" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1394" dy="0">READ-ONLY OPERATIONS</tspan></text>
+<rect x="1394" y="726" width="252" height="102" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1395 733V821" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1408" y="751" fill="#182D45" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">validate</tspan></text>
+<text x="1408" y="772" fill="#53677E" font-size="12" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Checks all snapshot/pkg refs</tspan><tspan x="1408" dy="17.5">&amp; workspace frozen settings</tspan></text>
+<text x="1634" y="818" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1634" dy="0">model::graph::validate</tspan></text>
+<rect x="1394" y="846" width="252" height="106" rx="7" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<path d="M1395 853V945" stroke="#2B64C6" stroke-width="3.2" stroke-linecap="round"/>
+<text x="1408" y="871" fill="#182D45" font-size="14" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">inspect / inspect_peers</tspan></text>
+<text x="1408" y="892" fill="#53677E" font-size="12" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1408" dy="0">Unmet peers, shortest paths,</tspan><tspan x="1408" dy="17.5">multi-instance pkgs &amp; links</tspan></text>
+<text x="1634" y="942" fill="#53677E" font-size="11" font-weight="400" text-anchor="end" xml:space="preserve" font-family="SFMono-Regular, Menlo, Consolas, monospace"><tspan x="1634" dy="0">ops::inspect::*</tspan></text>
+<rect x="58" y="1004" width="1604" height="134" rx="10" fill="#FFFFFF" stroke="#CBD7E4" stroke-width="1.4"/>
+<rect x="74" y="1020" width="768" height="102" rx="8" fill="#FFF6E8" stroke="#E2C49F" stroke-width="1.3"/>
+<text x="92" y="1046" fill="#A96712" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="92" dy="0">Missing Evidence Contract:  ResolutionRequired(RegistryRequest)</tspan></text>
+<text x="92" y="1070" fill="#182D45" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="92" dy="0">Core never guesses or performs network I/O. When merge, converge or repair lacks a version/release,</tspan><tspan x="92" dy="19">it returns exact RegistryRequest(s) (merge_with_requests batches independent ones) so the adapter fetches &amp; retries.</tspan></text>
+<rect x="862" y="1020" width="784" height="102" rx="8" fill="#F5F8FC" stroke="#CBD7E4" stroke-width="1.3"/>
+<text x="880" y="1046" fill="#152F4B" font-size="14.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="880" dy="0">Outputs &amp; CLI Exit Contract</tspan></text>
+<text x="880" y="1070" fill="#182D45" font-size="12.5" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="880" dy="0">Exit 0: verified YAML to stdout (Git driver overwrites OURS) · inspect report · silent validate.</tspan><tspan x="880" dy="19">Exit 1: Conflict, ResolutionRequired, UnmetPeers, or invalid lock (Git driver writes text merge to lock).   Exit 2: I/O / format error.</tspan></text>
+<path d="M194 202 L194 318" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M1364 202 L1364 994 L842 994 L842 1020" fill="none" stroke="#A96712" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-amber)" marker-start="url(#arr-amber-start)"/>
+<rect x="1312" y="213" width="118" height="24" rx="5" fill="#FFFFFF"/>
+<text x="1371" y="229" fill="#A96712" font-size="11.5" font-weight="600" text-anchor="middle" xml:space="preserve"><tspan x="1371" dy="0">RegistryRequest</tspan></text>
+<path d="M194 496 L194 522" fill="none" stroke="#A96712" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-amber)"/>
+<path d="M194 676 L194 702" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M330 773 L346 773 L346 444 L362 444" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M346 674 L362 674" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M346 773 L346 877 L362 877" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M776 450 L794 450" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M958 450 L976 450" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M1140 450 L1158 450" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M596 685 L618 685" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M852 685 L874 685" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M1180 628 L1180 570" fill="none" stroke="#A96712" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-amber)"/>
+<path d="M566 877 L586 877" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M854 877 L874 877" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M1088 877 L1108 877" fill="none" stroke="#067A73" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-teal)"/>
+<path d="M1344 444 L1352 444 L1352 436 L1376 436" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<path d="M1344 685 L1352 685 L1352 436" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1344 877 L1352 877 L1352 436" fill="none" stroke="#067A73" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1520 506 L1520 532" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<text x="36" y="1196" fill="#53677E" font-size="12.5" font-weight="600" text-anchor="start" xml:space="preserve"><tspan x="36" dy="0">LEGEND</tspan></text>
+<path d="M116 1192 L164 1192" fill="none" stroke="#182D45" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-ink)"/>
+<text x="176" y="1196" fill="#182D45" font-size="13" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="176" dy="0">Graph / lockfile flow</tspan></text>
+<path d="M356 1192 L404 1192" fill="none" stroke="#A96712" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-amber)"/>
+<text x="416" y="1196" fill="#182D45" font-size="13" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="416" dy="0">Retry loop, fallback or RegistryRequest</tspan></text>
+<path d="M704 1192 L752 1192" fill="none" stroke="#067A73" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr-teal)"/>
+<text x="764" y="1196" fill="#182D45" font-size="13" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="764" dy="0">Source-byte reuse &amp; zero-copy fast path</tspan></text>
+<path d="M1066 1192 L1114 1192" fill="none" stroke="#2B64C6" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 5" marker-end="url(#arr-blue)"/>
+<text x="1126" y="1196" fill="#182D45" font-size="13" font-weight="400" text-anchor="start" xml:space="preserve"><tspan x="1126" dy="0">Repair stabilization loop</tspan></text>
+</svg>

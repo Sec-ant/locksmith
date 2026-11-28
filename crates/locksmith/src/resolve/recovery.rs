@@ -1,0 +1,567 @@
+//! Resolve duplicated snapshot records only when every interpretation agrees.
+use std::{
+    cell::OnceCell,
+    collections::BTreeMap,
+    fmt::{self, Display},
+    sync::Arc,
+};
+
+use node_semver::Version;
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, MapAccess, SeqAccess, Visitor},
+};
+use serde_json::Map;
+
+use crate::{
+    ContextualMerge, DocumentKind, Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget,
+    Value, WorkspaceConfig,
+};
+
+const MAX_COMBINATIONS: usize = 16;
+
+/// Merge YAML using final workspace intent, recovering duplicated snapshots.
+///
+/// Valid inputs use the contextual resolver directly. If a snapshot key occurs
+/// repeatedly, all distinct values remain candidates. Every combination must
+/// produce the same validated graph, including override precedence. A failed
+/// combination or a disagreement returns an error; no candidate is preferred
+/// merely because it appears first or last in the text.
+///
+/// Recovery accepts duplicates only in the top-level `snapshots` mapping and
+/// requires string mapping keys and rejects YAML merge keys (`<<`) in the
+/// affected input. Other malformed input
+/// remains an error. Recovery checks at most 16 combinations and returns
+/// `ResolutionRequired` before graph construction if the input exceeds this
+/// work budget. Combinations run serially, holding one combination and one
+/// serialized result in memory.
+/// The library performs no filesystem, network, or package-manager operations.
+pub(crate) fn resolve(
+    inputs: [MergeInput<'_>; 3],
+    context: &MergeContext<'_>,
+    bootstrap: Option<usize>,
+) -> Result<Lockfile, LockfileError> {
+    let mut choices = Vec::new();
+    let mut locks = Vec::with_capacity(3);
+    for (side, input) in inputs.into_iter().enumerate() {
+        let text = match input {
+            MergeInput::Parsed(lock) => {
+                locks.push(lock.clone());
+                continue;
+            }
+            MergeInput::Yaml(text) => text,
+        };
+        match Lockfile::parse(text) {
+            Ok(lock) => locks.push(lock),
+            Err(LockfileError::Parse(_)) => {
+                locks.push(parse_with_alternatives(text, |kind, key, values| {
+                    choices.push(Choice {
+                        side,
+                        kind,
+                        key,
+                        values,
+                        index: 0,
+                    });
+                })?);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if choices.is_empty() {
+        return crate::resolve::resolve([&locks[0], &locks[1], &locks[2]], context, bootstrap);
+    }
+    let mut combinations = 1usize;
+    for choice in &choices {
+        if choice.values.len() > MAX_COMBINATIONS / combinations {
+            return Err(ambiguity(
+                &choices,
+                format!(
+                    "duplicate snapshot recovery exceeds its {MAX_COMBINATIONS}-combination work budget"
+                ),
+            ));
+        }
+        combinations *= choice.values.len();
+    }
+    let mut reference = BTreeMap::<DocumentKind, String>::new();
+    loop {
+        let result = crate::resolve::resolve([&locks[0], &locks[1], &locks[2]], context, bootstrap)
+            .map_err(|error| {
+                if context.registry.is_some()
+                    && matches!(
+                        error,
+                        LockfileError::ResolutionRequired {
+                            request: Some(_),
+                            ..
+                        }
+                    )
+                {
+                    return error;
+                }
+                ambiguity(
+                    &choices,
+                    format!("a duplicate snapshot interpretation failed: {error}"),
+                )
+            })?;
+        if reference.is_empty() {
+            for (&kind, document) in &result.documents {
+                let mut text = String::new();
+                crate::yaml::source::render(kind, document, &result.sources, false, &mut text);
+                crate::yaml::verify::verify(&text, document)?;
+                reference.insert(kind, text);
+            }
+        } else if result.documents.len() != reference.len()
+            || result.documents.iter().any(|(kind, document)| {
+                reference
+                    .get(kind)
+                    .is_none_or(|text| crate::yaml::verify::verify(text, document).is_err())
+            })
+        {
+            return Err(ambiguity(
+                &choices,
+                "duplicate snapshot interpretations produce different graphs".into(),
+            ));
+        }
+        // The result may share an environment document with an input. Release
+        // it before changing the next candidate, without cloning an input tree.
+        drop(result);
+        if !advance(&mut choices, &mut locks) {
+            break;
+        }
+    }
+    // Reparse only the agreed result, after releasing the candidate graphs.
+    // Its text is valid and can now be reused byte-for-byte by normal operations.
+    drop(locks);
+    drop(choices);
+    let mut output = String::new();
+    for (kind, text) in reference {
+        if kind == DocumentKind::Environment || !output.is_empty() {
+            output.push_str("---\n");
+        }
+        output.push_str(&text);
+    }
+    Lockfile::parse(&output)
+}
+
+/// Read the bootstrap document even when snapshot keys repeat or the project document is invalid.
+pub(crate) fn bootstrap_lockfile(text: &str) -> Option<(Lockfile, Vec<String>)> {
+    // Ordinary project-only lockfiles need no preliminary parse. Quoted
+    // keys can also spell a bootstrap field using escapes.
+    if !text.contains("\n---")
+        && !text.contains("configDependencies")
+        && !text.contains("packageManagerDependencies")
+        && !text.contains('\\')
+    {
+        return None;
+    }
+    let text = text.trim_start_matches('\u{feff}');
+    let ranges = crate::yaml::source::document_ranges(text);
+    let bootstrap = ranges.first()?;
+    let (lock, alternatives) = candidate(&text[bootstrap.clone()]).ok()?;
+    lock.environment().is_some().then_some((lock, alternatives))
+}
+
+// Snapshot alternatives are resolved during the merge. Other input errors are final.
+pub(crate) fn candidate(text: &str) -> Result<(Lockfile, Vec<String>), LockfileError> {
+    let mut alternatives = Vec::new();
+    let lock = match Lockfile::parse(text) {
+        Err(LockfileError::Parse(_)) => parse_with_alternatives(text, |kind, key, _| {
+            if kind == DocumentKind::Environment {
+                alternatives.push(key);
+            }
+        }),
+        result => result,
+    }?;
+    Ok((lock, alternatives))
+}
+
+impl MergeTarget {
+    /// Decode each branch with its own bootstrap version and the final settings
+    /// with the version from the selected bootstrap graph. Use the returned merge with these settings.
+    ///
+    /// # Errors
+    /// Returns an error for invalid settings or when no bootstrap graph matches the final workspace.
+    pub fn workspace_configurations<'a>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        branches: [&Value; 3],
+        final_settings: &Value,
+    ) -> Result<([WorkspaceConfig; 3], WorkspaceConfig, ContextualMerge<'a>), LockfileError> {
+        let bootstrap = inputs.map(MergeInput::bootstrap);
+        let locks = bootstrap.each_ref().map(|(lock, _)| lock.as_deref());
+        let [base, ours, theirs] = [0, 1, 2].map(|i| {
+            let version = locks[i].and_then(Lockfile::recorded_pnpm_version);
+            WorkspaceConfig::from_pnpm_source(branches[i], manifest, version)
+        });
+        let ((), config, bootstrap) = select_workspace(
+            self,
+            manifest,
+            locks,
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
+            |lock| {
+                let version = lock.and_then(Lockfile::recorded_pnpm_version);
+                WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
+                    .map(|config| ((), config))
+            },
+        )
+        .map_err(|error| input_error(inputs, error))?;
+        Ok((
+            [base?, ours?, theirs?],
+            config,
+            ContextualMerge {
+                inputs,
+                bootstrap: Some(bootstrap),
+            },
+        ))
+    }
+
+    /// Load a filesystem workspace using the pnpm version from the selected bootstrap graph.
+    /// The loader receives the candidate's recorded version, reads the final project files,
+    /// and returns that project together with its effective configuration. The returned merge
+    /// keeps the selected bootstrap alongside its original inputs.
+    ///
+    /// # Errors
+    /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
+    pub fn workspace_for_bootstrap<'a, T, E: From<LockfileError> + Display>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        mut load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
+    ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
+        self.workspace_for_candidate(manifest, inputs, |lock| {
+            load(lock.and_then(Lockfile::recorded_pnpm_version))
+        })
+    }
+
+    /// Select a bootstrap graph using the settings needed to interpret each candidate.
+    /// The loader can use explicit artifact URLs in that lock without resolving registry routes.
+    ///
+    /// # Errors
+    /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
+    pub fn workspace_for_candidate<'a, T, E: From<LockfileError> + Display>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
+    ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
+        let bootstrap = inputs.map(MergeInput::bootstrap);
+        let (project, config, bootstrap) = select_workspace(
+            self,
+            manifest,
+            bootstrap.each_ref().map(|(lock, _)| lock.as_deref()),
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
+            load,
+        )
+        .map_err(|error| input_error(inputs, error))?;
+        Ok((
+            project,
+            config,
+            ContextualMerge {
+                inputs,
+                bootstrap: Some(bootstrap),
+            },
+        ))
+    }
+}
+
+fn input_error<E: From<LockfileError>>(inputs: [MergeInput<'_>; 3], error: E) -> E {
+    inputs
+        .into_iter()
+        .find_map(|input| match input {
+            MergeInput::Yaml(text) => candidate(text).err().map(E::from),
+            MergeInput::Parsed(_) => None,
+        })
+        .unwrap_or(error)
+}
+
+fn select_workspace<T, E: From<LockfileError> + Display>(
+    target: MergeTarget,
+    manifest: Option<&Value>,
+    locks: [Option<&Lockfile>; 3],
+    duplicate_snapshots: [&[String]; 3],
+    mut load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
+) -> Result<(T, WorkspaceConfig, usize), E> {
+    let mut candidates = [OnceCell::new(), OnceCell::new(), OnceCell::new()];
+    let selected = crate::resolve::bootstrap::environment_source(
+        locks,
+        target,
+        manifest,
+        |side| {
+            candidates[side]
+                .get_or_init(|| load(locks[side]))
+                .as_ref()
+                .ok()
+                .map(|(_, config)| config)
+        },
+        duplicate_snapshots,
+    );
+    let side = match selected {
+        Ok(side) => side,
+        Err(mut error) => {
+            // An older runner can reject settings valid for a newer candidate.
+            let mut candidates = candidates.map(OnceCell::into_inner);
+            if candidates.iter().all(|c| matches!(c, Some(Err(_))))
+                && let Some(Err(target_error)) = candidates[target.index()].take()
+            {
+                return Err(target_error);
+            }
+            let failures: String = ["base", "ours", "theirs"]
+                .into_iter()
+                .zip(candidates)
+                .filter_map(|(side, candidate)| {
+                    candidate?
+                        .err()
+                        .map(|load| format!("\n{side} workspace: {load}"))
+                })
+                .collect();
+            if !failures.is_empty() {
+                if let LockfileError::ResolutionRequired { message, .. } = &mut error {
+                    message.push_str(&failures);
+                } else {
+                    error = LockfileError::WorkspaceInput(format!("{error}{failures}"));
+                }
+            }
+            return Err(error.into());
+        }
+    };
+    let (project, config) = candidates[side]
+        .take()
+        .expect("selected candidate was loaded")?;
+    Ok((project, config, side))
+}
+
+fn parse_with_alternatives(
+    text: &str,
+    mut alternative: impl FnMut(DocumentKind, String, Vec<Value>),
+) -> Result<Lockfile, LockfileError> {
+    let mut options = crate::yaml::source::options(text.len());
+    options.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::PassThrough;
+    options.merge_keys = serde_saphyr::MergeKeyPolicy::Error;
+    let normalized = if text.contains("\r\n") || text.starts_with('\u{feff}') {
+        std::borrow::Cow::Owned(text.trim_start_matches('\u{feff}').replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    let mut documents = BTreeMap::new();
+    for range in crate::yaml::source::document_ranges(&normalized) {
+        let mut parsed: RecoveredDocument =
+            serde_saphyr::from_str_with_options(&normalized[range], options.clone())?;
+        let kind = crate::yaml::source::document_kind(&mut parsed.value, &documents)?;
+        for (key, values) in parsed.alternatives {
+            alternative(kind, key, values);
+        }
+        documents.insert(kind, Arc::new(Value::Object(parsed.value)));
+    }
+    if documents.is_empty() {
+        return Err(LockfileError::InvalidDocument("empty lockfile".into()));
+    }
+    // The serializer must not reuse source text that contains duplicate keys.
+    Ok(Lockfile {
+        preserve_baseline: false,
+        documents,
+        sources: Vec::new(),
+    })
+}
+
+struct Choice {
+    side: usize,
+    kind: DocumentKind,
+    key: String,
+    values: Vec<Value>,
+    index: usize,
+}
+
+fn ambiguity(choices: &[Choice], message: String) -> LockfileError {
+    let choice = choices
+        .iter()
+        .find(|choice| choice.index != 0)
+        .unwrap_or(&choices[0]);
+    LockfileError::ResolutionRequired {
+        request: None,
+        path: vec![
+            ["base", "ours", "theirs"][choice.side].into(),
+            format!("{:?}", choice.kind),
+            "snapshots".into(),
+            choice.key.clone(),
+        ],
+        message,
+    }
+}
+
+fn advance(choices: &mut [Choice], locks: &mut [Lockfile]) -> bool {
+    for choice in choices.iter_mut().rev() {
+        choice.index += 1;
+        let carry = choice.index == choice.values.len();
+        if carry {
+            choice.index = 0;
+        }
+        let document = Arc::get_mut(
+            locks[choice.side]
+                .documents
+                .get_mut(&choice.kind)
+                .expect("candidate document"),
+        )
+        .expect("recovery owns candidate documents");
+        document["snapshots"][&choice.key] = choice.values[choice.index].clone();
+        if !carry {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Default)]
+struct RecoveredDocument {
+    value: Map<String, Value>,
+    alternatives: BTreeMap<String, Vec<Value>>,
+}
+
+impl<'de> Deserialize<'de> for RecoveredDocument {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Root;
+        impl<'de> Visitor<'de> for Root {
+            type Value = RecoveredDocument;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a lockfile mapping")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut result = RecoveredDocument::default();
+                while let Some(TextKey(key)) = map.next_key::<TextKey>()? {
+                    if result.value.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate mapping key: {key}")));
+                    }
+                    let value = if key == "snapshots" {
+                        let snapshots = map.next_value::<Snapshots>()?;
+                        result.alternatives = snapshots.alternatives;
+                        Value::Object(snapshots.value)
+                    } else {
+                        map.next_value::<StrictValue>()?.0
+                    };
+                    result.value.insert(key, value);
+                }
+                Ok(result)
+            }
+        }
+        deserializer.deserialize_map(Root)
+    }
+}
+
+#[derive(Default)]
+struct Snapshots {
+    value: Map<String, Value>,
+    alternatives: BTreeMap<String, Vec<Value>>,
+}
+impl<'de> Deserialize<'de> for Snapshots {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> Visitor<'de> for Entries {
+            type Value = Snapshots;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a snapshot mapping")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut result = Snapshots::default();
+                while let Some(TextKey(key)) = map.next_key::<TextKey>()? {
+                    let value = map.next_value::<StrictValue>()?.0;
+                    if let Some(first) = result.value.get(&key) {
+                        if first != &value {
+                            let values = result
+                                .alternatives
+                                .entry(key)
+                                .or_insert_with(|| vec![first.clone()]);
+                            if !values.contains(&value) {
+                                values.push(value);
+                            }
+                        }
+                    } else {
+                        result.value.insert(key, value);
+                    }
+                }
+                Ok(result)
+            }
+        }
+        deserializer.deserialize_map(Entries)
+    }
+}
+
+/// PassThrough is needed for snapshot alternatives. Every other mapping still
+/// enforces unique keys, including maps nested inside a snapshot record.
+struct StrictValue(Value);
+impl<'de> Deserialize<'de> for StrictValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Strict;
+        impl<'de> Visitor<'de> for Strict {
+            type Value = StrictValue;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a value with unique mapping keys")
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Null))
+            }
+            fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(StrictValue(value.into()))
+            }
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(StrictValue(value.into()))
+            }
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(StrictValue(value.into()))
+            }
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|value| StrictValue(Value::Number(value)))
+                    .ok_or_else(|| de::Error::custom("non-finite number"))
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(StrictValue(value.into()))
+            }
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(StrictValue(value.into()))
+            }
+            fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<Self::Value, S::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element::<StrictValue>()? {
+                    values.push(value.0);
+                }
+                Ok(StrictValue(Value::Array(values)))
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut values = Map::new();
+                while let Some(TextKey(key)) = map.next_key::<TextKey>()? {
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate mapping key: {key}")));
+                    }
+                    values.insert(key, map.next_value::<StrictValue>()?.0);
+                }
+                Ok(StrictValue(Value::Object(values)))
+            }
+        }
+        deserializer.deserialize_any(Strict)
+    }
+}
+
+/// YAML integer-equivalent keys (such as 0xB and 11) must not become two
+/// distinct strings when the YAML parser forwards duplicates to our visitor.
+struct TextKey(String);
+impl<'de> Deserialize<'de> for TextKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Key;
+        impl<'de> Visitor<'de> for Key {
+            type Value = TextKey;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string mapping key for snapshot recovery")
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(TextKey(value.into()))
+            }
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(TextKey(value))
+            }
+        }
+        deserializer.deserialize_any(Key)
+    }
+}

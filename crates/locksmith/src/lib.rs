@@ -23,70 +23,36 @@
 
 #![warn(missing_docs, missing_debug_implementations)]
 
-// Layer 0: Foundation
 #[cfg(feature = "bench-profile")]
 #[doc(hidden)]
 pub mod profile;
 
-mod error;
-mod registry;
-
-// Layer 1: Schema & Checksums
-mod catalog;
-mod patch;
-
-mod checksum;
-mod schema;
-
-mod pin;
-
-// Layer 2: YAML & Source
-mod source;
-mod verify;
-
-// Layer 3: Workspace Rules, Graph & Lockfile
-mod config;
-mod workspace_links;
-
-mod manifest;
-
-mod graph;
+// Strict layered DAG: model -> yaml -> lockfile -> peer -> resolve -> ops
 mod lockfile;
-
-// Layer 4: Diagnostics & Inspection
-mod diagnostics;
-mod inspect;
-
-// Layer 5: Peer & Resolution Engines
+mod model;
+mod ops;
 mod peer;
-mod reconcile;
-mod recovery;
+mod resolve;
+mod yaml;
 
-// Layer 6: Public Workflows
-mod converge;
-mod repair;
-
-mod merge;
-
-pub use config::{
+pub use lockfile::Lockfile;
+pub use model::config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
     PatchEncoding, ResolutionSettings, WorkspaceConfig,
 };
-pub use converge::{ConvergeOptions, ManifestChange, converge};
-pub use diagnostics::{
-    Disposition, PeerIssue, PeerRules, PeerStatus, PeerVersionMatching, UnknownReason,
-    inspect_peers,
-};
-pub use error::{Conflict, ConflictKind, LockfileError, ValidationIssue};
-pub use graph::DependencyClosure;
-pub use inspect::{
+pub use model::error::{Conflict, ConflictKind, LockfileError, PeerIssue, ValidationIssue};
+pub use model::graph::DependencyClosure;
+pub use model::registry::{RegistryMetadata, RegistryRequest};
+pub use model::schema::DocumentKind;
+pub use node_semver::Version;
+pub use ops::converge::{ConvergeOptions, ManifestChange, converge};
+pub use ops::inspect::peers::{PeerRules, inspect_peers};
+pub use ops::inspect::{
     ExternalLink, Inspection, InspectionSummary, LinkSource, LockedRelease, PackageInstances,
     PeerBinding, PeerGroup, PeerRequirement, inspect,
 };
-pub use lockfile::{DocumentKind, Lockfile};
-pub use merge::{ContextualMerge, MergeInput, merge};
-pub use node_semver::Version;
-pub use reconcile::{MergeContext, MergeTarget};
-pub use registry::{RegistryMetadata, RegistryRequest};
-pub use repair::{RepairContext, RepairInput, repair};
+pub use ops::merge::merge;
+pub use ops::repair::{RepairContext, RepairInput, repair};
+pub use peer::range::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
+pub use resolve::{ContextualMerge, MergeContext, MergeInput, MergeTarget};
 pub use serde_json::{Map, Value};

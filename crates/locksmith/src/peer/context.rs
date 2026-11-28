@@ -4,7 +4,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::{Value, checksum::HashStyle, graph, patch::hash_in_key, pin};
+use crate::{
+    Value, model::checksum::HashStyle, model::graph, model::patch::hash_in_key, model::pin,
+};
 
 use super::{
     BindingCandidates, Merger, Origin,

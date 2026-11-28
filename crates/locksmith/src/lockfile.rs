@@ -1,29 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
     sync::Arc,
 };
 
-use crate::{LockfileError, Value, graph, manifest, patch, pin, schema, source::Source};
-
-/// The project dependency graph or pnpm's package-manager bootstrap graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum DocumentKind {
-    /// Bootstrap dependencies for the package manager itself.
-    Environment,
-    /// Workspace importers and their package graph.
-    Project,
-}
-
-impl fmt::Display for DocumentKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Environment => "environment",
-            Self::Project => "project",
-        })
-    }
-}
+use crate::{
+    DocumentKind, LockfileError, Value, WorkspaceConfig, model::graph, model::manifest,
+    model::patch, model::pin, model::schema, yaml::edit, yaml::source::Source,
+};
 
 /// An immutable, parsed lockfile. Unknown metadata fields are retained.
 #[derive(Debug, Clone)]
@@ -97,7 +80,7 @@ impl Lockfile {
     /// An absent group means the lock does not manage the package manager itself.
     pub(crate) fn matches_pnpm_manager(
         &self,
-        manager: &crate::manifest::PnpmManager<'_>,
+        manager: &crate::model::manifest::PnpmManager<'_>,
     ) -> Option<bool> {
         let pins = self.environment()?["importers"]["."].get("packageManagerDependencies")?;
         Some(pins.as_object().is_some_and(|pins| {
@@ -135,8 +118,8 @@ impl Lockfile {
         root: &Value,
         config: Option<&crate::WorkspaceConfig>,
     ) -> Result<(), LockfileError> {
-        if let crate::manifest::ManagerPolicy::Declared(manager) =
-            crate::manifest::ManagerPolicy::for_workspace(
+        if let crate::model::manifest::ManagerPolicy::Declared(manager) =
+            crate::model::manifest::ManagerPolicy::for_workspace(
                 Some(root),
                 config,
                 self.recorded_pnpm_version().as_ref(),
@@ -150,7 +133,7 @@ impl Lockfile {
                         .zip(self.recorded_pnpm_version().as_ref())
                         .is_some_and(|(runner, recorded)| runner != recorded)))
         {
-            return Err(crate::error::missing(
+            return Err(crate::model::error::missing(
                 &["importers", ".", "packageManagerDependencies", "pnpm"],
                 format!(
                     "bootstrap graph does not match the declared pnpm@{}",
@@ -247,7 +230,7 @@ impl Lockfile {
             .project()
             .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
         if !config.matches_config_dependencies(self.environment()) {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "configDependencies differ from the bootstrap lockfile",
@@ -258,7 +241,7 @@ impl Lockfile {
         }
         let recorded = config.read_lock_settings(document)?;
         if recorded != config.recorded_settings() {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "dependency settings differ",
@@ -266,7 +249,7 @@ impl Lockfile {
         }
         config.check_recorded_settings(document)?;
         if let Some(field) = config.frozen_settings_mismatch(document) {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 format!("settings/{field} differs"),
@@ -274,10 +257,10 @@ impl Lockfile {
         }
         if let Some(catalogs) = document.get("catalogs") {
             for (catalog, entries) in catalogs.as_object().ok_or_else(|| {
-                crate::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
+                crate::model::manifest::mismatch(".", "workspace", "catalogs must be a mapping")
             })? {
                 for (name, record) in entries.as_object().ok_or_else(|| {
-                    crate::manifest::mismatch(
+                    crate::model::manifest::mismatch(
                         ".",
                         "workspace",
                         format!("catalogs/{catalog} must be a mapping"),
@@ -285,7 +268,7 @@ impl Lockfile {
                 })? {
                     let configured = config.catalogs.get(catalog).and_then(|c| c.get(name));
                     if !configured.is_some_and(|spec| record["specifier"] == spec.as_str()) {
-                        return Err(crate::manifest::mismatch(
+                        return Err(crate::model::manifest::mismatch(
                             ".",
                             "workspace",
                             format!("catalogs/{catalog}/{name} specifier differs"),
@@ -303,24 +286,27 @@ impl Lockfile {
                 && (patches_match(crate::PatchEncoding::Md5Base32WithPath)?
                     || patches_match(crate::PatchEncoding::Sha256)?))
         {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "patchedDependencies differs",
             ));
         }
-        if !crate::checksum::extensions_match(config, document.get("packageExtensionsChecksum")) {
-            return Err(crate::manifest::mismatch(
+        if !crate::model::checksum::extensions_match(
+            config,
+            document.get("packageExtensionsChecksum"),
+        ) {
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "packageExtensionsChecksum differs",
             ));
         }
-        if !crate::checksum::hooks_match(
+        if !crate::model::checksum::hooks_match(
             config.resolution.pnpmfile_checksum.as_ref(),
             document.get("pnpmfileChecksum"),
         ) {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "pnpmfileChecksum differs",
@@ -330,7 +316,7 @@ impl Lockfile {
             .resolution
             .ignored_optional_dependencies_match(document)?
         {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "ignoredOptionalDependencies differs",
@@ -339,22 +325,22 @@ impl Lockfile {
         let effective = manifest::effective_overrides(config, manifests.get("."))?;
         let recorded_overrides = schema::rule_map(document, "overrides");
         if !schema::same_ordered_mapping(effective.as_ref(), recorded_overrides) {
-            return Err(crate::manifest::mismatch(
+            return Err(crate::model::manifest::mismatch(
                 ".",
                 "workspace",
                 "overrides differ",
             ));
         }
-        let overrides = crate::manifest::Overrides::for_frozen_workspace(document, config);
+        let overrides = crate::model::manifest::Overrides::for_frozen_workspace(document, config);
         for id in graph::section(document, "importers")
             .into_iter()
             .flat_map(|m| m.keys())
         {
             if !manifests.contains_key(id) {
-                crate::manifest::check(&overrides, id, None, "workspace")?;
+                crate::model::manifest::check(&overrides, id, None, "workspace")?;
             }
         }
-        let workspace = crate::workspace_links::FrozenWorkspace::new(
+        let workspace = crate::model::workspace_links::FrozenWorkspace::new(
             manifests,
             config,
             document,
@@ -362,12 +348,12 @@ impl Lockfile {
             &read_linked,
         );
         for (id, manifest) in manifests {
-            crate::manifest::check_manifest(
+            crate::model::manifest::check_manifest(
                 &overrides,
                 id,
                 Some(manifest),
                 "workspace",
-                crate::manifest::ManifestCheck::Frozen(&workspace),
+                crate::model::manifest::ManifestCheck::Frozen(&workspace),
             )?;
         }
         Ok(())
@@ -407,22 +393,23 @@ impl Lockfile {
                                 && schema::same_override_order(document, orig)
                                 && {
                                     let keep_importer_order = self.preserve_baseline
-                                        && crate::source::importer_order(
+                                        && crate::yaml::source::importer_order(
                                             &self.sources,
                                             *kind,
                                             document,
                                         )
                                         .is_some();
-                                    crate::source::SECTIONS.into_iter().chain(["catalogs"]).all(
-                                        |section| {
+                                    crate::yaml::source::SECTIONS
+                                        .into_iter()
+                                        .chain(["catalogs"])
+                                        .all(|section| {
                                             source.reusable_field(
                                                 *kind,
                                                 section,
                                                 self.preserve_baseline && i == 0,
                                                 keep_importer_order,
                                             )
-                                        },
-                                    )
+                                        })
                                 })
                     })
                 })
@@ -436,14 +423,14 @@ impl Lockfile {
                 output.push_str("---\n");
             }
             let start = output.len();
-            crate::source::render(
+            crate::yaml::source::render(
                 kind,
                 document,
                 &self.sources,
                 self.preserve_baseline,
                 &mut output,
             );
-            crate::verify::verify(&output[start..], document)?;
+            crate::yaml::verify::verify(&output[start..], document)?;
         }
         Ok(output)
     }
@@ -473,5 +460,97 @@ impl Lockfile {
             sources,
             preserve_baseline: false,
         }
+    }
+
+    pub(crate) fn parse_for_repair(
+        text: &str,
+        reference: Option<&Value>,
+    ) -> Result<Self, LockfileError> {
+        let error = match Self::parse(text) {
+            Err(error @ LockfileError::Parse(_)) => error,
+            result => return result,
+        };
+        let Some(output) = edit::strip_duplicates(text, reference)? else {
+            return Err(error);
+        };
+        Self::try_from(output)
+    }
+
+    pub(crate) fn edit_project(&self, after: &Value) -> Result<Self, LockfileError> {
+        let source = self.sources.first().ok_or_else(|| {
+            LockfileError::InvalidDocument("missing source text for project edit".into())
+        })?;
+        let before = self
+            .project()
+            .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
+        let output = edit::rewrite_project_text(&source.text, before, after)?;
+        let result = Self::try_from(output)?;
+        if result.project() != Some(after)
+            || result.document(DocumentKind::Environment) != self.environment()
+            || !schema::same_override_order(after, result.project().expect("verified project"))
+        {
+            return Err(LockfileError::OutputMismatch);
+        }
+        Ok(result)
+    }
+}
+
+impl WorkspaceConfig {
+    /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
+    #[must_use]
+    pub fn requires_bootstrap_reconciliation(
+        &self,
+        after: &Self,
+        baseline: &Lockfile,
+        candidate: &Lockfile,
+    ) -> bool {
+        self.changes_pnpm_version(after)
+            || self.config_dependencies != after.config_dependencies
+            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
+            || !after.matches_config_dependencies(baseline.environment())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_for_repair_does_not_treat_environment_only_lockfile_as_project() {
+        let env_only = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    configDependencies:
+      cfg: 1.0.0
+snapshots:
+  cfg@1.0.0:
+    dependencies:
+      dep: 1.0.0
+  cfg@1.0.0:
+    dependencies:
+      dep: 2.0.0
+";
+        let witness = json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {}},
+            "snapshots": {"cfg@1.0.0": {"dependencies": {"dep": "1.0.0"}}}
+        });
+        assert!(matches!(
+            Lockfile::parse_for_repair(env_only, Some(&witness)),
+            Err(LockfileError::ResolutionRequired { .. })
+        ));
+    }
+
+    #[test]
+    fn edit_project_rejects_lockfile_without_source_text() {
+        let doc = Arc::new(json!({"lockfileVersion": "9.0", "importers": {".": {}}}));
+        let lock = Lockfile::with_documents(BTreeMap::from([(DocumentKind::Project, doc)]), &[]);
+        let after = json!({"lockfileVersion": "9.0", "importers": {".": {"extra": true}}});
+        assert!(matches!(
+            lock.edit_project(&after),
+            Err(LockfileError::InvalidDocument(_))
+        ));
     }
 }
