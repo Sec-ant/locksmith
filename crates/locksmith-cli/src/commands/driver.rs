@@ -77,18 +77,23 @@ fn shell_quote_single(value: &str) -> String {
     out
 }
 
-/// Quote a `.gitattributes` pattern using Git's C-style quoting when needed.
+/// Escape a leading `!` at the pattern layer and apply Git's C-style quoting when needed.
 fn quote_gitattributes_pattern(pattern: &str) -> String {
-    let needs_quoting = pattern.starts_with(['#', '!'])
+    let needs_quoting = pattern.starts_with('#')
         || pattern
             .chars()
             .any(|c| c.is_whitespace() || matches!(c, '"' | '\\'));
+    let escaped = if let Some(rest) = pattern.strip_prefix('!') {
+        format!("\\!{rest}")
+    } else {
+        pattern.to_string()
+    };
     if !needs_quoting {
-        return pattern.to_string();
+        return escaped;
     }
-    let mut out = String::with_capacity(pattern.len() + 2);
+    let mut out = String::with_capacity(escaped.len() + 2);
     out.push('"');
-    for ch in pattern.chars() {
+    for ch in escaped.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
@@ -125,7 +130,7 @@ pub fn setup(args: &DriverSetupArgs, ui: &Ui) -> Result<()> {
         None if !args.global => detect_local_driver_bin().unwrap_or_else(|| "locksmith".into()),
         None => "locksmith".to_string(),
     };
-    let escaped_bin = shell_quote_token(&bin);
+    let escaped_bin = shell_quote_token(&bin.replace('%', "%%"));
     let network = if args.allow_network {
         " --allow-network"
     } else {

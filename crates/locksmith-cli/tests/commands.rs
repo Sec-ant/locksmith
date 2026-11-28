@@ -4354,6 +4354,36 @@ fn driver_setup_quotes_paths_patterns_and_resolves_subdirectory_bins() {
             .contains("**/pnpm-lock.yaml merge=locksmith")
     );
 
+    // Leading `!` is escaped at the pattern layer, and `%` in --bin is doubled for Git expansion.
+    let special = repo.cmd(
+        CLI,
+        &[
+            "driver",
+            "setup",
+            "--bin",
+            "/opt/100%fast/locksmith",
+            "--lockfile",
+            "!special/pnpm-lock.yaml",
+        ],
+    );
+    assert!(special.status.success(), "{}", report(&special));
+    let special_out = String::from_utf8(special.stdout).unwrap();
+    assert!(
+        special_out.contains("\\!special/pnpm-lock.yaml merge=locksmith"),
+        "{special_out}"
+    );
+    assert!(special_out.contains("100%%fast/locksmith"), "{special_out}");
+    let special_space = repo.cmd(
+        CLI,
+        &["driver", "setup", "--lockfile", "!my app/pnpm-lock.yaml"],
+    );
+    assert!(special_space.status.success(), "{}", report(&special_space));
+    assert!(
+        String::from_utf8(special_space.stdout)
+            .unwrap()
+            .contains("\"\\\\!my app/pnpm-lock.yaml\" merge=locksmith")
+    );
+
     // Running driver setup from a subdirectory resolves local node_modules/.bin/locksmith relative to repo root.
     repo.write("nested/node_modules/.bin/locksmith", "#!/bin/sh\n");
     let sub = Command::new(CLI)

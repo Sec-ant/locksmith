@@ -12,7 +12,7 @@ use anstyle::{AnsiColor, Style};
 use clap::{ValueEnum, builder::Styles};
 use locksmith::LockfileError;
 use similar::TextDiff;
-use tempfile::NamedTempFile;
+use tempfile::Builder;
 
 use crate::Result;
 
@@ -246,17 +246,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("{}: {e}", path.display()).into()),
     };
-    let mut temp = NamedTempFile::new_in(dir)?;
+    let mut builder = Builder::new();
+    #[cfg(unix)]
+    if existing_perms.is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut temp = builder.tempfile_in(dir)?;
     temp.write_all(bytes)?;
     if let Some(perms) = existing_perms {
         temp.as_file().set_permissions(perms)?;
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            temp.as_file()
-                .set_permissions(fs::Permissions::from_mode(0o644))?;
-        }
     }
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
