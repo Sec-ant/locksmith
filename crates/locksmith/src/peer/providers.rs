@@ -1,7 +1,7 @@
 //! Build provider scopes and interpret aliased dependency references.
 use std::{borrow::Cow, collections::BTreeMap};
 
-use crate::{Value, graph, pin, schema};
+use crate::{Value, model::graph, model::pin, model::schema};
 
 use super::identity::root_provider;
 

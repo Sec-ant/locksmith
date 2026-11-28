@@ -2,6 +2,12 @@
 
 This document explains the problem Locksmith solves, how a pnpm v9 lockfile represents a dependency graph, and how `merge`, `converge`, and `repair` change that graph. It assumes you have used pnpm but have not read `pnpm-lock.yaml` closely. Installation and command usage are in the [README](../README.md).
 
+## Architecture overview
+
+[![Locksmith system architecture and data flow](diagrams/locksmith-architecture.svg)](diagrams/locksmith-architecture.svg)
+
+[SVG](diagrams/locksmith-architecture.svg) · [High-resolution PNG](diagrams/locksmith-architecture.png)
+
 ## 1. Why a lockfile is not a text file
 
 Git merges `pnpm-lock.yaml` as YAML text. A three-way text merge can produce a file that parses but no longer describes a valid dependency graph:
@@ -25,6 +31,10 @@ Locksmith takes a third path. It reads the lockfile as a graph, uses the final m
 ## 2. The data model
 
 A v9 lockfile is a graph in three layers. Importers point into snapshots, snapshots point to other snapshots through their dependency edges, and `packages` holds the metadata shared by snapshots. pnpm 11 and later also write a separate environment document for package-manager dependencies; the project document below is the main input for Locksmith.
+
+[![pnpm v9.0 lockfile three-layer dependency graph](diagrams/lockfile-graph.svg)](diagrams/lockfile-graph.svg)
+
+[SVG](diagrams/lockfile-graph.svg) · [High-resolution PNG](diagrams/lockfile-graph.png)
 
 ### Importers
 
@@ -296,10 +306,12 @@ On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text
 
 ### Code map
 
-| Area | Modules | Responsibility |
+`crates/locksmith/src/` is organized into five layers forming a strict DAG (`model` → `yaml` → `peer` → `resolve` → `ops`):
+
+| Layer | Key modules | Responsibility |
 | --- | --- | --- |
-| Parsing and output | `source`, `verify` | YAML documents, source reuse, output comparison |
-| Graph | `graph` | reachability, closure, reference validation |
-| Selection | `scope`, `peer`, `reconcile` | importer edges, peer bindings, candidate selection |
-| Assembly | `assembly`, `reconcile::dedupe` | snapshot and package assembly, deduplication |
-| Repair | `repair` | evidence search and importer reconciliation |
+| `model` | `lockfile`, `graph`, `config` (`bootstrap`, `compatibility`), `manifest`, `pin`, `schema`, `catalog`, `patch`, `checksum`, `workspace_links`, `registry`, `error` | Three-layer graph, reachability, workspace rules, checksums, and error types |
+| `yaml` | `source`, `edit`, `format`, `scalars`, `implicit`, `verify`, `recovery` | Raw YAML span parsing, source-reusing emission, output verification, and duplicate-snapshot recovery |
+| `peer` | `identity`, `index`, `providers`, `context`, `bindings` (`search`), `rebind`, `exact`, `three_way` | Peer-encoded snapshot identity, cross-source indexing, provider matching, and rebinding |
+| `resolve` | `metadata`, `bootstrap`, `published`, `importers`, `preference`, `assembly`, `rewrite`, `extensions`, `dedupe`, `rebuild` (`environment`, `requirements`) | Shared contextual resolution engine (used by `merge`, cross-major `converge`, and `repair` fallback) |
+| `ops` | `merge`, `converge` (`projection`), `repair`, `inspect` (`peers`, `range`, `impact`) | Public workflows (`merge`, `converge`, `repair`, `inspect` / `inspect_peers`) |

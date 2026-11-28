@@ -1,7 +1,7 @@
 //! Merge three lockfile snapshots without a final workspace context.
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Value, graph, patch::hash_in_key, pin, pin::reference};
+use crate::{Value, model::graph, model::patch::hash_in_key, model::pin, model::pin::reference};
 
 use super::{Merger, bindings::bindings, identity::encode};
 

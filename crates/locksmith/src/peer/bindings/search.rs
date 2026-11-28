@@ -1,10 +1,10 @@
 //! Test scoped peer candidates in pnpm identity order, within a fixed search budget.
 use super::{Bindings, optional_requirement};
-use crate::{LinkedPeerEncoding, Value, graph};
+use crate::{LinkedPeerEncoding, Value, model::graph};
 use crate::{
-    checksum::{HashStyle, digest},
+    model::checksum::{HashStyle, digest},
+    model::pin,
     peer::identity::peer_id,
-    pin,
 };
 use sha2::{Digest, Sha256};
 use std::{

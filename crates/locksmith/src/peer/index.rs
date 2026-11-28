@@ -1,7 +1,7 @@
 //! Shared release and workspace-link indexes for the input lockfiles.
 use std::{cell::OnceCell, collections::HashMap, rc::Rc};
 
-use crate::{LinkedPeerEncoding, Value, graph, pin};
+use crate::{LinkedPeerEncoding, Value, model::graph, model::pin};
 
 use super::{Merger, identity::link_peer_id};
 

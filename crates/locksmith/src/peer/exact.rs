@@ -1,9 +1,9 @@
 use super::{Merger, explicit_bindings};
-use crate::patch::hash_in_key;
+use crate::model::patch::hash_in_key;
 use crate::{
     Value, WorkspaceConfig,
-    graph::{self, dependency, transitive},
-    pin,
+    model::graph::{self, dependency, transitive},
+    model::pin,
 };
 
 impl Merger<'_> {
@@ -28,11 +28,9 @@ impl Merger<'_> {
                     .get(&release)
                     .is_some_and(|v| v.get("resolution") != Some(artifact))
             })
-            || config
-                .patches
-                .iter()
-                .flatten()
-                .any(|(selector, _)| crate::manifest::parent_matches(selector, target, &version))
+            || config.patches.iter().flatten().any(|(selector, _)| {
+                crate::model::manifest::parent_matches(selector, target, &version)
+            })
         {
             return None;
         }
@@ -57,7 +55,7 @@ impl Merger<'_> {
                     .and_then(Value::as_str)
                     .zip(pin::package_key(pin).parse::<node_semver::Version>().ok())
                     .is_some_and(|(range, v)| {
-                        crate::diagnostics::PeerRange::new(
+                        crate::ops::inspect::peers::PeerRange::new(
                             range,
                             crate::PeerVersionMatching::for_pnpm(config.pnpm_version.as_ref()),
                         )

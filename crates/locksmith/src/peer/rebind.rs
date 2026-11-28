@@ -4,7 +4,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::{LinkedPeerEncoding, Value, graph, patch::hash_in_key, pin, pin::reference};
+use crate::{
+    LinkedPeerEncoding, Value, model::graph, model::patch::hash_in_key, model::pin,
+    model::pin::reference,
+};
 
 use super::{
     Merger, Origin, SavedRecord, bindings::Bindings, bound_reference, canonical_binding,
