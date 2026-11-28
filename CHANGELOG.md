@@ -1,3 +1,13 @@
+## 0.3.10 (2026-11-28)
+
+### Features
+
+- Replace `converge_with_patches` and `converge_with_recorded_baselines` with `converge` and `ConvergeOptions::patches` or `ConvergeOptions::recorded_baselines`, respectively. Rename `PeerVersionMatching::ReleaseCompatible` to `Pnpm10`, add `#[non_exhaustive]`, `#[must_use]`, `Display`, and standard Rust traits, and declare the default export and `CLI_FAILED` error variant in `npm/index.d.ts`.
+
+### Fixes
+
+- Fix YAML scalar/float quoting, verifier non-finite float matching, peer diagnostics, reconcile/repair/CLI/npm edge cases, and optimize YAML emission and registry packument fetching.
+
 ## 0.3.9 (2026-11-27)
 
 ### Fixes
