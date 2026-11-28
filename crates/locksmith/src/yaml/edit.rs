@@ -13,7 +13,7 @@ use super::source::{
     FLOW_MAP_CLOSE, FLOW_MAP_OPEN, SECTIONS, document_kind, document_ranges, options,
     standalone_block,
 };
-use crate::{DocumentKind, Lockfile, LockfileError, Value, model::schema};
+use crate::{DocumentKind, LockfileError, Value};
 
 struct Locations(Vec<Spanned<String>>);
 
@@ -71,14 +71,10 @@ fn header_end(text: &str) -> Option<usize> {
 
 // Only independent block entries may be removed. The strict parser checks both
 // copies separately, including nested keys, then checks the whole edited file.
-pub(crate) fn parse_for_repair(
+pub(crate) fn strip_duplicates(
     text: &str,
     reference: Option<&Value>,
-) -> Result<Lockfile, LockfileError> {
-    let error = match Lockfile::parse(text) {
-        Err(error @ LockfileError::Parse(_)) => error,
-        result => return result,
-    };
+) -> Result<Option<String>, LockfileError> {
     let bom = text.len() - text.trim_start_matches('\u{feff}').len();
     let mut removals = Vec::new();
     let documents = document_ranges(&text[bom..]);
@@ -99,7 +95,7 @@ pub(crate) fn parse_for_repair(
         }
     }
     if removals.is_empty() {
-        return Err(error);
+        return Ok(None);
     }
     removals.sort_unstable_by_key(|range| range.start);
     let mut output = String::with_capacity(text.len());
@@ -109,7 +105,7 @@ pub(crate) fn parse_for_repair(
         cursor = range.end;
     }
     output.push_str(&text[cursor..]);
-    Lockfile::try_from(output)
+    Ok(Some(output))
 }
 
 fn duplicate_entries(
@@ -171,11 +167,11 @@ fn duplicate_entries(
     Ok(())
 }
 
-pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, LockfileError> {
-    let source = lock.sources.first().ok_or_else(|| {
-        LockfileError::InvalidDocument("missing source text for project edit".into())
-    })?;
-    let text = &source.text;
+pub(crate) fn rewrite_project_text(
+    text: &str,
+    before: &Value,
+    after: &Value,
+) -> Result<String, LockfileError> {
     let bom = text.len() - text.trim_start_matches('\u{feff}').len();
     // A project is last when a separate package-manager environment is present.
     let range = document_ranges(&text[bom..]).pop().ok_or_else(|| {
@@ -188,9 +184,6 @@ pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, Lockfi
     let raw = &text[start..end];
     let mut output = String::with_capacity(text.len());
     output.push_str(&text[..start]);
-    let before = lock
-        .project()
-        .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
     if !edit_map(&mut output, raw, before, after, &mut Vec::new(), eol) {
         return Err(LockfileError::InvalidDocument(
@@ -198,14 +191,7 @@ pub(crate) fn project(lock: &Lockfile, after: &Value) -> Result<Lockfile, Lockfi
         ));
     }
     output.push_str(&text[end..]);
-    let result = Lockfile::try_from(output)?;
-    if result.project() != Some(after)
-        || result.document(DocumentKind::Environment) != lock.environment()
-        || !schema::same_override_order(after, result.project().expect("verified project"))
-    {
-        return Err(LockfileError::OutputMismatch);
-    }
-    Ok(result)
+    Ok(output)
 }
 
 fn edit_map<'a>(
@@ -428,50 +414,5 @@ fn write(out: &mut String, path: &[&str], name: &str, value: &Value, eol: &str) 
         out.push_str(&entry);
     } else {
         out.push_str(&entry.replace('\n', eol));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::sync::Arc;
-
-    #[test]
-    fn parse_for_repair_does_not_treat_environment_only_lockfile_as_project() {
-        let env_only = "\
-lockfileVersion: '9.0'
-importers:
-  .:
-    configDependencies:
-      cfg: 1.0.0
-snapshots:
-  cfg@1.0.0:
-    dependencies:
-      dep: 1.0.0
-  cfg@1.0.0:
-    dependencies:
-      dep: 2.0.0
-";
-        let witness = json!({
-            "lockfileVersion": "9.0",
-            "importers": {".": {}},
-            "snapshots": {"cfg@1.0.0": {"dependencies": {"dep": "1.0.0"}}}
-        });
-        assert!(matches!(
-            parse_for_repair(env_only, Some(&witness)),
-            Err(LockfileError::ResolutionRequired { .. })
-        ));
-    }
-
-    #[test]
-    fn edit_project_rejects_lockfile_without_source_text() {
-        let doc = Arc::new(json!({"lockfileVersion": "9.0", "importers": {".": {}}}));
-        let lock = Lockfile::with_documents(BTreeMap::from([(DocumentKind::Project, doc)]), &[]);
-        let after = json!({"lockfileVersion": "9.0", "importers": {".": {"extra": true}}});
-        assert!(matches!(
-            project(&lock, &after),
-            Err(LockfileError::InvalidDocument(_))
-        ));
     }
 }

@@ -1,11 +1,11 @@
 //! Pure peer diagnostics, separate from graph construction and acceptance.
 
 use crate::peer::range;
-use crate::{Lockfile, LockfileError, Value, model::graph, model::pin, model::schema};
+use crate::{Lockfile, LockfileError, PeerIssue, Value, model::graph, model::pin, model::schema};
 use node_semver::Version;
 pub(crate) use range::PeerRange;
 pub use range::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
-use std::{collections::BTreeMap, fmt};
+use std::collections::BTreeMap;
 
 /// Version matching and workspace exceptions used to evaluate peer requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,34 +48,6 @@ impl PeerRules {
             allowed_versions: crate::model::config::string_rules(rules, "allowedVersions")?
                 .unwrap_or_default(),
         })
-    }
-}
-
-/// An unmet peer requirement. The caller decides whether this rejects a result.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[non_exhaustive]
-pub struct PeerIssue {
-    /// Requester snapshot ID, including its peer suffix.
-    pub snapshot: String,
-    /// Dependency name from the requesting package’s peer declarations.
-    pub peer: String,
-    /// Declared peer range or specifier.
-    pub wanted: String,
-    /// Locked provider reference, or `None` when the peer has no binding.
-    pub resolved: Option<String>,
-}
-
-impl fmt::Display for PeerIssue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} requires {}@{}",
-            self.snapshot, self.peer, self.wanted
-        )?;
-        match &self.resolved {
-            Some(reference) => write!(f, " (locked to {reference})"),
-            None => f.write_str(" (no provider)"),
-        }
     }
 }
 

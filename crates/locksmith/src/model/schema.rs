@@ -1,9 +1,28 @@
 //! Structural checks for lockfile records shared by parsing and graph validation.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::Map;
 
-use crate::{DocumentKind, LockfileError, ValidationIssue, Value, model::error::issue, model::pin};
+use crate::{LockfileError, ValidationIssue, Value, model::error::issue, model::pin};
+
+/// The project dependency graph or pnpm's package-manager bootstrap graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum DocumentKind {
+    /// Bootstrap dependencies for the package manager itself.
+    Environment,
+    /// Workspace importers and their package graph.
+    Project,
+}
+
+impl fmt::Display for DocumentKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Environment => "environment",
+            Self::Project => "project",
+        })
+    }
+}
 
 /// Peer declarations are input data. Silently skipping an ill-shaped entry
 /// would turn a corrupt declaration into a successful empty inspection.

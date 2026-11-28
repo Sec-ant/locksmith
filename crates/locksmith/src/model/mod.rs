@@ -11,6 +11,5 @@ pub(crate) mod schema;
 
 pub(crate) mod config;
 pub(crate) mod graph;
-pub(crate) mod lockfile;
 pub(crate) mod manifest;
 pub(crate) mod workspace_links;

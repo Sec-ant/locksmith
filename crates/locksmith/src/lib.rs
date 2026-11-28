@@ -27,32 +27,32 @@
 #[doc(hidden)]
 pub mod profile;
 
-// Five-layer architecture (strict DAG: model -> yaml -> peer -> resolve -> ops)
+// Strict layered DAG: model -> yaml -> lockfile -> peer -> resolve -> ops
+mod lockfile;
 mod model;
 mod ops;
 mod peer;
 mod resolve;
 mod yaml;
 
+pub use lockfile::Lockfile;
 pub use model::config::{
     ExtensionChecksum, LinkedPeerEncoding, LockSettings, OptionalPeerScope, OverrideTieBreak,
     PatchEncoding, ResolutionSettings, WorkspaceConfig,
 };
-pub use model::error::{Conflict, ConflictKind, LockfileError, ValidationIssue};
+pub use model::error::{Conflict, ConflictKind, LockfileError, PeerIssue, ValidationIssue};
 pub use model::graph::DependencyClosure;
-pub use model::lockfile::{DocumentKind, Lockfile};
 pub use model::registry::{RegistryMetadata, RegistryRequest};
+pub use model::schema::DocumentKind;
 pub use node_semver::Version;
 pub use ops::converge::{ConvergeOptions, ManifestChange, converge};
-pub use ops::inspect::peers::{
-    Disposition, PeerIssue, PeerRules, PeerStatus, PeerVersionMatching, UnknownReason,
-    inspect_peers,
-};
+pub use ops::inspect::peers::{PeerRules, inspect_peers};
 pub use ops::inspect::{
     ExternalLink, Inspection, InspectionSummary, LinkSource, LockedRelease, PackageInstances,
     PeerBinding, PeerGroup, PeerRequirement, inspect,
 };
-pub use ops::merge::{ContextualMerge, MergeInput, merge};
+pub use ops::merge::merge;
 pub use ops::repair::{RepairContext, RepairInput, repair};
-pub use resolve::{MergeContext, MergeTarget};
+pub use peer::range::{Disposition, PeerStatus, PeerVersionMatching, UnknownReason};
+pub use resolve::{ContextualMerge, MergeContext, MergeInput, MergeTarget};
 pub use serde_json::{Map, Value};

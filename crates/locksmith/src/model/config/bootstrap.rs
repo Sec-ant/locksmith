@@ -287,18 +287,4 @@ impl WorkspaceConfig {
         }
         None
     }
-
-    /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
-    #[must_use]
-    pub fn requires_bootstrap_reconciliation(
-        &self,
-        after: &Self,
-        baseline: &crate::Lockfile,
-        candidate: &crate::Lockfile,
-    ) -> bool {
-        self.changes_pnpm_version(after)
-            || self.config_dependencies != after.config_dependencies
-            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
-            || !after.matches_config_dependencies(baseline.environment())
-    }
 }

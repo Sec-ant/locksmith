@@ -110,7 +110,7 @@ pub(crate) fn issue(
 pub enum LockfileError {
     /// Optional acceptance-layer rejection. Graph operations do not emit this.
     #[error("peer policy rejects {} issues; first: {}", .0.len(), first_issue(.0))]
-    UnmetPeers(Vec<crate::PeerIssue>),
+    UnmetPeers(Vec<PeerIssue>),
     /// No unique compatible resolution follows from the available evidence.
     #[error("resolution requires additional input at {}: {message}", display_path(.path))]
     ResolutionRequired {
@@ -171,6 +171,34 @@ pub enum LockfileError {
 impl From<serde_saphyr::Error> for LockfileError {
     fn from(error: serde_saphyr::Error) -> Self {
         Self::Parse(Box::new(error))
+    }
+}
+
+/// An unmet peer requirement. The caller decides whether this rejects a result.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub struct PeerIssue {
+    /// Requester snapshot ID, including its peer suffix.
+    pub snapshot: String,
+    /// Dependency name from the requesting package’s peer declarations.
+    pub peer: String,
+    /// Declared peer range or specifier.
+    pub wanted: String,
+    /// Locked provider reference, or `None` when the peer has no binding.
+    pub resolved: Option<String>,
+}
+
+impl fmt::Display for PeerIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} requires {}@{}",
+            self.snapshot, self.peer, self.wanted
+        )?;
+        match &self.resolved {
+            Some(reference) => write!(f, " (locked to {reference})"),
+            None => f.write_str(" (no provider)"),
+        }
     }
 }
 

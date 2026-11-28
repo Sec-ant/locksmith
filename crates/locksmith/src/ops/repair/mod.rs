@@ -16,7 +16,6 @@ use crate::{
     model::graph,
     model::pin,
     resolve::{self, MergeContext},
-    yaml::edit,
 };
 
 /// Final workspace inputs and optional evidence for missing records.
@@ -96,7 +95,7 @@ impl RepairInput {
     /// # Errors
     /// Malformed YAML, unsupported versions or conflicting duplicate records return an error.
     pub fn parse(text: &str) -> Result<Self, LockfileError> {
-        edit::parse_for_repair(text, None).map(Self)
+        Lockfile::parse_for_repair(text, None).map(Self)
     }
 
     /// Use a reconciled lock to select an existing copy of a conflicting
@@ -108,7 +107,7 @@ impl RepairInput {
         text: &str,
         reference: &Lockfile,
     ) -> Result<Self, LockfileError> {
-        edit::parse_for_repair(text, reference.project()).map(Self)
+        Lockfile::parse_for_repair(text, reference.project()).map(Self)
     }
 
     /// Reconcile the source projects to select existing copies of conflicting snapshots.
@@ -220,7 +219,7 @@ impl RepairInput {
         drop(evidence);
         match result {
             Cow::Borrowed(_) => Ok(lock.clone()),
-            Cow::Owned(doc) => edit::project(lock, &doc),
+            Cow::Owned(doc) => lock.edit_project(&doc),
         }
     }
 }

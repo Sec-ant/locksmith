@@ -16,8 +16,125 @@ use crate::{
     model::manifest, model::patch, model::pin, model::schema, peer,
 };
 use serde_json::{Map, json};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+
+/// A parsed lockfile or its original YAML text.
+#[derive(Clone, Copy, Debug)]
+pub enum MergeInput<'a> {
+    /// Reuse an already parsed lockfile.
+    Parsed(&'a Lockfile),
+    /// Parse the supplied YAML as part of the merge.
+    Yaml(&'a str),
+}
+
+impl<'a> MergeInput<'a> {
+    pub(crate) fn bootstrap(self) -> (Option<Cow<'a, Lockfile>>, Vec<String>) {
+        match self {
+            Self::Parsed(lock) => (Some(Cow::Borrowed(lock)), Vec::new()),
+            Self::Yaml(text) => recovery::bootstrap_lockfile(text)
+                .map(|(lock, duplicates)| (Some(Cow::Owned(lock)), duplicates))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Read the recorded runner from the bootstrap document, including recoverable YAML inputs.
+    #[must_use]
+    pub fn recorded_pnpm_version(self) -> Option<node_semver::Version> {
+        self.bootstrap()
+            .0
+            .as_deref()
+            .and_then(Lockfile::recorded_pnpm_version)
+    }
+
+    /// Return explicitly declared tarballs whose matching bootstrap release omits its URL.
+    /// Adapters need registry settings only for these packages.
+    #[must_use]
+    pub fn implicit_config_tarballs(self, declarations: &Map<String, Value>) -> Vec<&str> {
+        let (lock, _) = self.bootstrap();
+        let Some(env) = lock.as_deref().and_then(Lockfile::environment) else {
+            return Vec::new();
+        };
+        let Some(entries) = env["importers"]["."]["configDependencies"].as_object() else {
+            return Vec::new();
+        };
+        if declarations.len() != entries.len() {
+            return Vec::new();
+        }
+        declarations
+            .iter()
+            .filter_map(|(name, dep)| {
+                dep.get("tarball")?.as_str()?;
+                let (version, integrity) = dep.get("integrity")?.as_str()?.split_once('+')?;
+                let resolution = crate::model::config::locked_config_resolution(
+                    env,
+                    name,
+                    entries.get(name)?,
+                    version,
+                    integrity,
+                )?;
+                resolution.get("tarball").is_none().then_some(name.as_str())
+            })
+            .collect()
+    }
+}
+
+impl<'a> From<&'a Lockfile> for MergeInput<'a> {
+    fn from(lock: &'a Lockfile) -> Self {
+        Self::Parsed(lock)
+    }
+}
+
+impl<'a> From<&'a str> for MergeInput<'a> {
+    fn from(text: &'a str) -> Self {
+        Self::Yaml(text)
+    }
+}
+
+/// The three inputs of a contextual merge, including the bootstrap graph selected
+/// while loading the final workspace. Reuse this value when adding registry evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextualMerge<'a> {
+    pub(crate) inputs: [MergeInput<'a>; 3],
+    pub(crate) bootstrap: Option<usize>,
+}
+
+impl ContextualMerge<'_> {
+    /// Merge these inputs against the supplied workspace.
+    ///
+    /// # Errors
+    /// Returns the contextual errors described by [`crate::merge`].
+    pub fn merge(&self, context: &MergeContext<'_>) -> Result<Lockfile, LockfileError> {
+        match self.inputs {
+            [
+                MergeInput::Parsed(b),
+                MergeInput::Parsed(o),
+                MergeInput::Parsed(t),
+            ] => resolve([b, o, t], context, self.bootstrap),
+            inputs => recovery::resolve(inputs, context, self.bootstrap),
+        }
+    }
+
+    /// Collect independent registry requests when the inputs have already been parsed.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::merge`]. An error other than missing registry evidence
+    /// is reported on its own.
+    pub fn merge_with_requests(
+        &self,
+        context: &MergeContext<'_>,
+    ) -> Result<Lockfile, Vec<LockfileError>> {
+        match self.inputs {
+            [
+                MergeInput::Parsed(b),
+                MergeInput::Parsed(o),
+                MergeInput::Parsed(t),
+            ] => resolve_with_requests([b, o, t], context, self.bootstrap),
+            _ => self.merge(context).map_err(|error| vec![error]),
+        }
+    }
+}
 
 type PeerRequirements = BTreeMap<String, BTreeSet<String>>;
 #[derive(Clone, Copy)]

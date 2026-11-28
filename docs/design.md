@@ -306,12 +306,13 @@ On success, `merge`, `converge` and `repair` write YAML. `inspect` writes a text
 
 ### Code map
 
-`crates/locksmith/src/` is organized into five layers forming a strict DAG (`model` → `yaml` → `peer` → `resolve` → `ops`):
+`crates/locksmith/src/` is organized as a strict layered DAG (`model` → `yaml` → `lockfile` → `peer` → `resolve` → `ops`):
 
 | Layer | Key modules | Responsibility |
 | --- | --- | --- |
-| `model` | `lockfile`, `graph`, `config` (`bootstrap`, `compatibility`), `manifest`, `pin`, `schema`, `catalog`, `patch`, `checksum`, `workspace_links`, `registry`, `error` | Three-layer graph, reachability, workspace rules, checksums, and error types |
-| `yaml` | `source`, `edit`, `format`, `scalars`, `implicit`, `verify` | Raw YAML span parsing, source-reusing emission, and output self-verification |
+| `model` | `graph`, `config` (`bootstrap`, `compatibility`), `manifest`, `pin`, `schema` (`DocumentKind`), `catalog`, `patch`, `checksum`, `workspace_links`, `registry`, `error` (`PeerIssue`) | Three-layer graph, reachability, workspace rules, checksums, and error types |
+| `yaml` | `source`, `edit`, `format`, `scalars`, `implicit`, `verify` | Raw YAML span parsing, source-reusing emission, in-place text edits, and output self-verification |
+| `lockfile` | `lockfile.rs` | `Lockfile` container bridging `model` and `yaml` (parsing, rendering, validation, and bootstrap checks) |
 | `peer` | `identity`, `index`, `providers`, `context`, `range`, `bindings` (`search`), `rebind`, `exact`, `three_way` | Peer-encoded snapshot identity, peer range policies, cross-source indexing, provider matching, and rebinding |
-| `resolve` | `metadata`, `bootstrap`, `published`, `importers`, `preference`, `assembly`, `rewrite`, `extensions`, `dedupe`, `recovery`, `rebuild` (`environment`, `requirements`) | Shared contextual resolution engine and duplicate-snapshot recovery (used by `merge`, cross-major `converge`, and `repair` fallback) |
+| `resolve` | `metadata`, `bootstrap`, `published`, `importers`, `preference`, `assembly`, `rewrite`, `extensions`, `dedupe`, `recovery`, `rebuild` (`environment`, `requirements`) | Shared contextual resolution engine (`MergeInput`, `ContextualMerge`) and duplicate-snapshot recovery |
 | `ops` | `merge`, `converge` (`projection`), `repair`, `inspect` (`peers`, `impact`) | Public workflows (`merge`, `converge`, `repair`, `inspect` / `inspect_peers`) |

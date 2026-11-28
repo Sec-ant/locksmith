@@ -1,32 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
     sync::Arc,
 };
 
 use crate::{
-    LockfileError, Value, model::graph, model::manifest, model::patch, model::pin, model::schema,
-    yaml::source::Source,
+    DocumentKind, LockfileError, Value, WorkspaceConfig, model::graph, model::manifest,
+    model::patch, model::pin, model::schema, yaml::edit, yaml::source::Source,
 };
-
-/// The project dependency graph or pnpm's package-manager bootstrap graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum DocumentKind {
-    /// Bootstrap dependencies for the package manager itself.
-    Environment,
-    /// Workspace importers and their package graph.
-    Project,
-}
-
-impl fmt::Display for DocumentKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Environment => "environment",
-            Self::Project => "project",
-        })
-    }
-}
 
 /// An immutable, parsed lockfile. Unknown metadata fields are retained.
 #[derive(Debug, Clone)]
@@ -480,5 +460,97 @@ impl Lockfile {
             sources,
             preserve_baseline: false,
         }
+    }
+
+    pub(crate) fn parse_for_repair(
+        text: &str,
+        reference: Option<&Value>,
+    ) -> Result<Self, LockfileError> {
+        let error = match Self::parse(text) {
+            Err(error @ LockfileError::Parse(_)) => error,
+            result => return result,
+        };
+        let Some(output) = edit::strip_duplicates(text, reference)? else {
+            return Err(error);
+        };
+        Self::try_from(output)
+    }
+
+    pub(crate) fn edit_project(&self, after: &Value) -> Result<Self, LockfileError> {
+        let source = self.sources.first().ok_or_else(|| {
+            LockfileError::InvalidDocument("missing source text for project edit".into())
+        })?;
+        let before = self
+            .project()
+            .ok_or_else(|| LockfileError::InvalidDocument("missing project document".into()))?;
+        let output = edit::rewrite_project_text(&source.text, before, after)?;
+        let result = Self::try_from(output)?;
+        if result.project() != Some(after)
+            || result.document(DocumentKind::Environment) != self.environment()
+            || !schema::same_override_order(after, result.project().expect("verified project"))
+        {
+            return Err(LockfileError::OutputMismatch);
+        }
+        Ok(result)
+    }
+}
+
+impl WorkspaceConfig {
+    /// Whether convergence needs to reconcile the installed bootstrap graph and patch records.
+    #[must_use]
+    pub fn requires_bootstrap_reconciliation(
+        &self,
+        after: &Self,
+        baseline: &Lockfile,
+        candidate: &Lockfile,
+    ) -> bool {
+        self.changes_pnpm_version(after)
+            || self.config_dependencies != after.config_dependencies
+            || baseline.recorded_pnpm_version() != candidate.recorded_pnpm_version()
+            || !after.matches_config_dependencies(baseline.environment())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_for_repair_does_not_treat_environment_only_lockfile_as_project() {
+        let env_only = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    configDependencies:
+      cfg: 1.0.0
+snapshots:
+  cfg@1.0.0:
+    dependencies:
+      dep: 1.0.0
+  cfg@1.0.0:
+    dependencies:
+      dep: 2.0.0
+";
+        let witness = json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {}},
+            "snapshots": {"cfg@1.0.0": {"dependencies": {"dep": "1.0.0"}}}
+        });
+        assert!(matches!(
+            Lockfile::parse_for_repair(env_only, Some(&witness)),
+            Err(LockfileError::ResolutionRequired { .. })
+        ));
+    }
+
+    #[test]
+    fn edit_project_rejects_lockfile_without_source_text() {
+        let doc = Arc::new(json!({"lockfileVersion": "9.0", "importers": {".": {}}}));
+        let lock = Lockfile::with_documents(BTreeMap::from([(DocumentKind::Project, doc)]), &[]);
+        let after = json!({"lockfileVersion": "9.0", "importers": {".": {"extra": true}}});
+        assert!(matches!(
+            lock.edit_project(&after),
+            Err(LockfileError::InvalidDocument(_))
+        ));
     }
 }
