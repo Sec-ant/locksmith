@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "es-locksmith"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "base64",
  "indexmap",
@@ -657,7 +657,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "locksmith-cli"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "locksmith-node"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "es-locksmith",
  "napi",
