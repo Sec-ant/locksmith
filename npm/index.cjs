@@ -3,7 +3,8 @@ const { spawn } = require('node:child_process');
 const { platformDirectory, getCliPath } = require('./platform.cjs');
 const native = require(join(platformDirectory(), 'locksmith.node'));
 
-function runWorkspace(command, args, { cwd, signal } = {}) {
+function runWorkspace(command, args, options) {
+  const { cwd, signal } = options ?? {};
   return new Promise((resolve, reject) => {
     const child = spawn(getCliPath(), [command, ...args], { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
     child.on('error', reject);
@@ -34,3 +35,4 @@ module.exports = {
   convergeWorkspace: (ref, options) => runWorkspace('converge', revisionArgs(ref, options), options),
   repairWorkspace: (ref = 'HEAD', options) => runWorkspace('repair', revisionArgs(ref, options), options),
 };
+Object.defineProperty(module.exports, 'default', { value: module.exports });

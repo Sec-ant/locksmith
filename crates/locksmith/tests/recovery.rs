@@ -48,11 +48,11 @@ fn duplicate_snapshots_cannot_hide_independent_bootstrap_errors() {
         let result = prepared
             .merge(&MergeContext {
                 target: MergeTarget::Ours,
-                registry: None,
                 manifests: &manifests,
-                configuration: &config,
                 configurations: branches.each_ref(),
+                configuration: &config,
                 patches: &BTreeMap::new(),
+                registry: None,
             })
             .unwrap();
         assert_eq!(result.environment(), Some(&environment));
@@ -118,12 +118,12 @@ fn recover(text: &str, side: usize, overrides: bool) -> Result<Lockfile, Lockfil
         inputs[1],
         inputs[2],
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&old, &old, &old],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
 }
@@ -138,12 +138,12 @@ fn valid_yaml_uses_the_same_merge_and_text_preservation_contract() {
         json!({"dependencies":{"a":"1.0.0","b":"1.0.0"}}),
     )]);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Ours,
         manifests: &manifests,
         configurations: [&config; 3],
         configuration: &config,
         patches: &BTreeMap::new(),
+        registry: None,
     };
     let expected = merge(&lock, &lock, &lock, Some(&context)).unwrap();
     assert_eq!(
@@ -297,12 +297,12 @@ fn recovery_preserves_environment_documents_and_accepts_flow_snapshots() {
         text.as_str(),
         EMPTY,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();

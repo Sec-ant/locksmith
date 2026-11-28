@@ -20,7 +20,7 @@ pub enum Command {
     /// Reduce lockfile drift after an install. Write the converged YAML to stdout.
     #[bpaf(command)]
     Converge {
-        /// Query the registry for missing dependency ranges
+        /// Query the configured registry for missing dependency ranges and release metadata
         #[bpaf(long)]
         allow_network: bool,
         /// Git ref containing the baseline lockfile and manifests
@@ -89,7 +89,7 @@ pub enum Merge {
         allow_network: bool,
         #[bpaf(external)]
         inputs: Inputs,
-        /// Workspace-relative lockfile path supplied by Git
+        /// Repository-relative lockfile path supplied by Git
         #[bpaf(positional("PATH"))]
         path: String,
     },

@@ -4115,3 +4115,40 @@ fn workspace_validation_distinguishes_invalid_and_quoted_lock_settings() {
         );
     }
 }
+
+#[test]
+fn git_driver_accepts_bare_relative_destination_filename() {
+    let r = Repo::new();
+    r.branches(|_, _| {});
+    let base_yaml = r.git(&["show", "main~1:pnpm-lock.yaml"]);
+    let theirs_yaml = r.git(&["show", "topic:pnpm-lock.yaml"]);
+    let topic_oid = r.git(&["rev-parse", "topic"]).trim().to_owned();
+    r.write("base.yaml", &base_yaml);
+    r.write("theirs.yaml", &theirs_yaml);
+    let out = Command::new(CLI)
+        .current_dir(r.0.path())
+        .args([
+            "merge",
+            "--git-driver",
+            "base.yaml",
+            "pnpm-lock.yaml",
+            "theirs.yaml",
+            "pnpm-lock.yaml",
+        ])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(format!("GITHEAD_{topic_oid}"), "topic")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", report(&out));
+    let merged = fs::read_to_string(r.0.path().join("pnpm-lock.yaml")).unwrap();
+    let doc: Value = serde_saphyr::from_str(&merged).unwrap();
+    assert_eq!(
+        doc["importers"]["apps/web"]["dependencies"]["left"]["version"],
+        "2.0.0"
+    );
+    assert_eq!(
+        doc["importers"]["apps/web"]["devDependencies"]["right"]["version"],
+        "3.0.0"
+    );
+}

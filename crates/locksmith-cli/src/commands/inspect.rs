@@ -75,6 +75,7 @@ fn print_report(out: &mut impl Write, r: &Inspection) -> io::Result<()> {
             PeerStatus::OutOfRange => "out of range",
             PeerStatus::Unknown => "unknown",
             PeerStatus::Allowed => "allowed",
+            _ => "unknown",
         };
         write!(
             out,
@@ -92,6 +93,7 @@ fn print_report(out: &mut impl Write, r: &Inspection) -> io::Result<()> {
                 UnknownReason::ProviderVersion => "provider version unavailable",
                 UnknownReason::OpaqueSpecifier => "specifier has no verifiable version range",
                 UnknownReason::PackageManager => "resolver behavior depends on pnpm version",
+                _ => "unknown reason",
             };
             write!(out, " ({reason})")?;
         }
@@ -100,6 +102,7 @@ fn print_report(out: &mut impl Write, r: &Inspection) -> io::Result<()> {
                 Disposition::Accepted => "accepts",
                 Disposition::Rejected => "rejects",
                 Disposition::Unknown => "undetermined",
+                _ => "unknown",
             };
             write!(out, " [peer policy: {disposition}]")?;
         }

@@ -4,7 +4,9 @@ use crate::{
     registry,
     workspace::{self, Project},
 };
-use locksmith::{Lockfile, LockfileError, MergeContext, MergeTarget, RepairContext, RepairInput};
+use locksmith::{
+    Lockfile, LockfileError, MergeContext, MergeTarget, RepairContext, RepairInput, WorkspaceConfig,
+};
 
 pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     #[cfg(feature = "bench-profile")]
@@ -14,7 +16,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     #[cfg(feature = "bench-profile")]
     drop(revision_span);
     let file = format!("{prefix}pnpm-lock.yaml");
-    let mut blobs = git::Blobs::open()?;
+    let mut blobs = git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let text = blobs
         .read(commit, &file)?
         .ok_or_else(|| format!("missing {reference}:{file}"))?;
@@ -26,8 +28,6 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     })?;
     let patches = workspace::patches(&config, prefix, |file| blobs.read(commit, file))?;
     let manifests = workspace::manifests(&project, &mut blobs, commit, prefix)?;
-    // Release Git's mapped packfiles before allocating the lockfile graph.
-    drop(blobs);
     let context = RepairContext {
         manifests: &manifests,
         configuration: &config,
@@ -35,38 +35,49 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         parents: &[],
         registry: None,
     };
+    let mut merge_parents = None;
     let input = match RepairInput::parse(&text) {
         Err(error)
             if matches!(&error, LockfileError::ResolutionRequired { path, .. }
                 if matches!(path.as_slice(), [section, _] if section == "snapshots")) =>
         {
-            recover_merge_snapshots(&text, commit, prefix, &context)?.ok_or(error)?
+            let parents = parent_revisions(commit)?;
+            let recovered = recover_merge_snapshots(&text, prefix, &context, &mut blobs, &parents)?
+                .ok_or(error)?;
+            merge_parents = Some(recovered.parents);
+            recovered.input
         }
         other => other?,
     };
     let result = match input.apply(&context) {
         Err(LockfileError::ResolutionRequired { .. }) => {
             input.validate_bootstrap(&context)?;
-            let revisions = git::output(&["rev-list", "--parents", "-1", commit])?;
-            let mut blobs = git::Blobs::open()?;
-            let mut evidence = Vec::new();
-            for parent in revisions.split_whitespace().skip(1) {
-                if let Some(source) = blobs.read(parent, &file)?
-                    && source != text
-                {
-                    let lock = match Lockfile::try_from(source) {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            eprintln!("locksmith: skipping unusable parent {parent}: {e}");
-                            continue;
+            let evidence = match merge_parents {
+                Some(parents) => parents.into_iter().flatten().collect(),
+                None => {
+                    let mut evidence = Vec::new();
+                    for parent in parent_revisions(commit)? {
+                        if let Some(source) = blobs.read(&parent, &file)?
+                            && source != text
+                        {
+                            let parent_evidence = (|| -> Result<_> {
+                                let lock = Lockfile::try_from(source)?;
+                                let config =
+                                    parent_configuration(&mut blobs, &parent, prefix, &lock)?;
+                                Ok(ParentEvidence { lock, config })
+                            })();
+                            match parent_evidence {
+                                Ok(parent) => evidence.push(parent),
+                                Err(e) => {
+                                    eprintln!("locksmith: skipping unusable parent {parent}: {e}");
+                                }
+                            }
                         }
-                    };
-                    let previous =
-                        Project::read(&mut blobs, parent, prefix, lock.recorded_pnpm_version())?;
-                    evidence.push((lock, previous.configuration()?));
+                    }
+                    evidence
                 }
-            }
-            let parents: Vec<_> = evidence.iter().map(|(l, c)| (l, c)).collect();
+            };
+            let parents: Vec<_> = evidence.iter().map(|p| (&p.lock, &p.config)).collect();
             let rc = format!("{prefix}.npmrc");
             let network = if allow_network {
                 Some((blobs.read(commit, &rc)?, blobs.read("HEAD", &rc)?))
@@ -95,48 +106,82 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
                 },
             )?
         }
-        other => other?,
+        other => {
+            drop(blobs);
+            other?
+        }
     };
     policy.check_peers(&project.config, &result, &manifests)?;
     Ok(result)
 }
 
+struct ParentEvidence {
+    lock: Lockfile,
+    config: WorkspaceConfig,
+}
+
+struct RecoveredMerge {
+    input: RepairInput,
+    parents: [Option<ParentEvidence>; 2],
+}
+
+fn parent_revisions(commit: &str) -> Result<Vec<String>> {
+    Ok(git::output(&["rev-list", "--parents", "-1", commit])?
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_owned)
+        .collect())
+}
+
+fn parent_configuration(
+    blobs: &mut git::Blobs,
+    revision: &str,
+    prefix: &str,
+    lock: &Lockfile,
+) -> Result<WorkspaceConfig> {
+    Project::read(blobs, revision, prefix, lock.recorded_pnpm_version())?.configuration()
+}
+
 fn recover_merge_snapshots(
     text: &str,
-    commit: &str,
     prefix: &str,
     context: &RepairContext<'_>,
-) -> Result<Option<RepairInput>> {
-    let history = git::output(&["rev-list", "--parents", "-1", commit])?;
-    let parents: Vec<_> = history.split_whitespace().skip(1).collect();
-    let [ours, theirs] = parents.as_slice() else {
+    blobs: &mut git::Blobs,
+    parents: &[String],
+) -> Result<Option<RecoveredMerge>> {
+    let [ours, theirs] = parents else {
         return Ok(None);
     };
     let base = git::merge_base(ours, theirs)?;
-    let mut blobs = git::Blobs::open()?;
     let file = format!("{prefix}pnpm-lock.yaml");
     let [base, ours, theirs] = [base.as_str(), ours, theirs].map(|revision| -> Result<_> {
-        let text = blobs
+        let source = blobs
             .read(revision, &file)?
             .ok_or_else(|| format!("missing {revision}:{file}"))?;
-        let lock = Lockfile::try_from(text)?;
-        let project = Project::read(&mut blobs, revision, prefix, lock.recorded_pnpm_version())?;
-        let config = project.configuration()?;
-        Ok((lock, config))
+        let identical = source == text;
+        let lock = Lockfile::try_from(source)?;
+        let config = parent_configuration(blobs, revision, prefix, &lock)?;
+        Ok((ParentEvidence { lock, config }, identical))
     });
-    let ((base, base_cfg), (ours, ours_cfg), (theirs, theirs_cfg)) = (base?, ours?, theirs?);
-    drop(blobs);
+    let ((base, _), (ours, ours_identical), (theirs, theirs_identical)) = (base?, ours?, theirs?);
     // The first parent is the committed merge's target, independent of current refs.
-    Ok(Some(RepairInput::parse_with_merge_witness(
+    let input = RepairInput::parse_with_merge_witness(
         text,
-        [&base, &ours, &theirs],
+        [&base.lock, &ours.lock, &theirs.lock],
         &MergeContext {
             target: MergeTarget::Ours,
             manifests: context.manifests,
-            configurations: [&base_cfg, &ours_cfg, &theirs_cfg],
+            configurations: [&base.config, &ours.config, &theirs.config],
             configuration: context.configuration,
             patches: context.patches,
             registry: None,
         },
-    )?))
+    )?;
+    Ok(Some(RecoveredMerge {
+        input,
+        parents: [
+            (!ours_identical).then_some(ours),
+            (!theirs_identical).then_some(theirs),
+        ],
+    }))
 }

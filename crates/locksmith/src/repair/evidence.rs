@@ -2,7 +2,7 @@
 use super::RepairContext;
 use crate::{
     Lockfile, LockfileError, MergeContext, MergeTarget, Value, WorkspaceConfig, error::missing,
-    graph, manifest, pin, reconcile,
+    graph, manifest, patch, pin, reconcile, schema,
 };
 use serde_json::json;
 
@@ -28,12 +28,12 @@ impl<'a> Evidence<'a> {
         configurations: [&'a WorkspaceConfig; 3],
     ) -> MergeContext<'a> {
         MergeContext {
+            target: MergeTarget::Ours,
             manifests: self.context.manifests,
+            configurations,
             configuration: self.context.configuration,
             patches: self.context.patches,
             registry: self.context.registry,
-            configurations,
-            target: MergeTarget::Ours,
         }
     }
 
@@ -72,7 +72,7 @@ impl<'a> Evidence<'a> {
             if config.resolution != self.context.configuration.resolution
                 || config.override_tie_break != self.context.configuration.override_tie_break
                 || !manifest::same_overrides(current, parent)
-                || current.get("patchedDependencies") != parent.get("patchedDependencies")
+                || !patch::records_match(current, schema::rule_map(parent, "patchedDependencies"))
             {
                 continue;
             }

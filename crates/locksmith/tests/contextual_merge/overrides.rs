@@ -19,12 +19,12 @@ fn catalog_overrides_are_written_as_effective_specifiers() {
     let normalized_old = cfg(&old);
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_old; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&base, &new, &base, Some(&context)).unwrap();
     assert_eq!(output.project().unwrap()["overrides"]["lib>a"], "2.0.0");
@@ -74,12 +74,12 @@ fn changed_peer_overrides_rebuild_declarations_and_instances() {
             &make(1, 2),
             &make(2, 1),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -133,12 +133,12 @@ fn transitive_override_rebinds_sibling_peer_consumers() {
         &ours,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before); 3],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -165,12 +165,12 @@ fn changed_qualified_transitive_overrides_require_the_original_declaration() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before); 3],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap_err();
@@ -216,12 +216,12 @@ fn a_failed_transitive_choice_keeps_the_target_pin_for_unrelated_dependencies() 
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
+            manifests: &manifests,
             configurations: [&before; 3],
             configuration: &after,
-            manifests: &manifests,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -257,12 +257,12 @@ fn qualified_override_changes_reuse_a_resolution_proven_in_another_context() {
         &ours,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&after), &cfg(&before)],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -280,12 +280,12 @@ fn qualified_override_changes_reuse_a_resolution_proven_in_another_context() {
         &upgraded_lock,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&upgraded), &cfg(&before)],
             configuration: &cfg(&upgraded),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -305,12 +305,12 @@ fn qualified_override_changes_reuse_a_resolution_proven_in_another_context() {
             &changed_artifact,
             &base,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&cfg(&before), &cfg(&after), &cfg(&before)],
                 configuration: &cfg(&after),
                 patches: &patches,
+                registry: None,
             })
         ),
         Err(LockfileError::ResolutionRequired { .. })
@@ -344,12 +344,12 @@ fn reordered_overrides_select_the_final_resolution_and_survive_rendering() {
             &ours,
             &base,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&cfg(&before), &cfg(&after), &cfg(&before)],
                 configuration: &cfg(&after),
                 patches: &patches,
+                registry: None,
             }),
         )
         .unwrap();
@@ -391,12 +391,12 @@ fn reordering_rules_for_unrelated_names_preserves_the_target_resolution() {
         &ours,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&before), &cfg(&after), &cfg(&before)],
             configuration: &cfg(&after),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -462,12 +462,12 @@ fn override_upgrades_reuse_parent_instances_with_new_transitive_peers() {
     let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"a":"*","lib":"1.0.0"}}))]);
     let patches = BTreeMap::new();
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&before, &after, &before],
         configuration: &final_config,
         patches: &patches,
+        registry: None,
     };
     let result = merge(&base, &ours, &theirs, Some(&context)).unwrap();
     let data = result.project().unwrap();
@@ -591,12 +591,12 @@ fn new_override_peers_propagate_through_new_parent_releases_and_cycles() {
         }
         let patches = BTreeMap::new();
         let context = MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &patches,
+            registry: None,
         };
         let result = merge(&base, &ours, &theirs, Some(&context)).unwrap();
         let data = result.project().unwrap();
@@ -652,8 +652,8 @@ fn new_override_peers_propagate_through_new_parent_releases_and_cycles() {
             &result,
             &result,
             Some(&MergeContext {
-                registry: None,
                 configurations: [&after; 3],
+                registry: None,
                 ..context
             }),
         )
@@ -687,8 +687,8 @@ fn new_override_peers_propagate_through_new_parent_releases_and_cycles() {
             &ours,
             &theirs,
             Some(&MergeContext {
-                registry: None,
                 manifests: &linked_manifests,
+                registry: None,
                 ..context
             }),
         )
@@ -763,9 +763,9 @@ fn new_override_peers_propagate_through_new_parent_releases_and_cycles() {
             &nested(&ours),
             &nested(&theirs),
             Some(&MergeContext {
-                registry: None,
                 configurations: [&before_nested, &after_nested, &before_nested],
                 configuration: &after_nested,
+                registry: None,
                 ..context
             }),
         )
@@ -814,12 +814,12 @@ fn new_override_peers_propagate_through_new_parent_releases_and_cycles() {
                 &adjust(&ours),
                 &adjust(&theirs),
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Theirs,
                     manifests: &manifests,
                     configurations: [&before, &after, &before],
                     configuration: &after,
                     patches: &patches,
+                    registry: None,
                 }),
             )
             .unwrap();
@@ -902,12 +902,12 @@ fn ordinary_overrides_remove_obsolete_transitive_provider_requirements() {
         &make(1, 2, 1),
         &make(2, 1, 2),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&base, &ours, &theirs],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -939,12 +939,12 @@ fn only_effective_direct_catalog_references_have_catalog_snapshots() {
         &locks,
         &locks,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -956,5 +956,109 @@ fn only_effective_direct_catalog_references_have_catalog_snapshots() {
     assert_eq!(
         doc["catalogs"],
         json!({"default":{"b":{"specifier":"1.0.0","version":"1.0.0"}}})
+    );
+}
+
+#[test]
+fn override_repair_tries_all_deferred_candidates_when_earlier_fails() {
+    // Both ours and theirs provide `child@2.0.0` with a newly required peer (`extra`),
+    // where ours binds `shared` to `1.0.0` (which cannot recontextualize to `shared@2.0.0`
+    // in parent's scope) while theirs binds `shared` to `2.0.0`.
+    let base = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@2.0.0)"},
+                "shared": {"specifier": "2.0.0", "version": "2.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@1.0.0": {"resolution": {"integrity": "sha512-child1"}},
+                "shared@2.0.0": {"resolution": {"integrity": "sha512-shared2"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@2.0.0)": {"dependencies": {"child": "1.0.0", "shared": "2.0.0"}},
+                "child@1.0.0": {},
+                "shared@2.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let ours = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "overrides": {"parent>child": "2.0.0"},
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@1.0.0)"},
+                "shared": {"specifier": "1.0.0", "version": "1.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@2.0.0": {"resolution": {"integrity": "sha512-child2"}, "peerDependencies": {"extra": "*", "shared": "*"}},
+                "extra@1.0.0": {"resolution": {"integrity": "sha512-extra1"}},
+                "shared@1.0.0": {"resolution": {"integrity": "sha512-shared1"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@1.0.0)": {"dependencies": {"child": "2.0.0(extra@1.0.0)(shared@1.0.0)", "shared": "1.0.0"}},
+                "child@2.0.0(extra@1.0.0)(shared@1.0.0)": {"dependencies": {"extra": "1.0.0", "shared": "1.0.0"}},
+                "extra@1.0.0": {},
+                "shared@1.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let theirs = Lockfile::parse(
+        &json!({
+            "lockfileVersion": "9.0",
+            "overrides": {"parent>child": "2.0.0"},
+            "importers": {".": {"dependencies": {
+                "parent": {"specifier": "1.0.0", "version": "1.0.0(shared@2.0.0)"},
+                "shared": {"specifier": "2.0.0", "version": "2.0.0"}
+            }}},
+            "packages": {
+                "parent@1.0.0": {"resolution": {"integrity": "sha512-parent"}, "peerDependencies": {"shared": "*"}},
+                "child@2.0.0": {"resolution": {"integrity": "sha512-child2"}, "peerDependencies": {"extra": "*", "shared": "*"}},
+                "extra@2.0.0": {"resolution": {"integrity": "sha512-extra2"}},
+                "shared@2.0.0": {"resolution": {"integrity": "sha512-shared2"}}
+            },
+            "snapshots": {
+                "parent@1.0.0(shared@2.0.0)": {"dependencies": {"child": "2.0.0(extra@2.0.0)(shared@2.0.0)", "shared": "2.0.0"}},
+                "child@2.0.0(extra@2.0.0)(shared@2.0.0)": {"dependencies": {"extra": "2.0.0", "shared": "2.0.0"}},
+                "extra@2.0.0": {},
+                "shared@2.0.0": {}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let before = cfg(&json!({}));
+    let after = cfg(&json!({"overrides": {"parent>child": "2.0.0"}}));
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"dependencies": {"parent": "1.0.0", "shared": "2.0.0"}}),
+    )]);
+    let result = merge(
+        &base,
+        &ours,
+        &theirs,
+        Some(&MergeContext {
+            target: MergeTarget::Ours,
+            manifests: &manifests,
+            configurations: [&before, &after, &after],
+            configuration: &after,
+            patches: &BTreeMap::new(),
+            registry: None,
+        }),
+    )
+    .unwrap();
+    result.validate().unwrap();
+    assert_eq!(
+        result.project().unwrap()["snapshots"]["parent@1.0.0(shared@2.0.0)"]["dependencies"]["child"],
+        "2.0.0(extra@2.0.0)(shared@2.0.0)"
     );
 }

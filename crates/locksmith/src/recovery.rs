@@ -1,13 +1,22 @@
 //! Resolve duplicated snapshot records only when every interpretation agrees.
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    cell::OnceCell,
+    collections::BTreeMap,
+    fmt::{self, Display},
+    sync::Arc,
+};
 
+use node_semver::Version;
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::Map;
 
-use crate::{DocumentKind, Lockfile, LockfileError, MergeContext, MergeInput, Value};
+use crate::{
+    ContextualMerge, DocumentKind, Lockfile, LockfileError, MergeContext, MergeInput, MergeTarget,
+    Value, WorkspaceConfig,
+};
 
 const MAX_COMBINATIONS: usize = 16;
 
@@ -164,6 +173,166 @@ pub(crate) fn candidate(text: &str) -> Result<(Lockfile, Vec<String>), LockfileE
         result => result,
     }?;
     Ok((lock, alternatives))
+}
+
+impl MergeTarget {
+    /// Decode each branch with its own bootstrap version and the final settings
+    /// with the version from the selected bootstrap graph. Use the returned merge with these settings.
+    ///
+    /// # Errors
+    /// Returns an error for invalid settings or when no bootstrap graph matches the final workspace.
+    pub fn workspace_configurations<'a>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        branches: [&Value; 3],
+        final_settings: &Value,
+    ) -> Result<([WorkspaceConfig; 3], WorkspaceConfig, ContextualMerge<'a>), LockfileError> {
+        let bootstrap = inputs.map(MergeInput::bootstrap);
+        let locks = bootstrap.each_ref().map(|(lock, _)| lock.as_deref());
+        let [base, ours, theirs] = [0, 1, 2].map(|i| {
+            let version = locks[i].and_then(Lockfile::recorded_pnpm_version);
+            WorkspaceConfig::from_pnpm_source(branches[i], manifest, version)
+        });
+        let ((), config, bootstrap) = select_workspace(
+            self,
+            manifest,
+            locks,
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
+            |lock| {
+                let version = lock.and_then(Lockfile::recorded_pnpm_version);
+                WorkspaceConfig::from_pnpm_context(final_settings, manifest, version)
+                    .map(|config| ((), config))
+            },
+        )
+        .map_err(|error| input_error(inputs, error))?;
+        Ok((
+            [base?, ours?, theirs?],
+            config,
+            ContextualMerge {
+                inputs,
+                bootstrap: Some(bootstrap),
+            },
+        ))
+    }
+
+    /// Load a filesystem workspace using the pnpm version from the selected bootstrap graph.
+    /// The loader receives the candidate's recorded version, reads the final project files,
+    /// and returns that project together with its effective configuration. The returned merge
+    /// keeps the selected bootstrap alongside its original inputs.
+    ///
+    /// # Errors
+    /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
+    pub fn workspace_for_bootstrap<'a, T, E: From<LockfileError> + Display>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        mut load: impl FnMut(Option<Version>) -> Result<(T, WorkspaceConfig), E>,
+    ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
+        self.workspace_for_candidate(manifest, inputs, |lock| {
+            load(lock.and_then(Lockfile::recorded_pnpm_version))
+        })
+    }
+
+    /// Select a bootstrap graph using the settings needed to interpret each candidate.
+    /// The loader can use explicit artifact URLs in that lock without resolving registry routes.
+    ///
+    /// # Errors
+    /// Returns a loading error or an error when no bootstrap graph matches the final workspace.
+    pub fn workspace_for_candidate<'a, T, E: From<LockfileError> + Display>(
+        self,
+        manifest: Option<&Value>,
+        inputs: [MergeInput<'a>; 3],
+        load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
+    ) -> Result<(T, WorkspaceConfig, ContextualMerge<'a>), E> {
+        let bootstrap = inputs.map(MergeInput::bootstrap);
+        let (project, config, bootstrap) = select_workspace(
+            self,
+            manifest,
+            bootstrap.each_ref().map(|(lock, _)| lock.as_deref()),
+            bootstrap
+                .each_ref()
+                .map(|(_, duplicates)| duplicates.as_slice()),
+            load,
+        )
+        .map_err(|error| input_error(inputs, error))?;
+        Ok((
+            project,
+            config,
+            ContextualMerge {
+                inputs,
+                bootstrap: Some(bootstrap),
+            },
+        ))
+    }
+}
+
+fn input_error<E: From<LockfileError>>(inputs: [MergeInput<'_>; 3], error: E) -> E {
+    inputs
+        .into_iter()
+        .find_map(|input| match input {
+            MergeInput::Yaml(text) => candidate(text).err().map(E::from),
+            MergeInput::Parsed(_) => None,
+        })
+        .unwrap_or(error)
+}
+
+fn select_workspace<T, E: From<LockfileError> + Display>(
+    target: MergeTarget,
+    manifest: Option<&Value>,
+    locks: [Option<&Lockfile>; 3],
+    duplicate_snapshots: [&[String]; 3],
+    mut load: impl FnMut(Option<&Lockfile>) -> Result<(T, WorkspaceConfig), E>,
+) -> Result<(T, WorkspaceConfig, usize), E> {
+    let mut candidates = [OnceCell::new(), OnceCell::new(), OnceCell::new()];
+    let selected = crate::reconcile::bootstrap::environment_source(
+        locks,
+        target,
+        manifest,
+        |side| {
+            candidates[side]
+                .get_or_init(|| load(locks[side]))
+                .as_ref()
+                .ok()
+                .map(|(_, config)| config)
+        },
+        duplicate_snapshots,
+    );
+    let side = match selected {
+        Ok(side) => side,
+        Err(mut error) => {
+            // An older runner can reject settings valid for a newer candidate.
+            let mut candidates = candidates.map(OnceCell::into_inner);
+            if candidates.iter().all(|c| matches!(c, Some(Err(_))))
+                && let Some(Err(target_error)) = candidates[target.index()].take()
+            {
+                return Err(target_error);
+            }
+            let failures: String = ["base", "ours", "theirs"]
+                .into_iter()
+                .zip(candidates)
+                .filter_map(|(side, candidate)| {
+                    candidate?
+                        .err()
+                        .map(|load| format!("\n{side} workspace: {load}"))
+                })
+                .collect();
+            if !failures.is_empty() {
+                if let LockfileError::ResolutionRequired { message, .. } = &mut error {
+                    message.push_str(&failures);
+                } else {
+                    error = LockfileError::WorkspaceInput(format!("{error}{failures}"));
+                }
+            }
+            return Err(error.into());
+        }
+    };
+    let (project, config) = candidates[side]
+        .take()
+        .expect("selected candidate was loaded")?;
+    Ok((project, config, side))
 }
 
 fn parse_with_alternatives(

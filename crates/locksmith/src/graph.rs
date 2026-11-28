@@ -18,6 +18,7 @@ pub(crate) const DEPENDENCIES: [&str; 5] = [
 /// Records reachable from one or more importers. Snapshot identities retain
 /// complete peer and patch suffixes; linked workspace projects are included.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DependencyClosure {
     /// Reachable workspace project paths, including the starting importers.
     pub importers: BTreeSet<String>,
@@ -31,6 +32,7 @@ impl DependencyClosure {
     /// Packages installed as multiple distinct peer/patch instances in this
     /// closure. Multiple instances can be legitimate; this is inspection data,
     /// not an automatic error or permission to collapse them.
+    #[must_use]
     pub fn variants(&self) -> BTreeMap<&str, Vec<&str>> {
         let mut variants: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for snapshot in &self.snapshots {
@@ -44,9 +46,7 @@ impl DependencyClosure {
     }
 }
 
-pub(crate) fn section<'a>(document: &'a Value, key: &str) -> Option<&'a Map<String, Value>> {
-    document.get(key).and_then(Value::as_object)
-}
+pub(crate) use schema::{linked_importer, section, snapshot_key};
 
 pub(crate) fn dependency<'a>(body: &'a Value, name: &str) -> Option<(&'static str, &'a str)> {
     ["dependencies", "optionalDependencies"]
@@ -68,24 +68,6 @@ pub(crate) fn keys(document: &Value, key: &str) -> BTreeSet<String> {
         .flatten()
         .map(|(key, _)| key.clone())
         .collect()
-}
-
-/// pnpm writes npm aliases and remote/file references as either a full key or
-/// a version relative to the dependency name. Peer and patch suffixes stay intact.
-pub(crate) fn snapshot_key(
-    name: &str,
-    reference: &str,
-    snapshots: Option<&Map<String, Value>>,
-) -> String {
-    let mut named = String::with_capacity(name.len() + 1 + reference.len());
-    named.push_str(name);
-    named.push('@');
-    named.push_str(reference);
-    if snapshots.is_some_and(|map| map.contains_key(reference) && !map.contains_key(&named)) {
-        reference.into()
-    } else {
-        named
-    }
 }
 
 pub(crate) fn references<'a>(
@@ -151,24 +133,6 @@ pub(crate) fn references<'a>(
     result
 }
 
-pub(crate) fn linked_importer(from: &str, target: &str) -> String {
-    let mut segments = Vec::new();
-    for segment in from.split('/').chain(target.split('/')) {
-        match segment {
-            "" | "." => {}
-            ".." if segments.last().is_some_and(|last| *last != "..") => {
-                segments.pop();
-            }
-            other => segments.push(other),
-        }
-    }
-    if segments.is_empty() {
-        ".".into()
-    } else {
-        segments.join("/")
-    }
-}
-
 /// Resolve importer IDs and publish directories against one fixed workspace graph.
 pub(crate) struct LinkedProjects<'a> {
     importers: Option<&'a Map<String, Value>>,
@@ -181,6 +145,11 @@ impl<'a> LinkedProjects<'a> {
             importers: importers.and_then(Value::as_object),
             owners: Default::default(),
         }
+    }
+
+    pub(crate) fn contains_target(&self, from: &str, path: &str) -> bool {
+        self.importers
+            .is_some_and(|members| members.contains_key(&self.resolve(from, path)))
     }
 
     pub(crate) fn resolve(&self, from: &str, path: &str) -> String {
@@ -419,7 +388,7 @@ fn check_snapshot(
         Ok(actual)
             if (actual.is_some() || document.get("patchedDependencies").is_some())
                 && patch::desired_hash_with_index(key, document, [document; 4], Some(patches))
-                    != Some(actual) =>
+                    != Ok(actual) =>
         {
             "snapshot patch hash differs from the applicable patchedDependencies selector"
         }
@@ -470,8 +439,7 @@ fn check_catalogs(
             };
             let pin = dependency["version"].as_str();
             let fits = if let Some(path) = pin.and_then(|v| v.strip_prefix("link:")) {
-                let target = links.resolve(key, path);
-                document["importers"].get(&target).is_some()
+                links.contains_target(key, path)
                     && match (spec, entry) {
                         (Some(spec), Some(entry)) => catalog::link_entry_fits(spec, entry),
                         (Some(_), None) => true,
@@ -539,7 +507,7 @@ pub(crate) fn validate_with_unresolved_snapshots(
     ) {
         issues.push(issue(kind, &["settings"], error.to_string()));
     }
-    let overrides = crate::manifest::unconditional_overrides(document);
+    let overrides = schema::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_references(document, importer, kind, "importers", key, &mut issues);
@@ -577,19 +545,49 @@ fn check_references(
     issues: &mut Vec<ValidationIssue>,
 ) {
     let snapshots = section(document, "snapshots");
+    let mut named = String::new();
     for (_, name, reference) in references(record, kind, source, key, true, issues) {
         if reference.starts_with("link:") {
             continue;
         }
-        let target = snapshot_key(name, reference, snapshots);
-        if !snapshots.is_some_and(|map| map.contains_key(&target)) {
+        named.clear();
+        named.push_str(name);
+        named.push('@');
+        named.push_str(reference);
+        if !snapshots.is_some_and(|map| map.contains_key(&named) || map.contains_key(reference)) {
             issues.push(issue(
                 kind,
                 &[source, key, name],
-                format!("missing snapshot {target}"),
+                format!("missing snapshot {named}"),
             ));
         }
     }
+}
+
+/// Shared completion policy for convergence and merges.
+/// Only reachable graph conflicts survive pruning; other conflicts remain atomic.
+pub(crate) fn complete(
+    document: &mut Value,
+    kind: DocumentKind,
+    baseline: Option<(&Value, Option<&crate::WorkspaceConfig>)>,
+    conflicts: &mut Vec<crate::Conflict>,
+) -> Result<(), LockfileError> {
+    if conflicts.iter().all(|conflict| {
+        conflict.path.len() == 2 && ["packages", "snapshots"].contains(&conflict.path[0].as_str())
+    }) {
+        if let Some((baseline, config)) = baseline {
+            prune_scoped(document, kind, baseline, config)?;
+        } else {
+            prune(document, kind)?;
+        }
+        conflicts.retain(|conflict| {
+            document
+                .get(&conflict.path[0])
+                .and_then(|map| map.get(&conflict.path[1]))
+                .is_some()
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn prune(document: &mut Value, kind: DocumentKind) -> Result<(), LockfileError> {
@@ -752,7 +750,7 @@ fn retain(
     ) {
         issues.push(issue(kind, &["settings"], error.to_string()));
     }
-    let overrides = crate::manifest::unconditional_overrides(document);
+    let overrides = schema::unconditional_overrides(document);
     let links = LinkedProjects::new(document.get("importers"));
     for (key, importer) in section(document, "importers").into_iter().flatten() {
         check_catalogs(document, &links, importer, kind, key, config, &mut issues);

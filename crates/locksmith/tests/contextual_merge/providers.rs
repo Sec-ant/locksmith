@@ -50,12 +50,12 @@ fn a_peer_consumer_keeps_its_providers_repaired_dependency_context() {
         &make(1, 2),
         &make(2, 1),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -126,12 +126,12 @@ fn new_peer_requirements_preserve_other_peers_existing_policy() {
         &make(1, true),
         &make(2, false),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -204,12 +204,12 @@ fn new_peer_providers_preserve_or_rebind_their_nested_contexts() {
             &make(1, true),
             &make(2, false),
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -252,12 +252,12 @@ fn new_peer_providers_preserve_or_rebind_their_nested_contexts() {
         &nested(1, true),
         &nested(2, false),
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&before, &after, &before],
             configuration: &after,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -320,12 +320,12 @@ fn shared_peer_instances_rebind_independently_across_workspace_roots() {
         &ours,
         &theirs,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -367,12 +367,12 @@ fn a_new_consumer_rebinds_borrowed_instances_to_its_workspace_root() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&config); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -406,12 +406,12 @@ fn changing_one_provider_preserves_existing_policy_for_unchanged_providers() {
         &changed,
         &base,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Theirs,
             manifests: &manifests,
             configurations: [&cfg(&config); 3],
             configuration: &cfg(&config),
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -493,12 +493,12 @@ fn competing_new_peer_providers_use_the_consumers_declared_range() {
                 &make(1, true),
                 &make(2, false),
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Theirs,
                     manifests: &manifests,
                     configurations: [&before, &after, &before],
                     configuration: &after,
                     patches: &BTreeMap::new(),
+                    registry: None,
                 }),
             );
             if let Some(a) = explicit.then_some(first).or(expected) {
@@ -607,12 +607,12 @@ fn new_transitive_peer_releases_preserve_independent_descendant_contexts() {
             &ours,
             &theirs,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &after, &before],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();
@@ -663,12 +663,12 @@ fn changed_peer_selectors_require_an_unmodified_declaration_witness() {
             &make(true, true),
             &target,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Theirs,
                 manifests: &manifests,
                 configurations: [&before, &before, &after],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         );
         let Err(LockfileError::ResolutionRequired { path, .. }) = result else {
@@ -708,12 +708,12 @@ fn added_local_providers_retire_only_obsolete_ancestor_peer_bindings() {
             &source,
             &donor,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &manifests,
                 configurations: [&before, &before, &after],
                 configuration: &after,
                 patches: &BTreeMap::new(),
+                registry: None,
             }),
         )
         .unwrap();

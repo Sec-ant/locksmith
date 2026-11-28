@@ -164,12 +164,12 @@ pub fn from_file<P: AsRef<Path>>(
             Ok(((), config))
         })?;
     let context = MergeContext {
-        registry: None,
         target,
         manifests: &manifests,
         configurations: configurations.each_ref(),
         configuration: &config,
         patches: &patches,
+        registry: None,
     };
     with_context(
         &merge,

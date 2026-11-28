@@ -15,13 +15,6 @@ impl Policy {
         Self(project.pnpm_version.clone())
     }
 
-    pub fn configuration(&self, raw: &Value) -> Result<WorkspaceConfig, LockfileError> {
-        match &self.0 {
-            Some(v) => WorkspaceConfig::from_pnpm_version(raw, v),
-            None => WorkspaceConfig::from_pnpm(raw),
-        }
-    }
-
     pub fn check_peers(
         &self,
         raw: &Value,

@@ -322,7 +322,7 @@ pub(super) fn catalog_version<'a>(
 ) -> Option<&'a str> {
     let (actual, range) = config.registry_request(name, specifier);
     registry?
-        .selected(actual, range)?
+        .selected_direct(actual, range)?
         .rsplit_once('@')
         .map(|(_, v)| v)
 }
@@ -334,9 +334,13 @@ pub(crate) fn records(
     order: [usize; 3],
     additional: Option<&mut Vec<LockfileError>>,
 ) -> Result<Value, LockfileError> {
-    let Some(registry) = context.registry.filter(|r| !r.selections.is_empty()) else {
+    let Some(registry) = context.registry else {
         return Ok(Value::Null);
     };
+    let mut keys = registry.selected_releases().peekable();
+    if keys.peek().is_none() {
+        return Ok(Value::Null);
+    }
     let config = context.configuration;
     if config.resolution.pnpmfile_checksum.is_some() || metadata.get("pnpmfileChecksum").is_some() {
         return Err(missing(
@@ -347,12 +351,7 @@ pub(crate) fn records(
     let rules = manifest::Overrides::new(metadata, config);
     let mut releases = Vec::new();
     let mut needed = BTreeSet::new();
-    for key in registry
-        .selections
-        .values()
-        .flat_map(|ranges| ranges.values())
-        .collect::<BTreeSet<_>>()
-    {
+    for key in keys.collect::<BTreeSet<_>>() {
         let publication = &registry.releases[key];
         let raw = effective_manifest(&publication.manifest, config)?;
         let declarations = published_declarations(&raw, key, &rules, config, &mut needed)?;
@@ -384,7 +383,7 @@ pub(crate) fn records(
             let value = reference(name, key);
             (accepts_pin(name, spec, &value, metadata, Some(config))
                 && desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
-                    == Some(patch::hash_in_key(key)))
+                    == Ok(patch::hash_in_key(key)))
             .then_some(value)
         })
     };
@@ -440,12 +439,13 @@ pub(crate) fn records(
                     peer?;
                     // Another importer may supply this peer under a different
                     // selector. The workspace resolver applies its actual scope.
-                    registry.selections.get(req.name())?.values().find(|key| {
+                    registry.peer_selections(req.name()).find(|key| {
                         accepts_pin(name, spec, &reference(name, key), metadata, Some(config))
                     })
                 })?;
                 let hash =
-                    desired_hash(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])?;
+                    desired_hash(locator, metadata, [docs[0], docs[1], docs[2], &Value::Null])
+                        .ok()?;
                 let locator =
                     hash.map_or_else(|| locator.clone(), |h| format!("{locator}(patch_hash={h})"));
                 Some(reference(name, &locator))
@@ -491,7 +491,7 @@ pub(crate) fn records(
             body[field][name] = value.into();
         }
         let hash = desired_hash(key, metadata, [docs[0], docs[1], docs[2], &Value::Null])
-            .ok_or_else(|| missing(&["patchedDependencies", key], "competing patch selectors"))?;
+            .map_err(|_| missing(&["patchedDependencies", key], "competing patch selectors"))?;
         let instance = hash.map_or_else(|| key.clone(), |h| format!("{key}(patch_hash={h})"));
         output["packages"][key] = package;
         output["snapshots"][instance] = body;

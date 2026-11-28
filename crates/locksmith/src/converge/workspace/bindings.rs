@@ -372,7 +372,7 @@ pub(super) struct Root {
 impl super::Projection {
     /// Choose peer providers after catalog pins, direct overrides and manifest
     /// edits have selected the actual importer scope.
-    pub(in crate::scope) fn bind_roots(
+    pub(in crate::converge) fn bind_roots(
         self,
         result: &mut crate::Lockfile,
         baseline: &crate::Lockfile,

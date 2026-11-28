@@ -8,7 +8,7 @@ use crate::{
 
 /// Assemble a graph from independently selected importer edges. The large
 /// input graphs stay borrowed until their selected records are copied once.
-pub(crate) fn from_edges(
+pub(super) fn from_edges(
     (mut base, donor): (Lockfile, &Lockfile),
     original: &Value,
     importers: Value,
@@ -93,7 +93,7 @@ pub(crate) fn from_edges(
             output["snapshots"][key] = body;
         }
     }
-    complete(
+    graph::complete(
         output,
         DocumentKind::Project,
         Some((original, options.configuration)),
@@ -105,34 +105,8 @@ pub(crate) fn from_edges(
     Ok(result)
 }
 
-/// Shared completion policy for convergence and merges.
-/// Only reachable graph conflicts survive pruning; other conflicts remain atomic.
-pub(crate) fn complete(
-    document: &mut Value,
-    kind: DocumentKind,
-    baseline: Option<(&Value, Option<&crate::WorkspaceConfig>)>,
-    conflicts: &mut Vec<Conflict>,
-) -> Result<(), LockfileError> {
-    if conflicts.iter().all(|conflict| {
-        conflict.path.len() == 2 && ["packages", "snapshots"].contains(&conflict.path[0].as_str())
-    }) {
-        if let Some((baseline, config)) = baseline {
-            graph::prune_scoped(document, kind, baseline, config)?;
-        } else {
-            graph::prune(document, kind)?;
-        }
-        conflicts.retain(|conflict| {
-            document
-                .get(&conflict.path[0])
-                .and_then(|map| map.get(&conflict.path[1]))
-                .is_some()
-        });
-    }
-    Ok(())
-}
-
 // A registry deprecation notice may change after the immutable artifact was published.
-pub(crate) fn same_package(a: &Value, b: &Value) -> bool {
+pub(super) fn same_package(a: &Value, b: &Value) -> bool {
     a == b
         || a["resolution"]["integrity"].is_string()
             && a.get("deprecated") != b.get("deprecated")
@@ -346,7 +320,7 @@ fn same_child_context(base: &Value, old: &str, installed: &Value, new: &str, nam
         && installed["packages"][current]["resolution"]["integrity"].is_string()
 }
 
-pub(crate) fn ordinary(doc: &Value, key: &str) -> bool {
+pub(super) fn ordinary(doc: &Value, key: &str) -> bool {
     !key.contains('(')
         && doc["snapshots"].get(key).is_some()
         && doc["packages"][key]["resolution"]["integrity"].is_string()

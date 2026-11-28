@@ -1,4 +1,4 @@
-import { parse, merge, repair, inspect, convergeWorkspace, type MergeContext, type LockfileError } from 'es-locksmith';
+import locksmith, { parse, merge, repair, inspect, type MergeContext, type LockfileError } from 'es-locksmith';
 
 export async function resolve(yaml: string, context: MergeContext): Promise<string> {
   const parsed = await parse(yaml);
@@ -19,5 +19,12 @@ export async function affectedWorkspaces(yaml: string): Promise<string[][]> {
 }
 
 export function inWorktree(cwd: URL) {
-  return convergeWorkspace('origin/main', { cwd, allowNetwork: true });
+  return locksmith.convergeWorkspace('origin/main', { cwd, allowNetwork: true });
+}
+
+export function workspaceFailure(error: LockfileError): { exitCode: number | null; signal: string | null } | null {
+  if (error.code === 'CLI_FAILED') {
+    return { exitCode: error.exitCode, signal: error.signal };
+  }
+  return null;
 }

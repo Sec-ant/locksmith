@@ -1,4 +1,4 @@
-use locksmith::{ConflictKind, DocumentKind, LockfileError, PeerIssue, RegistryRequest, Value};
+use locksmith::{ConflictKind, LockfileError, PeerIssue, RegistryRequest, Value};
 use napi::{Env, Error, JsValue, bindgen_prelude::JsObjectValue};
 use serde_json::json;
 
@@ -12,13 +12,6 @@ pub(super) fn peers(issues: Vec<PeerIssue>) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-fn document(kind: DocumentKind) -> &'static str {
-    match kind {
-        DocumentKind::Project => "project",
-        DocumentKind::Environment => "environment",
-    }
 }
 
 pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> {
@@ -36,6 +29,7 @@ pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> 
                 RegistryRequest::Manifest { name, version } => {
                     json!({"kind":"manifest","name":name,"version":version})
                 }
+                _ => Value::Null,
             });
             (
                 "RESOLUTION_REQUIRED",
@@ -48,9 +42,10 @@ pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> 
                     ConflictKind::BothChanged => "bothChanged",
                     ConflictKind::DeleteModify => "deleteModify",
                     ConflictKind::SharedDependency => "sharedDependency",
+                    _ => "unknown",
                 };
                 json!({
-                    "kind": kind, "document": document(conflict.document), "path": conflict.path,
+                    "kind": kind, "document": conflict.document.to_string(), "path": conflict.path,
                     "base": conflict.base, "ours": conflict.ours, "theirs": conflict.theirs,
                 })
             }).collect();
@@ -58,7 +53,7 @@ pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> 
         }
         LockfileError::InvalidGraph(issues) => {
             let issues: Vec<_> = issues.into_iter().map(|issue| {
-                json!({ "document": document(issue.document), "path": issue.path, "message": issue.message })
+                json!({ "document": issue.document.to_string(), "path": issue.path, "message": issue.message })
             }).collect();
             ("INVALID_GRAPH", json!({ "issues": issues }))
         }
@@ -84,8 +79,8 @@ pub(super) fn exception(env: &Env, error: LockfileError) -> napi::Result<Error> 
         LockfileError::Parse(_) => ("INVALID_YAML", Value::Null),
         LockfileError::InvalidDocument(_) => ("INVALID_DOCUMENT", Value::Null),
         LockfileError::WorkspaceInput(_) => ("WORKSPACE_INPUT", Value::Null),
-        LockfileError::Serialize(_) => ("SERIALIZATION_FAILED", Value::Null),
         LockfileError::OutputMismatch => ("OUTPUT_MISMATCH", Value::Null),
+        _ => ("UNKNOWN_ERROR", Value::Null),
     };
     object.set_named_property("code", code)?;
     object.set_named_property("details", details)?;

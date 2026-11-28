@@ -38,12 +38,13 @@ pub(crate) fn checked_hash_in_key(key: &str) -> Result<Option<&str>, &'static st
     Ok(hash)
 }
 
-// The outer None denotes competing selectors without a unique applicable patch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CompetingPatches;
 pub(crate) fn desired_hash<'a>(
     key: &str,
     metadata: &'a Value,
     docs: [&Value; 4],
-) -> Option<Option<&'a str>> {
+) -> Result<Option<&'a str>, CompetingPatches> {
     desired_hash_with_index(key, metadata, docs, None)
 }
 
@@ -70,16 +71,16 @@ pub(crate) fn desired_hash_with_index<'a>(
     metadata: &'a Value,
     docs: [&Value; 4],
     index: Option<&PatchIndex<'a>>,
-) -> Option<Option<&'a str>> {
+) -> Result<Option<&'a str>, CompetingPatches> {
     let package = pin::package_key(key);
     let Some(patches) = metadata
         .get("patchedDependencies")
         .and_then(Value::as_object)
     else {
-        return Some(None);
+        return Ok(None);
     };
     if patches.is_empty() {
-        return Some(None);
+        return Ok(None);
     }
     // Git, file and tarball locators identify the artifact. pnpm matches patch
     // selectors against its recorded release version, just as for a registry pin.
@@ -136,12 +137,12 @@ pub(crate) fn desired_hash_with_index<'a>(
                 .map(|(_, patch)| *patch);
             declared = narrowest.next();
             if declared.is_none() || narrowest.any(|p| Some(p) != declared) {
-                return None;
+                return Err(CompetingPatches);
             }
         }
     }
     let declared = declared.and_then(|v| v.as_str().or_else(|| v.get("hash")?.as_str()));
-    Some(declared)
+    Ok(declared)
 }
 
 pub(crate) fn records(

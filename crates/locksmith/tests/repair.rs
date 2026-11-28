@@ -738,3 +738,137 @@ fn unreachable_extension_dependencies_are_preserved_with_or_without_a_donor() {
         assert_eq!(result.to_yaml().unwrap(), source);
     }
 }
+
+#[test]
+fn repair_preserves_legacy_catalog_self_link_without_registry_evidence() {
+    let manifests = BTreeMap::from([
+        (".".into(), json!({})),
+        (
+            "app".into(),
+            json!({"name":"app","version":"1.2.0","dependencies":{"app":"catalog:"}}),
+        ),
+    ]);
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"catalog":{"app":"^1"}, "linkWorkspacePackages":true}))
+            .unwrap();
+    let lock = json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"default": {"app": {"specifier": "^1", "version": "^1"}}},
+        "importers": {".": {}, "app": {"dependencies": {"app": {"specifier": "catalog:", "version": "link:"}}}}
+    });
+    let result = repair(
+        &lock.to_string(),
+        &RepairContext {
+            manifests: &manifests,
+            configuration: &config,
+            patches: &BTreeMap::new(),
+            parents: &[],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.project().unwrap(), &lock);
+}
+
+#[test]
+fn repair_preserves_unused_workspace_link_catalog_entries() {
+    let mut manifests = BTreeMap::from([
+        (".".into(), json!({})),
+        ("sdk".into(), json!({"name": "sdk", "version": "1.2.0"})),
+    ]);
+    let config = WorkspaceConfig::from_pnpm(
+        &json!({"catalog": {"sdk": "^1", "compat": "npm:sdk@^1"}, "linkWorkspacePackages": true}),
+    )
+    .unwrap();
+    let doc = json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"default": {
+            "sdk": {"specifier": "^1", "version": "^1"},
+            "compat": {"specifier": "npm:sdk@^1", "version": "npm:sdk@^1"}
+        }},
+        "importers": {".": {}, "sdk": {}}
+    });
+    for expected in [Some(&doc["catalogs"]), None] {
+        let repaired = repair(
+            &doc.to_string(),
+            &RepairContext {
+                manifests: &manifests,
+                configuration: &config,
+                patches: &BTreeMap::new(),
+                parents: &[],
+                registry: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(repaired.project().unwrap().get("catalogs"), expected);
+        manifests.get_mut("sdk").unwrap()["name"] = "other".into();
+    }
+}
+
+#[test]
+fn snapshot_witness_recovers_project_duplicates_with_importer_aliases() {
+    use locksmith::RepairInput;
+
+    let duplicates = "snapshots:\n  dep@1.0.0: {}\n  dep@1.0.0: {optional: true}\n";
+    let project = "lockfileVersion: '9.0'\nx-root: &root {}\nimporters: {'.': *root}\n";
+    let witness = Lockfile::parse(&format!("{project}snapshots: {{dep@1.0.0: {{}}}}\n")).unwrap();
+    assert!(
+        RepairInput::parse_with_snapshot_reference(&format!("{project}{duplicates}"), &witness)
+            .is_ok()
+    );
+
+    let environment =
+        "lockfileVersion: '9.0'\nx-root: &root {configDependencies: {}}\nimporters: {'.': *root}\n";
+    let problem = format!("{environment}{duplicates}---\n{project}");
+    assert!(matches!(
+        RepairInput::parse_with_snapshot_reference(&problem, &witness),
+        Err(LockfileError::ResolutionRequired { path, .. }) if path == ["snapshots", "dep@1.0.0"]
+    ));
+}
+
+#[test]
+fn repair_recovers_patched_snapshot_with_normalized_patch_path() {
+    use sha2::{Digest, Sha256};
+
+    let patch_body = "diff --git a/index.js b/index.js\n";
+    let hash = format!("{:x}", Sha256::digest(patch_body.as_bytes()));
+    let patch_cfg =
+        WorkspaceConfig::from_pnpm(&json!({"patchedDependencies": {"pkg": "./patches/a.patch"}}))
+            .unwrap();
+    let patches = BTreeMap::from([("./patches/a.patch".into(), patch_body.to_owned())]);
+    let current = json!({
+        "lockfileVersion": "9.0",
+        "patchedDependencies": {"pkg": {"hash": hash, "path": "./patches/a.patch"}},
+        "importers": {".": {"dependencies": {"pkg": {"specifier": "1.0.0", "version": format!("1.0.0(patch_hash={hash})")}}}},
+        "packages": {"pkg@1.0.0": {"resolution": {"integrity": "sha512-pkg"}}},
+        "snapshots": {}
+    });
+    let parent_doc = json!({
+        "lockfileVersion": "9.0",
+        "patchedDependencies": {"pkg": {"hash": hash, "path": "patches/a.patch"}},
+        "importers": {".": {"dependencies": {"pkg": {"specifier": "1.0.0", "version": format!("1.0.0(patch_hash={hash})")}}}},
+        "packages": {"pkg@1.0.0": {"resolution": {"integrity": "sha512-pkg"}}},
+        "snapshots": {format!("pkg@1.0.0(patch_hash={hash})"): {"dependencies": {"leaf": "1.0.0"}}}
+    });
+    let leaf_manifests = BTreeMap::from([(".".into(), json!({"dependencies": {"pkg": "1.0.0"}}))]);
+    let mut parent_full = parent_doc;
+    parent_full["packages"]["leaf@1.0.0"] = json!({"resolution": {"integrity": "sha512-leaf"}});
+    parent_full["snapshots"]["leaf@1.0.0"] = json!({});
+    let parent = Lockfile::parse(&parent_full.to_string()).unwrap();
+    let repaired = repair(
+        &current.to_string(),
+        &RepairContext {
+            manifests: &leaf_manifests,
+            configuration: &patch_cfg,
+            patches: &patches,
+            parents: &[(&parent, &patch_cfg)],
+            registry: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        repaired.project().unwrap()["snapshots"]
+            .get(format!("pkg@1.0.0(patch_hash={hash})"))
+            .is_some()
+    );
+}

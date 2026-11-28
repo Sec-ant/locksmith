@@ -21,12 +21,12 @@ fn published_dependency_uses_local_children_and_separate_peer_instances() {
     let lock = Lockfile::parse(&graph.to_string()).unwrap();
     let cfg = WorkspaceConfig::default();
     let ctx = MergeContext {
-        registry: None,
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &cfg,
         configurations: [&cfg; 3],
+        configuration: &cfg,
         patches: &BTreeMap::new(),
+        registry: None,
     };
     let err = merge(&lock, &lock, &lock, Some(&ctx)).unwrap_err();
     let LockfileError::ResolutionRequired {
@@ -111,12 +111,12 @@ fn newly_published_optional_peer_uses_the_workspace_provider_and_optional_edge()
             &lock,
             &lock,
             Some(&MergeContext {
-                registry: Some(&data),
                 target: MergeTarget::Ours,
-                configuration: &cfg,
-                configurations: [&cfg; 3],
                 manifests: &manifests,
+                configurations: [&cfg; 3],
+                configuration: &cfg,
                 patches: &BTreeMap::new(),
+                registry: Some(&data),
             }),
         )
         .unwrap();
@@ -218,12 +218,12 @@ fn published_optional_peer_is_restored_after_its_dependency_is_removed() {
             &lock,
             &lock,
             Some(&MergeContext {
-                registry: Some(&data),
                 target: MergeTarget::Ours,
-                configuration: &cfg,
-                configurations: [&cfg; 3],
                 manifests: &manifests,
+                configurations: [&cfg; 3],
+                configuration: &cfg,
                 patches: &BTreeMap::new(),
+                registry: Some(&data),
             }),
         )
         .unwrap();
@@ -299,15 +299,15 @@ fn published_optional_dependency_takes_precedence_over_an_overridden_peer() {
             &lock,
             &lock,
             Some(&MergeContext {
-                registry: Some(&registry),
                 target: MergeTarget::Ours,
-                configuration: &cfg,
-                configurations: [&cfg; 3],
                 manifests: &BTreeMap::from([(
                     ".".into(),
                     json!({"dependencies":{"widget":"1.0.0"}}),
                 )]),
+                configurations: [&cfg; 3],
+                configuration: &cfg,
                 patches: &BTreeMap::new(),
+                registry: Some(&registry),
             }),
         )
         .unwrap();
@@ -362,12 +362,12 @@ fn auto_dedupe_combines_new_transitive_versions_only_when_the_parent_accepts_the
     ] {
         let cfg = WorkspaceConfig::from_pnpm(&json!({"autoDedupe":enabled})).unwrap();
         let ctx = MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
-            configuration: &cfg,
-            configurations: [&cfg; 3],
             manifests: &manifests,
+            configurations: [&cfg; 3],
+            configuration: &cfg,
             patches: &BTreeMap::new(),
+            registry: None,
         };
         let mut data = RegistryMetadata::default();
         if enabled {
@@ -421,12 +421,12 @@ fn registry_requests_cover_independent_missing_pins_across_workspace_members() {
         ("app".into(), json!({"dependencies":{"second":"2.0.0"}})),
     ]);
     let ctx = MergeContext {
-        registry: None,
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &cfg,
         configurations: [&cfg; 3],
+        configuration: &cfg,
         patches: &BTreeMap::new(),
+        registry: None,
     };
     let errors = ctx.merge_with_requests([&lock; 3]).unwrap_err();
     let requests: BTreeMap<_, _> = errors
@@ -463,12 +463,12 @@ fn published_sibling_dependencies_are_requested_in_one_batch() {
         let cfg = WorkspaceConfig::default();
         let manifests = BTreeMap::from([(".".into(), json!({"dependencies":{"parent":"1.0.0"}}))]);
         let ctx = MergeContext {
-            registry: Some(&registry),
             target: MergeTarget::Ours,
             manifests: &manifests,
-            configuration: &cfg,
             configurations: [&cfg; 3],
+            configuration: &cfg,
             patches: &BTreeMap::new(),
+            registry: Some(&registry),
         };
         let mut names = std::collections::BTreeSet::new();
         for error in ctx.merge_with_requests([&lock; 3]).unwrap_err() {
@@ -513,12 +513,12 @@ fn terminal_peer_errors_take_precedence_over_pending_registry_requests() {
         json!({"dependencies":{"a":"1.0.0","b":"1.0.0"}}),
     )]);
     let context = MergeContext {
-        registry: Some(&registry),
         target: MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &config,
         configurations: [&config; 3],
+        configuration: &config,
         patches: &BTreeMap::new(),
+        registry: Some(&registry),
     };
     let errors = context.merge_with_requests([&lock; 3]).unwrap_err();
     assert!(
@@ -528,5 +528,89 @@ fn terminal_peer_errors_take_precedence_over_pending_registry_requests() {
                 if path == &["snapshots", "a@1.0.0", "p"]
         ),
         "{errors:?}"
+    );
+}
+
+#[test]
+fn published_optional_peer_rebinds_and_alias_full_keys_survive_expansion() {
+    let mut registry = RegistryMetadata::default();
+    let request = RegistryRequest::Version {
+        name: "widget".into(),
+        selector: "1.0.0".into(),
+    };
+    registry
+        .insert(
+            &request,
+            json!({
+                "name": "widget",
+                "version": "1.0.0",
+                "peerDependencies": {"plugin": "^1"},
+                "peerDependenciesMeta": {"plugin": {"optional": true}},
+                "dist": {
+                    "shasum": "0123456789abcdef0123456789abcdef01234567",
+                    "tarball": "https://example.org/widget/-/widget-1.0.0.tgz"
+                }
+            }),
+            "https://example.org",
+            false,
+        )
+        .unwrap();
+    let make = |helper_version: &str| {
+        let plugin_key = format!("plugin@1.0.0(helper@{helper_version})");
+        Lockfile::parse(
+            &json!({
+                "lockfileVersion": "9.0",
+                "importers": {
+                    ".": {
+                        "dependencies": {
+                            "helper": {"specifier": helper_version, "version": helper_version},
+                            "alias": {"specifier": "npm:plugin@1.0.0", "version": plugin_key},
+                            "plugin": {"specifier": "1.0.0", "version": format!("1.0.0(helper@{helper_version})")}
+                        }
+                    }
+                },
+                "packages": {
+                    format!("helper@{helper_version}"): {"resolution": {"integrity": "sha512-helper"}},
+                    "plugin@1.0.0": {"resolution": {"integrity": "sha512-plugin"}, "peerDependencies": {"helper": "^1 || ^2"}}
+                },
+                "snapshots": {
+                    format!("helper@{helper_version}"): {},
+                    plugin_key: {"dependencies": {"helper": helper_version}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    let base = make("1.0.0");
+    let ours = make("2.0.0");
+    let config = WorkspaceConfig::default();
+    let manifests = BTreeMap::from([(
+        ".".into(),
+        json!({"dependencies": {"helper": "2.0.0", "alias": "npm:plugin@1.0.0", "plugin": "1.0.0", "widget": "1.0.0"}}),
+    )]);
+    let result = merge(
+        &base,
+        &ours,
+        &base,
+        Some(&MergeContext {
+            target: MergeTarget::Theirs,
+            manifests: &manifests,
+            configurations: [&config; 3],
+            configuration: &config,
+            patches: &BTreeMap::new(),
+            registry: Some(&registry),
+        }),
+    )
+    .unwrap();
+    result.validate().unwrap();
+    let doc = result.project().unwrap();
+    assert_eq!(
+        doc["importers"]["."]["dependencies"]["alias"]["version"],
+        "plugin@1.0.0(helper@2.0.0)"
+    );
+    assert_eq!(
+        doc["snapshots"]["widget@1.0.0(plugin@1.0.0(helper@2.0.0))"]["optionalDependencies"]["plugin"],
+        "1.0.0(helper@2.0.0)"
     );
 }

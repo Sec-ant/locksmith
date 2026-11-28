@@ -2,6 +2,74 @@ use locksmith::{ConflictKind, DocumentKind, Lockfile, LockfileError, Value, merg
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[test]
+fn public_library_types_are_send_and_sync() {
+    use locksmith::{
+        Conflict, ContextualMerge, ConvergeOptions, DependencyClosure, Disposition,
+        ExtensionChecksum, ExternalLink, Inspection, InspectionSummary, LinkSource,
+        LinkedPeerEncoding, LockSettings, LockedRelease, ManifestChange, MergeContext, MergeInput,
+        MergeTarget, OptionalPeerScope, OverrideTieBreak, PackageInstances, PatchEncoding,
+        PeerBinding, PeerGroup, PeerIssue, PeerRequirement, PeerRules, PeerStatus,
+        PeerVersionMatching, RegistryMetadata, RegistryRequest, RepairContext, RepairInput,
+        ResolutionSettings, UnknownReason, ValidationIssue, WorkspaceConfig,
+    };
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<(
+        Lockfile,
+        LockfileError,
+        DocumentKind,
+        Conflict,
+        ConflictKind,
+        ValidationIssue,
+    )>();
+    assert_send_sync::<(
+        MergeInput<'static>,
+        ContextualMerge<'static>,
+        MergeContext<'static>,
+        MergeTarget,
+        RepairInput,
+        RepairContext<'static>,
+        ConvergeOptions<'static>,
+        ManifestChange<'static>,
+    )>();
+    assert_send_sync::<(
+        WorkspaceConfig,
+        LockSettings,
+        ResolutionSettings,
+        LinkedPeerEncoding,
+        OverrideTieBreak,
+        OptionalPeerScope,
+        PatchEncoding,
+        ExtensionChecksum,
+        RegistryRequest,
+        RegistryMetadata,
+    )>();
+    assert_send_sync::<(
+        PeerRules,
+        PeerIssue,
+        PeerVersionMatching,
+        PeerStatus,
+        Disposition,
+        UnknownReason,
+        PeerRequirement,
+        PeerBinding,
+        PeerGroup,
+    )>();
+    assert_send_sync::<(
+        Inspection,
+        InspectionSummary,
+        ExternalLink,
+        LinkSource,
+        PackageInstances,
+        LockedRelease,
+        DependencyClosure,
+    )>();
+    #[cfg(feature = "bench-profile")]
+    assert_send_sync::<locksmith::profile::Span>();
+}
+
 fn lock(value: Value) -> Lockfile {
     Lockfile::parse(&serde_json::to_string(&value).unwrap()).unwrap()
 }
@@ -116,8 +184,8 @@ fn both_merge_modes_make_shared_snapshots_required_along_a_new_required_path() {
     let context = locksmith::MergeContext {
         target: locksmith::MergeTarget::Ours,
         manifests: &manifests,
-        configuration: &config,
         configurations: [&config; 3],
+        configuration: &config,
         patches: &Default::default(),
         registry: None,
     };
@@ -866,12 +934,12 @@ fn contextual_output_renders_unsorted_importers_and_expanded_resolutions_in_pnpm
         &lock,
         &lock,
         Some(&locksmith::MergeContext {
-            configuration: &cfg,
-            configurations: [&cfg; 3],
             target: locksmith::MergeTarget::Ours,
-            registry: None,
             manifests: &manifests,
+            configurations: [&cfg; 3],
+            configuration: &cfg,
             patches: &std::collections::BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap()
@@ -896,4 +964,63 @@ fn each_snapshot_must_use_the_patch_for_its_own_release() {
         doc["snapshots"] = json!({wrong:{}});
         assert!(lock(doc.clone()).validate().is_err(), "{wrong}");
     }
+}
+
+#[test]
+fn flow_scalars_with_colon_indicators_and_signed_leading_dot_floats_roundtrip() {
+    let base = lock(json!({"lockfileVersion":"9.0","importers":{".":{}}}));
+    let ours = lock(json!({
+        "lockfileVersion": "9.0",
+        "importers": {
+            ".": {
+                "dependencies": {
+                    "pkg": {"specifier": "1.0.0", "version": "1.0.0"}
+                }
+            }
+        },
+        "packages": {
+            "pkg@1.0.0": {
+                "resolution": {"integrity": "sha512-pkg"},
+                "engines": {"node": "a:,b"},
+                "cpu": ["a:[b]", "x:]y", "m:{n}", "p:}q"]
+            }
+        },
+        "snapshots": {"pkg@1.0.0": {}},
+        "extra": ["+.5", "-.5", "+.1e2", "-.1e-2"]
+    }));
+    let merged = merge(&base, &ours, &base, None).unwrap();
+    let yaml = merged.to_yaml().unwrap();
+    let reparsed = Lockfile::parse(&yaml).unwrap();
+    assert_eq!(reparsed.project(), ours.project());
+}
+
+#[test]
+fn self_workspace_link_records_dot_path() {
+    let base = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}, app: {}}\n").unwrap();
+    let manifests = std::collections::BTreeMap::from([
+        (".".into(), json!({})),
+        (
+            "app".into(),
+            json!({"name": "app", "version": "1.0.0", "dependencies": {"app": "workspace:*"}}),
+        ),
+    ]);
+    let cfg = locksmith::WorkspaceConfig::default();
+    let merged = merge(
+        &base,
+        &base,
+        &base,
+        Some(&locksmith::MergeContext {
+            target: locksmith::MergeTarget::Ours,
+            manifests: &manifests,
+            configurations: [&cfg; 3],
+            configuration: &cfg,
+            patches: &std::collections::BTreeMap::new(),
+            registry: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        merged.project().unwrap()["importers"]["app"]["dependencies"]["app"]["version"],
+        "link:."
+    );
 }

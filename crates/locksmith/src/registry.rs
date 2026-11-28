@@ -1,5 +1,8 @@
 //! Published manifests supplied by the caller. Resolution itself performs no I/O.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;
@@ -8,7 +11,8 @@ use crate::{LockfileError, Value, pin};
 
 /// An input missing from a merge or convergence. A declaration lookup is for a release
 /// already identified by an input lock, even when it is no longer a candidate.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum RegistryRequest {
     /// Select a published release matching a dependency request.
     Version {
@@ -26,8 +30,19 @@ pub enum RegistryRequest {
     },
 }
 
+impl fmt::Display for RegistryRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Version { .. } => "version",
+            Self::Manifest { .. } => "manifest",
+        };
+        write!(f, "{kind} for {}@{}", self.name(), self.selector())
+    }
+}
+
 impl RegistryRequest {
     /// Return the registry package name for either request kind.
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Version { name, .. } | Self::Manifest { name, .. } => name,
@@ -35,6 +50,7 @@ impl RegistryRequest {
     }
 
     /// Return the requested range, tag or exact version to look up.
+    #[must_use]
     pub fn selector(&self) -> &str {
         match self {
             Self::Version { selector, .. } => selector,
@@ -85,14 +101,17 @@ fn tag(selector: &str) -> bool {
 }
 
 /// Published releases and selected versions available as additional resolution evidence.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RegistryMetadata {
     pub(crate) unavailable_manifests: BTreeSet<String>,
     pub(crate) releases: BTreeMap<String, Publication>,
-    pub(crate) selections: BTreeMap<String, BTreeMap<String, String>>,
+    selections: Selections,
+    direct_selections: Option<Selections>,
 }
 
-#[derive(Debug)]
+type Selections = BTreeMap<String, BTreeMap<String, String>>;
+
+#[derive(Debug, Clone)]
 pub(crate) struct Publication {
     pub(crate) manifest: Value,
     pub(crate) resolution: Value,
@@ -110,6 +129,33 @@ impl RegistryMetadata {
         self.selections.get(name)?.get(selector)
     }
 
+    pub(crate) fn selected_direct(&self, name: &str, selector: &str) -> Option<&String> {
+        self.direct_selections
+            .as_ref()
+            .unwrap_or(&self.selections)
+            .get(name)?
+            .get(selector)
+    }
+
+    pub(crate) fn selected_releases(&self) -> impl Iterator<Item = &String> {
+        self.selections
+            .values()
+            .chain(self.direct_selections.iter().flat_map(|map| map.values()))
+            .flat_map(|selections| selections.values())
+    }
+
+    pub(crate) fn peer_selections(&self, name: &str) -> impl Iterator<Item = &String> {
+        self.selections
+            .get(name)
+            .into_iter()
+            .chain(
+                self.direct_selections
+                    .as_ref()
+                    .and_then(|map| map.get(name)),
+            )
+            .flat_map(|selections| selections.values())
+    }
+
     /// Supply the selected registry manifest and its registry base URL. The
     /// caller selects versions under its registry's tags, time and trust policy.
     ///
@@ -121,6 +167,33 @@ impl RegistryMetadata {
         manifest: Value,
         registry: &str,
         include_tarball: bool,
+    ) -> Result<(), LockfileError> {
+        self.insert_release(request, manifest, registry, include_tarball, None)
+    }
+
+    /// Supply a selection when direct and transitive dependencies follow different
+    /// version policies. All lookups in the same resolution must use this method.
+    ///
+    /// # Errors
+    /// Returns an error if the supplied release does not match the request or lacks usable distribution metadata.
+    pub fn insert_for_dependency(
+        &mut self,
+        request: &RegistryRequest,
+        manifest: Value,
+        registry: &str,
+        include_tarball: bool,
+        direct: bool,
+    ) -> Result<(), LockfileError> {
+        self.insert_release(request, manifest, registry, include_tarball, Some(direct))
+    }
+
+    fn insert_release(
+        &mut self,
+        request: &RegistryRequest,
+        manifest: Value,
+        registry: &str,
+        include_tarball: bool,
+        direct: Option<bool>,
     ) -> Result<(), LockfileError> {
         let name = request.name();
         let invalid = |reason: &str| {
@@ -196,8 +269,16 @@ impl RegistryMetadata {
         {
             return Err(invalid("inconsistent responses for the same release"));
         }
+        let selections = match direct {
+            Some(true) => self.direct_selections.get_or_insert_with(BTreeMap::new),
+            Some(false) => {
+                self.direct_selections.get_or_insert_with(BTreeMap::new);
+                &mut self.selections
+            }
+            None => &mut self.selections,
+        };
         if matches!(request, RegistryRequest::Version { .. }) {
-            self.selections
+            selections
                 .entry(name.to_owned())
                 .or_default()
                 .insert(selector.to_owned(), key.clone());

@@ -134,7 +134,7 @@ fn reports_distinct_policy_exceptions_and_unknown_link_versions() {
     }
     let impossible_exception = PeerRules::from_pnpm(
         &json!({"peerDependencyRules":{"allowedVersions":{"host":">=2.0.0 <1.0.0"}}}),
-        PeerVersionMatching::ReleaseCompatible,
+        PeerVersionMatching::Pnpm10,
     )
     .unwrap();
     assert_eq!(
@@ -267,7 +267,7 @@ fn rejects_malformed_peer_declarations_with_their_location() {
 fn comparator_intersections_wildcards_and_prerelease_bounds_hold_in_every_policy() {
     for policy in [
         PeerVersionMatching::Pnpm9,
-        PeerVersionMatching::ReleaseCompatible,
+        PeerVersionMatching::Pnpm10,
         PeerVersionMatching::Pnpm11,
         PeerVersionMatching::Pnpm12,
         PeerVersionMatching::Unspecified,
@@ -333,5 +333,109 @@ fn external_links_identify_importers_and_snapshots_with_the_same_key() {
             locksmith::LinkSource::Importer,
             locksmith::LinkSource::Snapshot
         ])
+    );
+}
+
+#[test]
+fn allowed_exceptions_update_unknown_reasons_and_check_all_scoped_rules() {
+    let mut linked = binding("^1", "2.0.0", json!({"resolution":{}}));
+    linked["snapshots"]["plugin@1.0.0(host@2.0.0)"]["dependencies"]["host"] = json!("link:linked");
+    linked["importers"]["linked"] = json!({});
+    let linked_lock = lock(&linked);
+    let allow_any_pnpm12 = PeerRules::from_pnpm(
+        &json!({"peerDependencyRules":{"allowAny":["host"]}}),
+        PeerVersionMatching::Pnpm12,
+    )
+    .unwrap();
+    let accepted_link = inspect(&linked_lock, &allow_any_pnpm12, None).unwrap();
+    assert_eq!(
+        accepted_link.peers[0].requirement.status,
+        PeerStatus::Allowed
+    );
+    assert_eq!(
+        accepted_link.peers[0].requirement.disposition,
+        Disposition::Accepted
+    );
+    assert_eq!(accepted_link.peers[0].requirement.reason, None);
+
+    let allow_any_unspecified = PeerRules::from_pnpm(
+        &json!({"peerDependencyRules":{"allowAny":["host"]}}),
+        PeerVersionMatching::Unspecified,
+    )
+    .unwrap();
+    let unknown_link = inspect(&linked_lock, &allow_any_unspecified, None).unwrap();
+    assert_eq!(
+        unknown_link.peers[0].requirement.disposition,
+        Disposition::Unknown
+    );
+    assert_eq!(
+        unknown_link.peers[0].requirement.reason,
+        Some(UnknownReason::ProviderVersion)
+    );
+
+    let out_of_range = lock(&binding("^1", "2.0.0", json!({"resolution":{}})));
+    let unknown_pm = inspect(&out_of_range, &allow_any_unspecified, None).unwrap();
+    assert_eq!(unknown_pm.peers[0].requirement.status, PeerStatus::Allowed);
+    assert_eq!(
+        unknown_pm.peers[0].requirement.disposition,
+        Disposition::Unknown
+    );
+    assert_eq!(
+        unknown_pm.peers[0].requirement.reason,
+        Some(UnknownReason::PackageManager)
+    );
+
+    let multi_scoped = PeerRules::from_pnpm(
+        &json!({"peerDependencyRules":{"allowedVersions":{"plugin@1>host":"2","plugin@1.0.0>host":"3"}}}),
+        PeerVersionMatching::Pnpm12,
+    )
+    .unwrap();
+    let multi_report = inspect(&out_of_range, &multi_scoped, None).unwrap();
+    assert_eq!(
+        multi_report.peers[0].requirement.status,
+        PeerStatus::Allowed
+    );
+    assert_eq!(
+        multi_report.peers[0].requirement.disposition,
+        Disposition::Accepted
+    );
+    assert_eq!(
+        multi_report.peers[0].requirement.exception.as_deref(),
+        Some("allowedVersions/plugin@1>host")
+    );
+
+    for non_matching in [
+        json!({"host@2": "2"}),
+        json!({"host@1": "2"}),
+        json!({"plugin>host@1": "2"}),
+    ] {
+        let rules = PeerRules::from_pnpm(
+            &json!({"peerDependencyRules":{"allowedVersions":non_matching}}),
+            PeerVersionMatching::Pnpm12,
+        )
+        .unwrap();
+        let report = inspect(&out_of_range, &rules, None).unwrap();
+        assert_eq!(
+            report.peers[0].requirement.status,
+            PeerStatus::OutOfRange,
+            "{non_matching}"
+        );
+        assert_eq!(
+            report.peers[0].requirement.disposition,
+            Disposition::Rejected,
+            "{non_matching}"
+        );
+    }
+
+    let matching_peer_range = PeerRules::from_pnpm(
+        &json!({"peerDependencyRules":{"allowedVersions":{"plugin>host@2":"2"}}}),
+        PeerVersionMatching::Pnpm12,
+    )
+    .unwrap();
+    let matched = inspect(&out_of_range, &matching_peer_range, None).unwrap();
+    assert_eq!(matched.peers[0].requirement.status, PeerStatus::Allowed);
+    assert_eq!(
+        matched.peers[0].requirement.disposition,
+        Disposition::Accepted
     );
 }

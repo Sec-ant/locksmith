@@ -5,6 +5,8 @@ use locksmith::MergeContext;
 use tempfile::NamedTempFile;
 
 use crate::{Result, git, workspace};
+
+use super::merge;
 use workspace::{Members, Project};
 
 fn project_conflicts(
@@ -41,7 +43,11 @@ pub fn run(files: [&OsString; 3], path: &str, allow_network: bool) -> Result<()>
         .filter(|p| p.is_empty() || p.ends_with('/'))
         .ok_or("expected the Git path of pnpm-lock.yaml")?;
     let destination = Path::new(files[1]);
-    let mut temp = NamedTempFile::new_in(destination.parent().unwrap_or(Path::new(".")))?;
+    let dir = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = NamedTempFile::new_in(dir)?;
     match resolve(files, path, prefix, allow_network) {
         Ok(yaml) => {
             temp.write_all(yaml.as_bytes())?;
@@ -89,7 +95,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     let inputs = git::revisions(files, path)?;
     let revisions = &inputs.revisions;
     let (tree, conflicts) = git::merged_tree(&inputs)?;
-    let mut blobs = git::Blobs::open()?;
+    let mut blobs = git::Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let [base, ours, theirs] = revisions
         .each_ref()
         .map(|r| Project::read(&mut blobs, r, prefix, None));
@@ -105,7 +111,7 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
         .filter(|p| p.as_slice() != path.as_bytes())
         .cloned()
         .collect();
-    let locks = crate::merge::Sources::read(files)?;
+    let locks = merge::Sources::read(files)?;
     let target = git::preferred_target(&inputs)?;
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
     let (root_name, root) =
@@ -149,17 +155,17 @@ fn resolve(files: [&OsString; 3], path: &str, prefix: &str, allow_network: bool)
     }
     drop(blobs);
     let context = MergeContext {
-        registry: None,
         target,
         manifests: &manifests,
-        configuration: &config,
         configurations: configurations.each_ref(),
+        configuration: &config,
         patches: &patches,
+        registry: None,
     };
     let network = allow_network.then_some(crate::registry::ProjectRc::Git {
         settings: settings.as_deref(),
         credentials: credentials.as_deref(),
     });
-    let result = crate::merge::with_context(&merge, &context, &project.config, network)?;
+    let result = merge::with_context(&merge, &context, &project.config, network)?;
     Ok(result.to_yaml()?)
 }

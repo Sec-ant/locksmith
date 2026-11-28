@@ -434,23 +434,40 @@ fn command_with_input(mut command: Command, input: &[u8]) -> Result<Output> {
 /// The single cat-file process reads just the configuration blobs requested.
 pub struct Blobs {
     pub conflicts: BTreeSet<Vec<u8>>,
+    config_files: &'static [&'static str],
+    hook_files: &'static [&'static str],
     directories: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     config_entries: BTreeMap<String, BTreeMap<Vec<u8>, TreeEntry>>,
     child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
+    input: Option<ChildStdin>,
+    output: Option<BufReader<ChildStdout>>,
 }
 impl Blobs {
-    pub fn open() -> Result<Self> {
-        let mut child = Command::new("git")
+    pub fn open(
+        config_files: &'static [&'static str],
+        hook_files: &'static [&'static str],
+    ) -> Result<Self> {
+        Self::spawn(Command::new("git"), config_files, hook_files)
+    }
+
+    fn spawn(
+        mut command: Command,
+        config_files: &'static [&'static str],
+        hook_files: &'static [&'static str],
+    ) -> Result<Self> {
+        let mut child = command
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
-        let input = child.stdin.take().expect("piped git stdin");
-        let output = BufReader::new(child.stdout.take().expect("piped git stdout"));
+        let input = Some(child.stdin.take().expect("piped git stdin"));
+        let output = Some(BufReader::new(
+            child.stdout.take().expect("piped git stdout"),
+        ));
         Ok(Self {
             conflicts: BTreeSet::new(),
+            config_files,
+            hook_files,
             directories: BTreeMap::new(),
             config_entries: BTreeMap::new(),
             child,
@@ -466,26 +483,40 @@ impl Blobs {
     }
 
     fn bytes(&mut self, object: &str) -> Result<Option<Vec<u8>>> {
-        let input = &mut self.input;
+        let input = self.input.as_mut().expect("cat-file stdin open");
         writeln!(input, "{object}")?;
         input.flush()?;
+        let output = self.output.as_mut().expect("cat-file stdout open");
         let mut header = String::new();
-        self.output.read_line(&mut header)?;
+        output.read_line(&mut header)?;
         if header.trim_end() == format!("{object} missing") {
             return Ok(None);
         }
         let mut fields = header.split_whitespace();
-        if !fields.next().is_some_and(oid) || fields.next() != Some("blob") {
+        let object_id = fields.next();
+        let kind = fields.next();
+        let length = fields.next().and_then(|s| s.parse::<usize>().ok());
+        if !object_id.is_some_and(oid) || kind.is_none() {
             return Err(format!("expected a Git blob at {object}").into());
         }
-        let length = fields
-            .next()
-            .ok_or("missing git blob length")?
-            .parse::<usize>()?;
+        let Some(length) = length else {
+            return Err("missing git blob length".into());
+        };
+        if kind != Some("blob") {
+            // Drain the non-blob payload + trailing newline so subsequent reads stay aligned.
+            let mut remaining = length + 1;
+            let mut scratch = [0u8; 4096];
+            while remaining > 0 {
+                let chunk = remaining.min(scratch.len());
+                output.read_exact(&mut scratch[..chunk])?;
+                remaining -= chunk;
+            }
+            return Err(format!("expected a Git blob at {object}").into());
+        }
         let mut bytes = vec![0; length];
-        self.output.read_exact(&mut bytes)?;
+        output.read_exact(&mut bytes)?;
         let mut delimiter = [0];
-        self.output.read_exact(&mut delimiter)?;
+        output.read_exact(&mut delimiter)?;
         if delimiter[0] != b'\n' {
             return Err("invalid git cat-file response".into());
         }
@@ -494,7 +525,86 @@ impl Blobs {
 }
 impl Drop for Blobs {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        drop(self.input.take());
+        drop(self.output.take());
+        if self.child.wait().is_err() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn blobs_closes_stdout_when_a_response_header_is_invalid() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "read -r request; printf 'invalid header\\n'; exec yes payload",
+        ]);
+        let mut blobs = Blobs::spawn(command, &[], &[]).unwrap();
+        let pid = blobs.child.id().to_string();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let malformed = blobs.read_object("HEAD").is_err();
+            drop(blobs);
+            finished.send(malformed).unwrap();
+        });
+        let cleared = completion.recv_timeout(std::time::Duration::from_secs(5));
+        if cleared.is_err() {
+            Command::new("kill").args(["-KILL", &pid]).status().unwrap();
+        }
+        reader.join().unwrap();
+        assert_eq!(cleared, Ok(true));
+    }
+
+    #[test]
+    fn blobs_stays_synchronized_after_non_blob_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = || {
+            let mut command = Command::new("git");
+            command
+                .current_dir(dir.path())
+                .env_clear()
+                .env("PATH", env::var_os("PATH").unwrap())
+                .env("HOME", dir.path())
+                .env("XDG_CONFIG_HOME", dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_ATTR_NOSYSTEM", "1");
+            command
+        };
+        checked(git().args(["init", "-q"])).unwrap();
+        let contents = "known blob contents\n";
+        std::fs::write(dir.path().join("fixture.txt"), contents).unwrap();
+        checked(git().args(["add", "fixture.txt"])).unwrap();
+        checked(git().args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "fixture",
+        ]))
+        .unwrap();
+
+        let head = checked(git().args(["rev-parse", "HEAD"])).unwrap();
+        let tree = checked(git().args(["rev-parse", "HEAD^{tree}"])).unwrap();
+        let mut blobs = Blobs::spawn(git(), &[], &[]).unwrap();
+        for object in [head.trim(), tree.trim()] {
+            let error = blobs.read_object(object).unwrap_err().to_string();
+            assert!(error.contains("expected a Git blob"));
+        }
+        assert_eq!(
+            blobs
+                .read_object(&format!("{}:fixture.txt", head.trim()))
+                .unwrap()
+                .as_deref(),
+            Some(contents)
+        );
     }
 }

@@ -222,6 +222,15 @@ pub(crate) fn options(bytes: usize) -> serde_saphyr::Options {
     serde_saphyr::options! { budget: Some(budget) }
 }
 
+const FLOW_MAP_OPEN: char = '{';
+const FLOW_MAP_CLOSE: char = '}';
+
+fn standalone_block(raw: &str, indent: usize) -> bool {
+    !raw.is_empty()
+        && raw.bytes().take_while(|byte| *byte == b' ').count() == indent
+        && !raw.trim_start().starts_with(FLOW_MAP_OPEN)
+}
+
 /// Key locations come from the YAML parser, including quoted and explicit keys.
 /// Only block mappings with standalone keys can be copied as independent text.
 fn layout(text: Arc<String>, range: Range<usize>, parsed: &ParsedMap) -> Layout {
@@ -236,8 +245,7 @@ fn layout(text: Arc<String>, range: Range<usize>, parsed: &ParsedMap) -> Layout 
                 *line > 0
                     && offsets.get(*line).is_some_and(|end| {
                         let raw = &text[offsets[line - 1]..*end];
-                        raw.bytes().take_while(|byte| *byte == b' ').count() == indent
-                            && !raw.trim_start().starts_with('{')
+                        standalone_block(raw, indent)
                     })
             })
     };
@@ -430,7 +438,8 @@ pub(crate) fn render(
         } else if SECTIONS.contains(&key.as_str())
             && value.as_object().is_some_and(|map| !map.is_empty())
         {
-            output.push_str(&format!("{key}:\n\n"));
+            output.push_str(key);
+            output.push_str(":\n\n");
             let map = value.as_object().expect("section is a mapping");
             let entries = if let Some(order) = order.filter(|_| key == "importers") {
                 order.keys().map(|k| (k, &map[k])).collect()

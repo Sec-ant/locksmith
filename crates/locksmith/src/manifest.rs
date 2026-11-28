@@ -1,16 +1,10 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
-use crate::{
-    LockfileError, OverrideTieBreak, Value, WorkspaceConfig, error::missing, graph, pin, schema,
-};
+pub(crate) use crate::error::mismatch;
+use crate::{LockfileError, OverrideTieBreak, Value, WorkspaceConfig, error::missing, pin, schema};
+pub(crate) use schema::{PnpmManager, override_selector, parent_matches};
 
 pub(crate) type Declarations<'a> = BTreeMap<&'a str, (&'static str, Cow<'a, str>)>;
-
-pub(crate) struct PnpmManager<'a> {
-    pub specifier: &'a str,
-    pub requires_pin: bool,
-    on_fail: Option<&'a str>,
-}
 
 pub(crate) enum ManagerPolicy<'a> {
     Ignored,
@@ -37,55 +31,6 @@ impl<'a> ManagerPolicy<'a> {
             manager.map_or(Self::Unspecified, Self::Declared)
         }
     }
-}
-
-impl<'a> PnpmManager<'a> {
-    pub fn declared(manifest: &'a Value, runner: Option<&node_semver::Version>) -> Option<Self> {
-        let legacy = legacy_pnpm(manifest);
-        // pnpm 9 and 10 ignore devEngines, including npm's own engine declaration.
-        let runner = runner.or_else(|| legacy.as_ref().map(|(_, version)| version));
-        let engines = &manifest["devEngines"]["packageManager"];
-        let (engine, default_policy) = match engines.as_array() {
-            Some(engines) => {
-                let index = engines
-                    .iter()
-                    .position(|e| e["name"] == "pnpm")
-                    .unwrap_or(0);
-                (
-                    engines.get(index),
-                    (index + 1 < engines.len()).then_some("ignore"),
-                )
-            }
-            None => (Some(engines), None),
-        };
-        if runner.is_none_or(|v| v.major() >= 11)
-            && let Some(engine) =
-                engine.filter(|e| e["name"].as_str().is_some_and(|s| !s.is_empty()))
-        {
-            let specifier = engine["version"].as_str()?;
-            if engine["name"] != "pnpm" || specifier.parse::<node_semver::Range>().is_err() {
-                return None;
-            }
-            return Some(Self {
-                specifier,
-                requires_pin: true,
-                on_fail: engine["onFail"].as_str().or(default_policy),
-            });
-        }
-        let (specifier, version) = legacy?;
-        Some(Self {
-            specifier,
-            requires_pin: version.major() >= 12,
-            on_fail: None,
-        })
-    }
-}
-
-fn legacy_pnpm(manifest: &Value) -> Option<(&str, node_semver::Version)> {
-    let declared = manifest["packageManager"].as_str()?.strip_prefix("pnpm@")?;
-    let specifier = declared.split('+').next()?;
-    let version = specifier.parse::<node_semver::Version>().ok()?;
-    (version.to_string() == specifier).then_some((specifier, version))
 }
 
 pub(crate) fn same_overrides(left: &Value, right: &Value) -> bool {
@@ -211,18 +156,6 @@ pub(crate) fn valid_peer_range(specifier: &str) -> bool {
     specifier.contains("workspace:")
         || specifier.contains("catalog:")
         || specifier.parse::<node_semver::Range>().is_ok()
-}
-
-pub(crate) fn mismatch(
-    importer: &str,
-    side: &'static str,
-    message: impl Into<String>,
-) -> LockfileError {
-    LockfileError::ManifestMismatch {
-        importer: importer.into(),
-        side,
-        message: message.into(),
-    }
 }
 
 pub(crate) fn check(
@@ -357,7 +290,7 @@ pub(crate) fn check_manifest(
                     let (target, range) = overrides.config.registry_request(name, specifier);
                     let prefix = format!("{target}@");
                     resolved_key =
-                        graph::snapshot_key(name, version, graph::section(document, "snapshots"));
+                        schema::snapshot_key(name, version, schema::section(document, "snapshots"));
                     let resolved = pin::package_key(version)
                         .strip_prefix(&prefix)
                         .or_else(|| pin::package_key(&resolved_key).strip_prefix(&prefix))
@@ -458,46 +391,6 @@ fn intersects(selector: Option<&str>, specifier: &str) -> bool {
     matches!((selector, declared), (Ok(selector), Ok(declared)) if selector.allows_any(&declared))
 }
 
-pub(crate) fn override_selector(rule: &str) -> (Option<&str>, &str, Option<&str>) {
-    let delimiter = rule
-        .char_indices()
-        .find(|(i, c)| *c == '>' && *i > 0 && !b" |@".contains(&rule.as_bytes()[i - 1]))
-        .map(|(i, _)| i);
-    let (parent, target) = delimiter.map_or((None, rule), |i| (Some(&rule[..i]), &rule[i + 1..]));
-    let (name, range) = pin::selector(target);
-    (parent, name, range)
-}
-
-pub(crate) fn override_scope(rule: &str) -> (&str, Option<&str>) {
-    let (parent, name, _) = override_selector(rule);
-    (name, parent.map(|parent| pin::selector(parent).0))
-}
-
-/// Registry overrides whose effective direct specifier is known without a
-/// manifest. Qualified rules require the original declaration or parent identity,
-/// neither of which is fully represented in an importer.
-pub(crate) fn unconditional_overrides(document: &Value) -> BTreeMap<&str, &str> {
-    let mut candidates = BTreeMap::new();
-    let rules = graph::section(document, "overrides");
-    for (rule, value) in rules.into_iter().flatten() {
-        let (parent, name, range) = override_selector(rule);
-        if parent.is_none()
-            && range.is_none()
-            && let Some(value) = value.as_str()
-            && value.parse::<node_semver::Range>().is_ok()
-        {
-            candidates.insert(name, value);
-        }
-    }
-    for (rule, _) in rules.into_iter().flatten() {
-        let (parent, name, range) = override_selector(rule);
-        if parent.is_some() || range.is_some() {
-            candidates.remove(name);
-        }
-    }
-    candidates
-}
-
 #[derive(PartialEq)]
 struct OverrideRule<'a> {
     selector: &'a str,
@@ -588,7 +481,7 @@ impl<'a> Overrides<'a> {
 
     pub(crate) fn new(document: &'a Value, config: &'a WorkspaceConfig) -> Self {
         let mut by_name: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for (rule, value) in graph::section(document, "overrides").into_iter().flatten() {
+        for (rule, value) in schema::section(document, "overrides").into_iter().flatten() {
             let (parent, name, range) = override_selector(rule);
             by_name.entry(name).or_default().push(OverrideRule {
                 selector: rule,
@@ -759,7 +652,7 @@ impl<'a> Overrides<'a> {
                 && !path.starts_with('/')
                 && path.as_bytes().get(1) != Some(&b':')
             {
-                let path = graph::linked_importer(".", path);
+                let path = schema::linked_importer(".", path);
                 let from: Vec<_> = importer
                     .split('/')
                     .filter(|s| !s.is_empty() && *s != ".")
@@ -781,17 +674,6 @@ impl<'a> Overrides<'a> {
         }
         Ok(Some(Cow::Borrowed(value)))
     }
-}
-
-pub(crate) fn parent_matches(selector: &str, name: &str, version: &str) -> bool {
-    selector == name
-        || selector
-            .strip_prefix(name)
-            .and_then(|s| s.strip_prefix('@'))
-            .is_some_and(|r| {
-                matches!((r.parse::<node_semver::Range>(), version.parse::<node_semver::Version>()),
-            (Ok(range), Ok(version)) if version.satisfies(&range))
-            })
 }
 
 /// Resolve catalog and root-manifest references while preserving selector order.

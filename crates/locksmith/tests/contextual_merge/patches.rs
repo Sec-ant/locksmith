@@ -29,12 +29,12 @@ fn final_patch_contents_select_the_matching_instance_for_an_unversioned_selector
     let patches = BTreeMap::from([("patches/lib.patch".into(), "new\r\n".into())]);
     let normalized_config = cfg(&config);
     let context = MergeContext {
-        registry: None,
         target: MergeTarget::Theirs,
         manifests: &manifests,
         configurations: [&normalized_config; 3],
         configuration: &normalized_config,
         patches: &patches,
+        registry: None,
     };
     let output = merge(&old, &new, &old, Some(&context)).unwrap();
     assert_eq!(
@@ -49,9 +49,9 @@ fn final_patch_contents_select_the_matching_instance_for_an_unversioned_selector
     let contents = BTreeMap::from([("patches/renamed.patch".into(), "new\n".into())]);
     let normalized_renamed = cfg(&renamed);
     let renamed_context = MergeContext {
-        registry: None,
         configuration: &normalized_renamed,
         patches: &contents,
+        registry: None,
         ..context
     };
     let result = merge(&old, &new, &old, Some(&renamed_context)).unwrap();
@@ -96,12 +96,12 @@ fn patched_peer_identity_and_removal_preserve_the_consumer_graph() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &config,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -121,12 +121,12 @@ fn patched_peer_identity_and_removal_preserve_the_consumer_graph() {
         &wrapped,
         &wrapped,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
             configurations: [&config; 3],
             configuration: &final_config,
             patches: &BTreeMap::new(),
+            registry: None,
         }),
     )
     .unwrap();
@@ -188,12 +188,12 @@ fn new_and_changed_patches_rebuild_direct_and_transitive_peer_instances() {
                 &input,
                 &input,
                 Some(&MergeContext {
-                    registry: None,
                     target: MergeTarget::Ours,
                     manifests: &manifests,
                     configurations: [&before; 3],
                     configuration: &config,
                     patches: &patches,
+                    registry: None,
                 }),
             )
             .unwrap();
@@ -267,12 +267,12 @@ fn newly_created_patches_follow_exact_range_and_name_selector_precedence() {
         &input,
         &input,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &BTreeMap::from([(".".into(), manifest)]),
             configurations: [&WorkspaceConfig::default(); 3],
             configuration: &config,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();
@@ -319,7 +319,6 @@ fn transitive_patch_changes_prefer_an_existing_final_patch_graph() {
             &raw,
             &patched,
             Some(&MergeContext {
-                registry: None,
                 target: MergeTarget::Ours,
                 manifests: &BTreeMap::from([(
                     ".".into(),
@@ -328,6 +327,7 @@ fn transitive_patch_changes_prefer_an_existing_final_patch_graph() {
                 configurations: [&empty, &empty, &config],
                 configuration: &config,
                 patches: &BTreeMap::from([("lib.patch".into(), contents.into())]),
+                registry: None,
             }),
         )
         .unwrap();
@@ -345,7 +345,7 @@ fn transitive_patch_changes_prefer_an_existing_final_patch_graph() {
 
 #[test]
 fn upgrade_convergence_rehashes_patches_without_updating_their_dependencies() {
-    use locksmith::{ConvergeOptions, ManifestChange, converge_with_patches};
+    use locksmith::{ConvergeOptions, ManifestChange, converge};
     use sha2::{Digest, Sha256};
 
     let baseline =
@@ -370,7 +370,7 @@ fn upgrade_convergence_rehashes_patches_without_updating_their_dependencies() {
                     json!({"specifier":"1.0.0","version":pin});
             }
         }
-        let result = converge_with_patches(
+        let result = converge(
             &Lockfile::parse(&old.to_string()).unwrap(),
             &Lockfile::parse(&installed.to_string()).unwrap(),
             &[ManifestChange {
@@ -381,9 +381,9 @@ fn upgrade_convergence_rehashes_patches_without_updating_their_dependencies() {
             ConvergeOptions {
                 baseline_configuration: Some(&baseline),
                 configuration: Some(&config),
-                registry: None,
+                patches: Some(&BTreeMap::from([("lib.patch".into(), "present\n".into())])),
+                ..Default::default()
             },
-            &BTreeMap::from([("lib.patch".into(), "present\n".into())]),
         )
         .unwrap();
         assert_eq!(
@@ -415,12 +415,12 @@ fn patch_selectors_use_the_release_version_recorded_for_a_tarball() {
         &lock,
         &lock,
         Some(&MergeContext {
-            registry: None,
             target: MergeTarget::Ours,
             manifests: &manifests,
-            configuration: &config,
             configurations: [&config; 3],
+            configuration: &config,
             patches: &patches,
+            registry: None,
         }),
     )
     .unwrap();

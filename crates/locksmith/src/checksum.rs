@@ -6,19 +6,33 @@ use std::fmt::Write;
 
 /// Select the encoding from a source checksum and verify its configuration
 /// before encoding a newly composed configuration in the same format.
+fn is_legacy_checksum(checksum: &str) -> Option<bool> {
+    if checksum.starts_with("sha256-") {
+        Some(false)
+    } else if checksum.len() == 32 && checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 pub(crate) fn extensions(
     value: &Value,
     source: &Value,
     checksum: &str,
     target: Option<crate::ExtensionChecksum>,
 ) -> Option<String> {
-    let legacy = if checksum.starts_with("sha256-") {
-        false
-    } else if checksum.len() == 32 && checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
-        true
-    } else {
-        return None;
-    };
+    let legacy = is_legacy_checksum(checksum)?;
     (calculate(source, legacy) == checksum).then(|| {
         calculate(
             value,
@@ -38,7 +52,13 @@ pub(crate) fn extensions_match(config: &crate::WorkspaceConfig, recorded: Option
     match (configured, recorded) {
         (None, None) => true,
         (Some(rules), Some(Value::String(hash))) => {
-            extensions(rules, rules, hash, config.extension_checksum).as_deref() == Some(hash)
+            let Some(legacy) = is_legacy_checksum(hash) else {
+                return false;
+            };
+            let target_legacy = config
+                .extension_checksum
+                .map_or(legacy, |v| v == crate::ExtensionChecksum::Md5);
+            target_legacy == legacy && calculate(rules, legacy) == *hash
         }
         _ => false,
     }
@@ -104,10 +124,7 @@ fn calculate(value: &Value, legacy: bool) -> String {
     let mut text = String::new();
     if legacy {
         json(value, &mut text);
-        md5::Md5::digest(text.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        hex(&md5::Md5::digest(text.as_bytes()))
     } else {
         object_hash(value, &mut text);
         sha256(&text)
@@ -274,10 +291,7 @@ pub(crate) fn patch_hash(text: &str, encoding: crate::PatchEncoding) -> String {
     match encoding {
         crate::PatchEncoding::Md5Base32WithPath => digest(&normalized, HashStyle::Md5Base32),
         crate::PatchEncoding::Sha256 | crate::PatchEncoding::Sha256WithPath => {
-            sha2::Sha256::digest(normalized.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
+            hex(&sha2::Sha256::digest(normalized.as_bytes()))
         }
     }
 }

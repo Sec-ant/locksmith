@@ -9,7 +9,8 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Read-only report for the project document of a validated lockfile.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct Inspection {
     /// Counts for the recorded graph and the part reachable from workspaces.
@@ -25,7 +26,8 @@ pub struct Inspection {
 }
 
 /// Sizes of the project graph before and after workspace reachability is considered.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionSummary {
     /// Number of recorded importer entries.
@@ -39,7 +41,8 @@ pub struct InspectionSummary {
 }
 
 /// A local link leading outside the graph described by the lockfile.
-#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Clone)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalLink {
     /// Section containing the dependency edge.
@@ -53,7 +56,8 @@ pub struct ExternalLink {
 }
 
 /// Kind of graph record containing a local link.
-#[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Hash)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum LinkSource {
     /// A dependency declared by a workspace project.
@@ -63,7 +67,8 @@ pub enum LinkSource {
 }
 
 /// Locked releases and instances sharing a package name.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackageInstances {
     /// Package name from the record or its locator.
     pub name: String,
@@ -72,7 +77,8 @@ pub struct PackageInstances {
 }
 
 /// One package metadata record and its installed instances.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LockedRelease {
     /// Complete key in the lockfile’s packages section.
     pub id: String,
@@ -83,7 +89,8 @@ pub struct LockedRelease {
 }
 
 /// A peer contract and its evaluation, shared by one or more requester snapshots.
-#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Clone)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct PeerRequirement {
     /// Finding reported after applying workspace exceptions.
@@ -107,7 +114,8 @@ pub struct PeerRequirement {
 }
 
 /// One requester instance and its recorded provider edge.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PeerBinding {
     /// Full ID of the requesting snapshot.
     pub snapshot: String,
@@ -116,7 +124,8 @@ pub struct PeerBinding {
 }
 
 /// Occurrences of the same peer finding and the workspace projects affected.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct PeerGroup {
     /// Peer declaration and result shared by the listed bindings.
@@ -135,6 +144,16 @@ pub struct PeerGroup {
 }
 
 /// Validate the graph and inspect its recorded peer contracts and package instances.
+///
+/// # Examples
+/// ```
+/// use locksmith::{Lockfile, PeerRules, inspect};
+///
+/// let lock = Lockfile::parse("lockfileVersion: '9.0'\nimporters: {.: {}}\n")?;
+/// let report = inspect(&lock, &PeerRules::default(), None)?;
+/// assert_eq!(report.summary.workspaces, 1);
+/// # Ok::<(), locksmith::LockfileError>(())
+/// ```
 ///
 /// # Errors
 /// Returns an error for an invalid graph or a lock without a project document.

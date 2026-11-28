@@ -42,6 +42,7 @@ fn job<T: Send + ToNapiValue + TypeName + 'static>(
 }
 
 /// Parsed lockfile handle shared by the asynchronous inspection and editing APIs.
+#[derive(Debug)]
 #[napi(js_name = "Lockfile")]
 pub struct ParsedLockfile(Lockfile);
 
@@ -123,6 +124,7 @@ pub fn validate(lock: Either<String, &ParsedLockfile>) -> AsyncTask<Job<()>> {
 }
 
 /// Workspace projects, package metadata and instances reachable from one importer.
+#[derive(Debug)]
 #[napi(object, object_from_js = false)]
 pub struct DependencyClosure {
     /// Workspace-relative paths of reachable projects.

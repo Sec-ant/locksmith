@@ -67,7 +67,7 @@ fn unchanged_pnpm_configuration_can_be_supplied_once() {
             locksmith::ConvergeOptions {
                 configuration: Some(&config),
                 baseline_configuration,
-                registry: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -107,13 +107,14 @@ fn recorded_and_authored_baselines_validate_their_own_specifiers() {
     let recorded = json!({"dependencies":{"lib":"2.0.0"}});
     let reconstructed = std::collections::BTreeSet::from(["app".to_owned()]);
     let check = |before: &Value, after: &Value| {
-        locksmith::converge_with_recorded_baselines(
+        locksmith::converge(
             &lock,
             &lock,
             &[change("app", before, after)],
-            Default::default(),
-            &Default::default(),
-            &reconstructed,
+            locksmith::ConvergeOptions {
+                recorded_baselines: Some(&reconstructed),
+                ..Default::default()
+            },
         )
     };
     assert!(check(&recorded, &authored).is_ok());
@@ -630,7 +631,7 @@ fn adding_or_removing_a_root_provider_respects_workspace_inheritance() {
                 locksmith::ConvergeOptions {
                     baseline_configuration: None,
                     configuration: Some(&config),
-                    registry: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1036,7 +1037,7 @@ fn an_extension_preserves_siblings_and_stops_at_an_existing_peer_provider() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool| {
         let host = if installed {
@@ -1129,7 +1130,7 @@ fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &installed, &[], options).unwrap();
     let doc = result.project().unwrap();
@@ -1146,7 +1147,7 @@ fn editing_an_optional_extension_range_keeps_an_admissible_pin() {
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     assert!(converge(&base, &installed, &[], options).is_err());
 }
@@ -1176,7 +1177,7 @@ fn a_changed_local_provider_rebinds_its_sibling_and_keeps_the_siblings_other_dep
     let opts = ConvergeOptions {
         baseline_configuration: Some(&old),
         configuration: Some(&new),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &fresh, &[], opts).unwrap();
     assert_eq!(result.project(), expected.project());
@@ -1223,7 +1224,7 @@ fn a_new_consumer_can_reuse_an_exact_catalog_release_without_adding_a_catalog_re
     let opts = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let result = converge(&base, &installed, &changes, opts).unwrap();
     let doc = result.project().unwrap();
@@ -1303,7 +1304,7 @@ fn a_shared_peer_context_can_keep_the_installed_assignment_and_restore_independe
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool, leaf: &str, palette: &str| {
         let mut roots = json!({});
@@ -1388,7 +1389,7 @@ fn a_catalog_consumer_keeps_its_compatible_pin_when_the_cached_release_changes()
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |cached: &str, imported: &str| {
         let source = lock(
@@ -1451,7 +1452,7 @@ fn an_exact_override_restores_the_required_extension_in_each_consumers_peer_scop
     let options = ConvergeOptions {
         baseline_configuration: Some(&before),
         configuration: Some(&after),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool, second_witness: bool| {
         let mut importers = json!({});
@@ -1523,7 +1524,7 @@ fn an_unchanged_override_keeps_the_installed_correction_and_its_required_subtree
     let options = ConvergeOptions {
         baseline_configuration: Some(&config),
         configuration: Some(&config),
-        registry: None,
+        ..Default::default()
     };
     let make = |installed: bool| {
         let drift = if installed { "1.1.0" } else { "1.0.0" };
@@ -1566,4 +1567,201 @@ fn an_unchanged_override_keeps_the_installed_correction_and_its_required_subtree
             .unwrap(),
         result.to_yaml().unwrap()
     );
+}
+
+#[test]
+fn converge_adds_and_removes_catalog_entries_when_workspace_config_is_unchanged() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+
+    let config =
+        WorkspaceConfig::from_pnpm(&json!({"catalogs":{"tools":{"pkg":"^1.0.0"}}})).unwrap();
+
+    let without_consumer = parse(json!({
+        "lockfileVersion": "9.0",
+        "importers": {".": {}, "app": {}},
+        "packages": {},
+        "snapshots": {}
+    }));
+    let with_consumer = parse(json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}},
+        "importers": {".": {}, "app": {"dependencies": {"pkg": {"specifier": "catalog:tools", "version": "1.0.1"}}}},
+        "packages": {"pkg@1.0.1": {"resolution": {"integrity": "sha512-pkg"}}},
+        "snapshots": {"pkg@1.0.1": {}}
+    }));
+
+    let unused_manifest = json!({});
+    let consumer_manifest = json!({"dependencies": {"pkg": "catalog:tools"}});
+
+    for baseline_configuration in [Some(&config), None] {
+        let options = ConvergeOptions {
+            baseline_configuration,
+            configuration: Some(&config),
+            ..Default::default()
+        };
+        let added = converge(
+            &without_consumer,
+            &with_consumer,
+            &[change("app", &unused_manifest, &consumer_manifest)],
+            options,
+        )
+        .unwrap();
+        assert_eq!(
+            added.project().unwrap()["catalogs"],
+            json!({"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}})
+        );
+
+        let removed = converge(
+            &with_consumer,
+            &without_consumer,
+            &[change("app", &consumer_manifest, &unused_manifest)],
+            options,
+        )
+        .unwrap();
+        assert!(removed.project().unwrap().get("catalogs").is_none());
+    }
+}
+
+#[test]
+fn converge_adds_a_catalog_consumer_linked_to_another_importer() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+
+    let config = WorkspaceConfig::from_pnpm(
+        &json!({"catalogs":{"tools":{"pkg":"^1.0.0"}}, "linkWorkspacePackages":true}),
+    )
+    .unwrap();
+    let options = ConvergeOptions {
+        configuration: Some(&config),
+        ..Default::default()
+    };
+    let baseline = parse(json!({
+        "lockfileVersion": "9.0", "importers": {".": {}, "app": {}, "packages/pkg": {}}
+    }));
+    let mut installed = json!({
+        "lockfileVersion": "9.0",
+        "catalogs": {"tools": {"pkg": {"specifier": "^1.0.0", "version": "1.0.1"}}},
+        "importers": {".": {}, "packages/pkg": {}, "app": {"dependencies": {
+            "pkg": {"specifier": "catalog:tools", "version": "link:../packages/pkg"}
+        }}}
+    });
+    let before = json!({});
+    let after = json!({"dependencies":{"pkg":"catalog:tools"}});
+    let changes = [change("app", &before, &after)];
+    let linked = converge(&baseline, &parse(installed.clone()), &changes, options).unwrap();
+    assert_eq!(
+        linked.project().unwrap()["importers"]["app"]["dependencies"]["pkg"]["version"],
+        "link:../packages/pkg"
+    );
+    assert_eq!(linked.project().unwrap()["catalogs"], installed["catalogs"]);
+    linked.validate().unwrap();
+
+    installed["importers"]["app"]["dependencies"]["pkg"]["version"] = "link:../missing".into();
+    assert!(converge(&baseline, &parse(installed), &changes, options).is_err());
+}
+
+#[test]
+fn inferred_catalog_refresh_keeps_the_baseline_pin_with_equivalent_settings() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    let config = WorkspaceConfig::from_pnpm(&json!({"catalog":{"dep":"^1"}})).unwrap();
+    let options = ConvergeOptions {
+        configuration: Some(&config),
+        ..Default::default()
+    };
+    let project = |version: &str| {
+        json!({
+            "lockfileVersion":"9.0",
+            "catalogs":{"default":{"dep":{"specifier":"^1","version":version}}},
+            "importers":{".":{"dependencies":{"dep":{"specifier":"catalog:","version":version}}}},
+            "packages":{format!("dep@{version}"):{"resolution":{}}},
+            "snapshots":{format!("dep@{version}"):{}}
+        })
+    };
+    let baseline = parse(project("1.0.1"));
+    let mut donor = project("1.0.2");
+    donor["settings"] = json!({"autoInstallPeers":true,"excludeLinksFromLockfile":false});
+    let converged = converge(&baseline, &parse(donor.clone()), &[], options).unwrap();
+    assert_eq!(converged.project(), baseline.project());
+    donor["settings"]["autoInstallPeers"] = false.into();
+    assert!(matches!(converge(&baseline, &parse(donor), &[], options),
+        Err(LockfileError::ResolutionRequired { path, .. }) if path == ["configuration"]
+    ));
+}
+
+#[test]
+fn inferred_catalog_projection_checks_the_retained_bootstrap_graph() {
+    use locksmith::{ConvergeOptions, DocumentKind, WorkspaceConfig};
+    let config = WorkspaceConfig::from_pnpm(&json!({"catalog":{"dep":"^1"}})).unwrap();
+    let options = ConvergeOptions {
+        configuration: Some(&config),
+        ..Default::default()
+    };
+    let lock = |version: &str, broken: bool| {
+        let environment = json!({
+            "lockfileVersion":"9.0",
+            "importers":{".":{"configDependencies":{}}},
+            "packages":{"env@1.0.0":{"resolution":{}}},
+            "snapshots":{"env@1.0.0": if broken { json!({"dependencies":{"missing":"1.0.0"}}) } else { json!({}) }}
+        });
+        let project = json!({
+            "lockfileVersion":"9.0",
+            "catalogs":{"default":{"dep":{"specifier":"^1","version":version}}},
+            "importers":{".":{"dependencies":{"dep":{"specifier":"catalog:","version":version}}}},
+            "packages":{format!("dep@{version}"):{"resolution":{}}},
+            "snapshots":{format!("dep@{version}"):{}}
+        });
+        Lockfile::parse(&format!("{environment}\n---\n{project}\n")).unwrap()
+    };
+    let baseline = lock("1.0.1", false);
+    let donor = lock("1.0.2", false);
+    let result = converge(&baseline, &donor, &[], options).unwrap();
+    assert_eq!(result.environment(), baseline.environment());
+    assert!(matches!(
+        converge(&lock("1.0.1", true), &donor, &[], options),
+        Err(LockfileError::InvalidGraph(issues)) if issues.iter().any(|issue| issue.document == DocumentKind::Environment && issue.path == ["snapshots", "env@1.0.0", "missing"])
+    ));
+}
+
+#[test]
+fn catalog_projection_rejects_links_to_the_wrong_existing_destination() {
+    use locksmith::{ConvergeOptions, WorkspaceConfig};
+    for (runner, root_relative) in [((11, 28, 12), false), ((12, 21, 0), true)] {
+        let config = |destination| {
+            WorkspaceConfig::from_pnpm_version(
+                &json!({"catalog": {"dep":format!("workspace:./packages/{destination}")}}),
+                &runner.into(),
+            )
+            .unwrap()
+        };
+        let [before, after] = [config("old"), config("new")];
+        let options = ConvergeOptions {
+            baseline_configuration: Some(&before),
+            configuration: Some(&after),
+            ..Default::default()
+        };
+        let reference = |destination| {
+            let prefix = if root_relative { "../" } else { "" };
+            format!("link:{prefix}packages/{destination}")
+        };
+        let lock = |destination, pin| {
+            let spec = format!("workspace:./packages/{destination}");
+            parse(json!({
+                "lockfileVersion":"9.0",
+                "catalogs":{"default":{"dep":{"specifier":spec,"version":spec}}},
+                "importers":{
+                    ".":{},"packages/old":{},"packages/new":{},"app/packages/old":{},"app/packages/new":{},
+                    "app":{"dependencies":{"dep":{"specifier":"catalog:","version":pin}}}
+                }
+            }))
+        };
+        let base = lock("old", reference("old"));
+        let result = converge(&base, &lock("new", reference("new")), &[], options).unwrap();
+        assert_eq!(
+            result.project().unwrap()["importers"]["app"]["dependencies"]["dep"]["version"],
+            reference("new")
+        );
+        assert!(matches!(
+            converge(&base, &lock("new", reference("old")), &[], options),
+            Err(LockfileError::ResolutionRequired { path, .. }) if path == ["importers", "app", "dependencies", "dep"]
+        ));
+    }
 }

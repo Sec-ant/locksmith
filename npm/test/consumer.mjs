@@ -14,6 +14,7 @@ for (const [, target] of installedReadme.matchAll(/\]\(([^)#]+)(?:#[^)]*)?\)/g))
 }
 const { parse, merge, converge, repair, validate, inspectPeers, dependencyClosure } = api;
 assert.equal(require('es-locksmith').merge, merge);
+assert.equal(require('es-locksmith').default, api.default);
 const yaml = "# keep this comment\r\nlockfileVersion: '9.0'\r\nsettings: {autoInstallPeers: true, excludeLinksFromLockfile: false}\r\nimporters: {'.': {}}\r\n";
 const lock = await parse(yaml);
 assert.ok(lock instanceof api.Lockfile);

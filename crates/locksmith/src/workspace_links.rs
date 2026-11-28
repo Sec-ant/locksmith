@@ -1,9 +1,15 @@
 //! Resolve local dependencies against the final workspace manifests.
 use crate::{
-    LockfileError, Value, WorkspaceConfig, error::missing, graph, manifest, pin,
+    LockfileError, Value, WorkspaceConfig,
+    error::{mismatch, missing},
+    graph, pin,
     pin::workspace_request,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+pub(crate) fn same_link_pin(left: &str, right: &str) -> bool {
+    left == right || matches!((left, right), ("link:", "link:.") | ("link:.", "link:"))
+}
 
 pub(crate) fn injected(name: &str, manifest: &Value, configuration: &WorkspaceConfig) -> bool {
     manifest
@@ -83,7 +89,7 @@ impl<'a> FrozenWorkspace<'a> {
         let effective = self.links.catalog_specifier(name, specifier)?;
 
         let mismatch = || {
-            manifest::mismatch(
+            mismatch(
                 importer,
                 "workspace",
                 format!("{name}: {version} does not satisfy {effective}"),
@@ -333,6 +339,7 @@ impl<'a> WorkspaceLinks<'a> {
             .chain(to[common..].iter().copied())
             .collect::<Vec<_>>()
             .join("/");
-        Ok(Some((format!("link:{relative}"), package)))
+        let path = if relative.is_empty() { "." } else { &relative };
+        Ok(Some((format!("link:{path}"), package)))
     }
 }

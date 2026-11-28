@@ -21,6 +21,7 @@ use crate::{
 /// Final workspace inputs and optional evidence for missing records.
 /// Parents are (lock, effective configuration) pairs. Their order does not
 /// authorize replacing a valid pin in the current lock.
+#[derive(Debug, Clone, Copy)]
 pub struct RepairContext<'a> {
     /// Final manifests keyed by importer path, including the root at `.`.
     pub manifests: &'a BTreeMap<String, Value>,
@@ -35,12 +36,33 @@ pub struct RepairContext<'a> {
 }
 
 /// A parsed repair source that can be reused when more evidence becomes available.
+#[derive(Debug, Clone)]
 pub struct RepairInput(Lockfile);
 
 /// Repair the supplied YAML against the final workspace. A healthy input is
 /// returned byte-for-byte. Missing or ambiguous evidence produces an error.
 /// Records outside the workspace dependency closure are preserved. Use
 /// [`Lockfile::validate`] to check references in the entire output.
+///
+/// # Examples
+/// ```
+/// use std::collections::BTreeMap;
+/// use locksmith::{RepairContext, Value, WorkspaceConfig, repair};
+///
+/// let mut manifests = BTreeMap::new();
+/// manifests.insert(".".into(), Value::Object(Default::default()));
+/// let configuration = WorkspaceConfig::default();
+/// let context = RepairContext {
+///     manifests: &manifests,
+///     configuration: &configuration,
+///     patches: &BTreeMap::new(),
+///     parents: &[],
+///     registry: None,
+/// };
+/// let repaired = repair("lockfileVersion: '9.0'\nimporters:\n  .: {}\n", &context)?;
+/// assert!(repaired.project().is_some());
+/// # Ok::<(), locksmith::LockfileError>(())
+/// ```
 ///
 /// # Errors
 /// Invalid YAML or an unsupported format fails during parsing. Incompatible settings,
@@ -50,9 +72,18 @@ pub fn repair(text: &str, context: &RepairContext<'_>) -> Result<Lockfile, Lockf
     RepairInput::parse(text)?.apply(context)
 }
 
+impl std::str::FromStr for RepairInput {
+    type Err = LockfileError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::parse(text)
+    }
+}
+
 impl RepairInput {
     /// Read the pnpm version from the bootstrap document even if the following
     /// project document needs repair.
+    #[must_use]
     pub fn recorded_pnpm_version(text: &str) -> Option<node_semver::Version> {
         crate::recovery::bootstrap_lockfile(text)?
             .0
@@ -164,8 +195,12 @@ impl RepairInput {
                     graph::closure(&result, DocumentKind::Project, &roots)?
                 }
             };
-            let plan =
-                crate::extensions::plan(&result, context.configuration, None, Some(&closure))?;
+            let plan = crate::reconcile::extensions::plan(
+                &result,
+                context.configuration,
+                None,
+                Some(&closure),
+            )?;
             if !plan.is_empty() {
                 plan.apply(result.to_mut());
                 continue;

@@ -87,9 +87,9 @@ fn float_matches(string: &str) -> bool {
     }
 
     // Form A: [0-9][0-9_]* (\.[0-9_]*)? ([eE][-+]?[0-9]+)?
-    // Form B: \.[0-9_]+ ([eE][-+]?[0-9]+)?  (no leading sign per the pattern).
+    // Form B: \.[0-9_]+ ([eE][-+]?[0-9]+)?
     match unsigned.strip_prefix('.') {
-        Some(after_dot) => !string.starts_with(['-', '+']) && fraction_matches(after_dot),
+        Some(after_dot) => fraction_matches(after_dot),
         None => integer_form_matches(unsigned),
     }
 }

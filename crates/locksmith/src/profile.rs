@@ -7,12 +7,14 @@ use std::{
 static SAMPLES: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
 
 /// A timer that records a sample when it goes out of scope.
+#[derive(Debug)]
 pub struct Span {
     component: &'static str,
     start: Instant,
 }
 
 /// Start timing a benchmark component.
+#[must_use]
 pub fn span(component: &'static str) -> Span {
     Span {
         component,

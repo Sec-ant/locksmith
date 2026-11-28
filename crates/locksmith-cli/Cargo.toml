@@ -1,6 +1,8 @@
 [package]
 name = "locksmith-cli"
-description = "Command-line interface for merging and converging pnpm lockfiles"
+description = "Command-line interface for merging, converging, repairing, validating, and inspecting pnpm lockfiles"
+repository = "https://github.com/Sec-ant/locksmith"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

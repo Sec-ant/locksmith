@@ -30,7 +30,7 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
     let (tree, prefix) = (tree.as_str(), prefix.as_str());
     #[cfg(feature = "bench-profile")]
     drop(revision_span);
-    let mut blobs = Blobs::open()?;
+    let mut blobs = Blobs::open(workspace::CONFIG_FILES, &workspace::DEFAULT_HOOK_FILES)?;
     let project = Project::read(&mut blobs, tree, prefix, None)?;
     let working = Project::from_files(None, working_file)?;
     let policy = Policy::from_project(&working);
@@ -148,17 +148,17 @@ pub fn run(reference: &str, allow_network: bool) -> Result<Lockfile> {
         &working.config,
         working.pnpm_version.as_ref().map(|v| v.major()),
         |registry| {
-            locksmith::converge_with_recorded_baselines(
+            locksmith::converge(
                 &baseline,
                 &candidate,
                 &changes,
                 locksmith::ConvergeOptions {
                     baseline_configuration: Some(&base_config),
                     configuration: Some(&config),
+                    patches: Some(&patches),
+                    recorded_baselines: Some(&recorded),
                     registry,
                 },
-                &patches,
-                &recorded,
             )
             .map_err(|e| vec![e])
         },

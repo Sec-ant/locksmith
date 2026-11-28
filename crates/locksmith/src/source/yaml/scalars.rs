@@ -13,28 +13,56 @@ enum ScalarStyle {
 /// options (`quotingType` single, `noCompatMode`, `lineWidth: -1`,
 /// `forceQuotes` off).
 pub(super) fn write_scalar(string: &str, level: usize, single_line: bool, inblock: bool) -> String {
+    let mut out = String::new();
+    write_scalar_into(&mut out, string, level, single_line, inblock);
+    out
+}
+
+pub(super) fn write_scalar_into(
+    out: &mut String,
+    string: &str,
+    level: usize,
+    single_line: bool,
+    inblock: bool,
+) {
     if string.is_empty() {
-        return "''".to_string();
+        out.push_str("''");
+        return;
     }
     match choose_scalar_style(string, single_line, inblock) {
-        ScalarStyle::Plain => string.to_string(),
-        ScalarStyle::Single => format!("'{}'", string.replace('\'', "''")),
-        ScalarStyle::Double => format!(r#""{}""#, escape_string(string)),
+        ScalarStyle::Plain => out.push_str(string),
+        ScalarStyle::Single => {
+            out.push('\'');
+            if !string.contains('\'') {
+                out.push_str(string);
+            } else {
+                for ch in string.chars() {
+                    if ch == '\'' {
+                        out.push_str("''");
+                    } else {
+                        out.push(ch);
+                    }
+                }
+            }
+            out.push('\'');
+        }
+        ScalarStyle::Double => {
+            out.push('"');
+            out.push_str(&escape_string(string));
+            out.push('"');
+        }
         ScalarStyle::Literal => {
             let indent = INDENT * level.max(1);
-            format!(
-                "|{}{}",
-                block_header(string),
-                drop_ending_newline(&indent_string(string, indent)),
-            )
+            out.push('|');
+            out.push_str(&block_header(string));
+            out.push_str(&drop_ending_newline(&indent_string(string, indent)));
         }
     }
 }
 
 /// Mirrors the fork's `chooseScalarStyle` under lockfile options.
 fn choose_scalar_style(string: &str, single_line_only: bool, inblock: bool) -> ScalarStyle {
-    let chars: Vec<u32> = string.chars().map(u32::from).collect();
-    let Some(scan) = scan_scalar(&chars, single_line_only, inblock) else {
+    let Some(scan) = scan_scalar(string, single_line_only, inblock) else {
         return ScalarStyle::Double;
     };
     if scan.has_line_break {
@@ -55,20 +83,45 @@ struct ScalarScan {
 
 /// A `single_line_only` scalar has nowhere to put a line break, so a line
 /// feed counts as unprintable rather than selecting the literal style.
-fn scan_scalar(chars: &[u32], single_line_only: bool, inblock: bool) -> Option<ScalarScan> {
+fn scan_scalar(string: &str, single_line_only: bool, inblock: bool) -> Option<ScalarScan> {
+    if string.is_ascii() {
+        let bytes = string.as_bytes();
+        let first = u32::from(*bytes.first()?);
+        let last = u32::from(*bytes.last()?);
+        let mut scan = ScalarScan {
+            plain: is_plain_safe_first(first) && is_plain_safe_last(last),
+            has_line_break: false,
+        };
+        let mut prev: Option<u32> = None;
+        for &byte in bytes {
+            let code = u32::from(byte);
+            if code == CHAR_LINE_FEED && !single_line_only {
+                scan.has_line_break = true;
+            } else if !is_printable(code) {
+                return None;
+            }
+            scan.plain = scan.plain && is_plain_safe(code, prev, inblock);
+            prev = Some(code);
+        }
+        return Some(scan);
+    }
+    let mut chars = string.chars();
+    let first = u32::from(chars.next()?);
+    let last = chars.next_back().map_or(first, u32::from);
     let mut scan = ScalarScan {
-        plain: is_plain_safe_first(chars[0]) && is_plain_safe_last(chars[chars.len() - 1]),
+        plain: is_plain_safe_first(first) && is_plain_safe_last(last),
         has_line_break: false,
     };
     let mut prev: Option<u32> = None;
-    for &char in chars {
-        if char == CHAR_LINE_FEED && !single_line_only {
+    for ch in string.chars() {
+        let code = u32::from(ch);
+        if code == CHAR_LINE_FEED && !single_line_only {
             scan.has_line_break = true;
-        } else if !is_printable(char) {
+        } else if !is_printable(code) {
             return None;
         }
-        scan.plain = scan.plain && is_plain_safe(char, prev, inblock);
-        prev = Some(char);
+        scan.plain = scan.plain && is_plain_safe(code, prev, inblock);
+        prev = Some(code);
     }
     Some(scan)
 }
@@ -158,7 +211,7 @@ fn is_plain_safe(code: u32, prev: Option<u32>, inblock: bool) -> bool {
     }
     // change to true on ':[^ ]'
     if prev_is_colon && code_is_ns {
-        return true;
+        return base;
     }
     // ns-plain-char: a non-`#` base character that isn't the `: ` sequence.
     base && code != CHAR_SHARP && (!prev_is_colon || code_is_ns)
