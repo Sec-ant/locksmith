@@ -54,6 +54,13 @@ If both branches changed the same dependency, the final workspace manifests deci
 
 ### Configure the Git merge driver
 
+Print or apply the Git merge driver configuration with `locksmith driver setup`:
+
+```sh
+pnpm locksmith driver setup
+pnpm locksmith driver setup --apply
+```
+
 Add this line to the repository's `.gitattributes`.
 
 ```gitattributes
@@ -63,7 +70,7 @@ Add this line to the repository's `.gitattributes`.
 Register the driver once per clone with Git 2.38 or later. Git runs it from the worktree root. The local executable path works independently of your shell's `PATH` and skips pnpm's pre-run install checks during a merge.
 
 ```sh
-git config merge.locksmith.driver './node_modules/.bin/locksmith merge --git-driver %O %A %B %P'
+git config merge.locksmith.driver './node_modules/.bin/locksmith driver run %O %A %B %P'
 ```
 
 Git now calls Locksmith during merges and rebases when the lockfile needs a three-way merge. The driver reads the merged workspace declarations, selects records against them, and prefers the mainline version when both pins fit equally well.
@@ -81,24 +88,24 @@ If Git pauses on the lockfile, resolve any project files named in the diagnostic
 After editing dependencies or changing the pinned pnpm version, including a minor or patch upgrade, run your usual `pnpm install`. From the workspace root, pass the Git ref that holds the lockfile and workspace declarations from before your edit.
 
 ```sh
-pnpm locksmith converge origin/main > converged.yaml
-git diff --no-index pnpm-lock.yaml converged.yaml
+pnpm locksmith converge origin/main --diff
+pnpm locksmith converge origin/main --write
 ```
 
-The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers after overrides, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
+Without `--write`, `--output`, `--diff`, or `--check`, `converge` writes the converged YAML to stdout without modifying `pnpm-lock.yaml`. Use `--check` in CI to fail with exit code `1` when the lockfile can be converged further.
 
-Review the diff and replace `pnpm-lock.yaml` with `converged.yaml`.
+The baseline lockfile and the installed lockfile must each match the manifests and settings they were generated from. Convergence includes generated members that match the workspace globs and appear in the baseline or installed lock. When Git has no earlier manifest, the baseline importer supplies its dependency specifiers after overrides, `dependenciesMeta`, and publish-directory settings. Locksmith keeps the changes your edit requires and restores earlier versions and peer bindings where the new declarations still accept them. See the [convergence design](docs/design.md#4-converge) for the selection rules and a worked example.
 
 ## Repair an already merged lockfile
 
 A clean Git merge can still leave a duplicate record, a stale importer declaration, or a dependency pointing to a missing package instance. From the workspace root, check the committed lock against the manifests and settings at the same revision.
 
 ```sh
-pnpm locksmith repair HEAD > repaired.yaml
-git diff --no-index pnpm-lock.yaml repaired.yaml
+pnpm locksmith repair --diff
+pnpm locksmith repair --write
 ```
 
-Repair checks dependencies reachable from the workspace projects. It preserves unrelated, unreachable records, including stale ones. Run `locksmith validate repaired.yaml` to check every recorded reference. A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
+Repair checks dependencies reachable from the workspace projects. It preserves unrelated, unreachable records, including stale ones. Run `locksmith validate pnpm-lock.yaml` to check every recorded reference. A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
 
 ## Validate a lockfile
 
@@ -126,9 +133,10 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 ## Scripting contract
 
-- On success, `merge`, `converge`, and `repair` write YAML to stdout. In Git driver mode, `merge` writes the result to Git's `OURS` input file. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
-- Diagnostics go to stderr.
-- `validate` is silent on success (`0`). It returns `1` for invalid lockfile content or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check, including when the lockfile format version is unsupported.
+- On success, `merge`, `converge`, and `repair` write YAML to stdout by default. All three accept `-o`/`--output`, while `converge` and `repair` also accept `-w`/`--write`, `--diff`, and `--check`. `driver run` writes the merged result atomically to Git's `OURS` input file. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
+- Diagnostics and TTY progress updates go to stderr (controlled via `-q`/`--quiet`, `-v`/`--verbose`, `--color`, `NO_COLOR`, and `FORCE_COLOR`). Use `-C`/`--directory` to run against another directory.
+- `validate` is silent on success (`0`) in text mode, or emits a structured JSON report with `--json` / `--format json`. It returns `1` for invalid lockfile content or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check, including when the lockfile format version is unsupported.
+- Shell completions and manual pages are available via `locksmith completions <shell>` and `locksmith man [command]`.
 - For other commands, exit code `1` means a conflict, an unresolved dependency choice, or an unmet peer requirement. Other errors use `2`.
 - The Git driver returns `1` on failure and writes Git's text merge of the three inputs to the lockfile, so you can resolve the conflict manually. Even when the text merges cleanly, Git keeps the lock unmerged so you can review the reported dependency.
 

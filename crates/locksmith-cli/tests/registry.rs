@@ -570,7 +570,7 @@ fn git_driver_resolves_a_missing_release_and_keeps_git_stages_on_registry_failur
         git(&[
             "config",
             "merge.locksmith.driver",
-            &format!("'{CLI}' merge --git-driver %O %A %B %P --allow-network"),
+            &format!("'{CLI}' driver run %O %A %B %P --allow-network"),
         ]);
         fs::write(
             root.join(".gitattributes"),

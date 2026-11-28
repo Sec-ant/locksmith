@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, value::RawValue};
 use ureq::{Agent, http::Uri};
 
-use crate::Result;
+use crate::{Result, ui::Ui};
 mod selection;
 mod settings;
 use settings::{apply_auth, copy_settings, env_config, project_rc};
@@ -161,6 +161,7 @@ pub fn resolve(
     network: Option<ProjectRc<'_>>,
     config: &Value,
     pnpm_major: Option<u64>,
+    ui: &Ui,
     mut solve: impl FnMut(
         Option<&RegistryMetadata>,
     )
@@ -174,15 +175,16 @@ pub fn resolve(
     let mut data = RegistryMetadata::default();
     let mut registry = None;
     let mut attempts = BTreeMap::new();
-    loop {
+    let outcome = loop {
         let errors = match solve(Some(&data)) {
-            Ok(lock) => return Ok(lock),
+            Ok(lock) => break Ok(lock),
             Err(errors) => errors,
         };
         let mut progress = false;
         let mut unresolved = None;
         let mut errors = errors.into_iter();
         let mut prefetched = false;
+        let mut fatal = None;
         while let Some(mut error) = errors.next() {
             let locksmith::LockfileError::ResolutionRequired {
                 request: Some(ref request),
@@ -190,7 +192,8 @@ pub fn resolve(
                 ref mut message,
             } = error
             else {
-                return Err(error.into());
+                fatal = Some(error);
+                break;
             };
             let direct = matches!(
                 path.first().map(String::as_str),
@@ -205,24 +208,29 @@ pub fn resolve(
                             None => registry.insert(Registry::new(config, pnpm_major, project)?),
                         };
                         if !prefetched {
-                            let remaining = errors.as_slice().iter().map_while(|error| match error {
-                                locksmith::LockfileError::ResolutionRequired {
-                                    request: Some(request),
-                                    ..
-                                } => Some(request.name()),
-                                _ => None,
-                            });
-                            client.prefetch(std::iter::once(request.name()).chain(remaining));
+                            let remaining =
+                                errors.as_slice().iter().map_while(|error| match error {
+                                    locksmith::LockfileError::ResolutionRequired {
+                                        request: Some(request),
+                                        ..
+                                    } => Some(request.name()),
+                                    _ => None,
+                                });
+                            client.prefetch(std::iter::once(request.name()).chain(remaining), ui);
                             prefetched = true;
                         }
-                        client.satisfy(request, &mut data, direct)
+                        ui.progress(format!("Fetching registry metadata: {}...", request.name()));
+                        client.satisfy(request, &mut data, direct, ui)
                     })();
                     if let Err(reason) = fetched {
                         if purpose == Lookup::Converge
                             && let RegistryRequest::Manifest { name, version } = request.as_ref()
                         {
                             data.skip_manifest(name, version);
-                            eprintln!("locksmith: keeping installed dependency pins for {name}@{version}: {reason}");
+                            ui.clear_progress();
+                            ui.warning(format!(
+                                "keeping installed dependency pins for {name}@{version}: {reason}"
+                            ));
                         } else {
                             return Some(reason.to_string());
                         }
@@ -235,10 +243,15 @@ pub fn resolve(
             }
             unresolved.get_or_insert(error);
         }
-        if !progress {
-            return Err(unresolved.expect("resolution error").into());
+        if let Some(error) = fatal {
+            break Err(error.into());
         }
-    }
+        if !progress {
+            break Err(unresolved.expect("resolution error").into());
+        }
+    };
+    ui.clear_progress();
+    outcome
 }
 
 impl RegistrySettings {
@@ -594,7 +607,7 @@ impl Registry {
         Ok(doc)
     }
 
-    fn prefetch<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
+    fn prefetch<'a>(&mut self, names: impl Iterator<Item = &'a str>, ui: &Ui) {
         let mut requests: Vec<_> = names
             .filter(|name| !self.packages.contains_key(*name))
             .collect();
@@ -607,6 +620,12 @@ impl Registry {
         // Release idle connections before starting a batch. Each worker holds
         // only its current route's pool and drops it before switching routes or
         // exiting, so a registry serving one connection at a time can advance.
+        let total = requests.len();
+        let done = AtomicUsize::new(0);
+        ui.verbose(format!(
+            "prefetching registry metadata for {total} packages"
+        ));
+        ui.progress(format!("Fetching registry metadata (0/{total})..."));
         let config = self.agent.config().clone();
         self.agent = Agent::new_with_config(config.clone());
         let client = &*self;
@@ -624,9 +643,16 @@ impl Registry {
                                     agent = Agent::new_with_config(config.clone());
                                 }
                                 route.clone_from(&base);
+                                ui.verbose(format!(
+                                    "fetching registry metadata for {name} from {base}"
+                                ));
                                 let packument = client.fetch_package(&agent, name, &base)?;
                                 Ok((base, packument))
                             });
+                            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            ui.progress(format!(
+                                "Fetching registry metadata ({finished}/{total}): {name}"
+                            ));
                             // A concurrent prefetch can be throttled even when a
                             // serial request would succeed. Fetch it on demand.
                             if !matches!(
@@ -653,12 +679,14 @@ impl Registry {
         req: &RegistryRequest,
         data: &mut RegistryMetadata,
         direct: bool,
+        ui: &Ui,
     ) -> Result<()> {
         let name = req.name();
         if !self.packages.contains_key(name) {
             let result = self
                 .package_base(name)
                 .and_then(|base| {
+                    ui.verbose(format!("fetching registry metadata for {name} from {base}"));
                     let packument = self.fetch_package(&self.agent, name, &base)?;
                     Ok((base, packument))
                 })

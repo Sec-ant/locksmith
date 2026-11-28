@@ -20,7 +20,12 @@ doc = false
 bench-profile = ["locksmith/bench-profile"]
 
 [dependencies]
-bpaf = { version = "0.9.29", features = ["derive"] }
+anstream = "1"
+anstyle = "1"
+clap = { version = "4", features = ["derive", "wrap_help", "color", "suggestions", "env"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+similar = "2"
 locksmith = { package = "es-locksmith", path = "../locksmith" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }

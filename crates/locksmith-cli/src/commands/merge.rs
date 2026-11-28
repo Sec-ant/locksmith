@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::registry::ProjectRc;
-use crate::{Result, policy::Policy};
+use crate::{Result, policy::Policy, ui::Ui};
 
 type ReadResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -82,6 +82,7 @@ pub(crate) fn with_context(
     context: &MergeContext<'_>,
     raw: &Value,
     network: Option<ProjectRc<'_>>,
+    ui: &Ui,
 ) -> Result<Lockfile> {
     let result = crate::registry::resolve(
         crate::registry::Lookup::Merge,
@@ -92,6 +93,7 @@ pub(crate) fn with_context(
             .pnpm_version
             .as_ref()
             .map(|v| v.major()),
+        ui,
         |registry| {
             let context = MergeContext {
                 registry,
@@ -108,6 +110,7 @@ pub(crate) fn with_context(
         raw,
         &result,
         context.manifests,
+        ui,
     )?;
     Ok(result)
 }
@@ -126,6 +129,7 @@ pub fn from_file<P: AsRef<Path>>(
     files: [&P; 3],
     path: &P,
     allow_network: bool,
+    ui: &Ui,
 ) -> Result<Lockfile> {
     let FileContext {
         target,
@@ -176,5 +180,6 @@ pub fn from_file<P: AsRef<Path>>(
         &context,
         &settings,
         allow_network.then_some(ProjectRc::Working),
+        ui,
     )
 }

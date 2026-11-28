@@ -1,18 +1,79 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
 use locksmith::{Lockfile, LockfileError};
+use serde_json::json;
 
 use crate::{
-    Result,
+    ExitStatus, Result,
+    ui::Ui,
     workspace::{self, Members, Project},
 };
 
-pub fn run(file: &Path, check_workspace: bool) -> Result<()> {
+pub fn run(file: &Path, check_workspace: bool, json_output: bool, _ui: &Ui) -> Result<()> {
+    let outcome = check(file, check_workspace);
+    if !json_output {
+        return outcome;
+    }
+    let file_str = file.display().to_string();
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    match outcome {
+        Ok(()) => {
+            serde_json::to_writer(
+                &mut out,
+                &json!({
+                    "ok": true,
+                    "file": file_str,
+                    "workspace": check_workspace,
+                    "issues": [],
+                }),
+            )?;
+            writeln!(out)?;
+            out.flush()?;
+            Ok(())
+        }
+        Err(error) => {
+            let code = match error.downcast_ref::<LockfileError>() {
+                Some(
+                    LockfileError::Parse(_)
+                    | LockfileError::InvalidDocument(_)
+                    | LockfileError::InvalidGraph(_)
+                    | LockfileError::ManifestMismatch { .. },
+                ) => 1,
+                _ => 2,
+            };
+            let report = match error.downcast_ref::<LockfileError>() {
+                Some(LockfileError::InvalidGraph(issues)) => json!({
+                    "ok": false,
+                    "file": file_str,
+                    "workspace": check_workspace,
+                    "issues": issues.iter().map(|issue| json!({
+                        "document": issue.document.to_string(),
+                        "path": issue.path,
+                        "message": issue.message,
+                    })).collect::<Vec<_>>(),
+                }),
+                _ => json!({
+                    "ok": false,
+                    "file": file_str,
+                    "workspace": check_workspace,
+                    "error": error.to_string(),
+                    "issues": [],
+                }),
+            };
+            serde_json::to_writer(&mut out, &report)?;
+            writeln!(out)?;
+            out.flush()?;
+            Err(Box::new(ExitStatus(code)))
+        }
+    }
+}
+
+fn check(file: &Path, check_workspace: bool) -> Result<()> {
     let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let lock = Lockfile::try_from(text)?;
     if !check_workspace {

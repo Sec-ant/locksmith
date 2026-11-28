@@ -22,10 +22,7 @@ impl Repo {
         repo.git(&[
             "config",
             "merge.locksmith.driver",
-            &format!(
-                "'{}' merge --git-driver %O %A %B %P",
-                CLI.replace('\'', "'\\''")
-            ),
+            &format!("'{}' driver run %O %A %B %P", CLI.replace('\'', "'\\''")),
         ]);
         repo.write(".gitattributes", "/pnpm-lock.yaml merge=locksmith\n");
         repo.write(
@@ -898,24 +895,17 @@ fn help_version_and_usage_errors_work_outside_a_repository() {
     let invalid = run(&["merge"]);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
-    assert!(
-        String::from_utf8(invalid.stderr)
-            .unwrap()
-            .contains("merge BASE OURS THEIRS")
-    );
+    let invalid_stderr = String::from_utf8(invalid.stderr).unwrap();
+    assert!(invalid_stderr.contains("<BASE>"), "{invalid_stderr}");
+    assert!(invalid_stderr.contains("<OURS>"), "{invalid_stderr}");
+    assert!(invalid_stderr.contains("<THEIRS>"), "{invalid_stderr}");
+    let typo = run(&["converg"]);
+    assert_eq!(typo.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&typo.stderr).contains("converge"));
     for args in [
         &["converg"][..],
         &["merge", "base", "ours", "theirs", "--allow-network"][..],
-        &[
-            "merge",
-            "--git-driver",
-            "base",
-            "ours",
-            "theirs",
-            "pnpm-lock.yaml",
-            "--context",
-            "context.json",
-        ],
+        &["driver", "run", "base", "ours", "theirs"][..],
     ] {
         let invalid = run(args);
         assert_eq!(invalid.status.code(), Some(2));
@@ -3510,14 +3500,7 @@ fn only_non_utf8_conflicts_reached_through_a_manifest_link_block_the_driver() {
         let out = Command::new(CLI)
             .current_dir(r.0.path())
             .env(format!("GITHEAD_{theirs}"), "theirs")
-            .args([
-                "merge",
-                "--git-driver",
-                "base",
-                "ours",
-                "theirs",
-                "pnpm-lock.yaml",
-            ])
+            .args(["driver", "run", "base", "ours", "theirs", "pnpm-lock.yaml"])
             .output()
             .unwrap();
         assert_eq!(out.status.success(), !linked, "{}", report(&out));
@@ -4128,8 +4111,8 @@ fn git_driver_accepts_bare_relative_destination_filename() {
     let out = Command::new(CLI)
         .current_dir(r.0.path())
         .args([
-            "merge",
-            "--git-driver",
+            "driver",
+            "run",
             "base.yaml",
             "pnpm-lock.yaml",
             "theirs.yaml",
@@ -4151,4 +4134,392 @@ fn git_driver_accepts_bare_relative_destination_filename() {
         doc["importers"]["apps/web"]["devDependencies"]["right"]["version"],
         "3.0.0"
     );
+}
+
+#[test]
+fn converge_and_repair_support_output_write_diff_and_check_modes() {
+    let r = Repo::new();
+    let path = r.0.path().join("pnpm-lock.yaml");
+
+    // Clean state: --check exits 0 and --diff prints nothing.
+    let clean_check = r.cmd(CLI, &["converge", "HEAD", "--check"]);
+    assert_eq!(
+        clean_check.status.code(),
+        Some(0),
+        "{}",
+        report(&clean_check)
+    );
+    assert!(clean_check.stdout.is_empty());
+    let clean_diff = r.cmd(CLI, &["converge", "HEAD", "--diff"]);
+    assert_eq!(clean_diff.status.code(), Some(0), "{}", report(&clean_diff));
+    assert!(clean_diff.stdout.is_empty());
+
+    // Introduce drift in pnpm-lock.yaml.
+    r.side("ours");
+    let mut drifted = graph(&fs::read(&path).unwrap());
+    drifted["importers"]["apps/web"]["devDependencies"]["right"]["version"] = json!("1.5.0");
+    for section in ["packages", "snapshots"] {
+        let old = drifted[section]
+            .as_object_mut()
+            .unwrap()
+            .remove("right@1.0.0")
+            .unwrap();
+        drifted[section]["right@1.5.0"] = old;
+    }
+    r.write("pnpm-lock.yaml", &drifted.to_string());
+
+    // --check reports drift with exit code 1 and does not modify the file.
+    let drift_check = r.cmd(CLI, &["converge", "HEAD", "--check"]);
+    assert_eq!(
+        drift_check.status.code(),
+        Some(1),
+        "{}",
+        report(&drift_check)
+    );
+    assert!(drift_check.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&drift_check.stderr).contains("would change"));
+
+    // --diff prints unified diff without modifying pnpm-lock.yaml.
+    let diff = r.cmd(CLI, &["converge", "HEAD", "--diff", "--color=never"]);
+    assert!(diff.status.success(), "{}", report(&diff));
+    let diff_text = String::from_utf8(diff.stdout).unwrap();
+    assert!(diff_text.contains("--- a/pnpm-lock.yaml"), "{diff_text}");
+    assert!(diff_text.contains("+++ b/pnpm-lock.yaml"), "{diff_text}");
+    assert!(
+        diff_text.contains("1.5.0") && diff_text.contains("1.0.0"),
+        "{diff_text}"
+    );
+
+    // -o writes atomically to another file.
+    let out_file = r.0.path().join("out.yaml");
+    let to_file = r.cmd(CLI, &["converge", "HEAD", "-o", "out.yaml"]);
+    assert!(to_file.status.success(), "{}", report(&to_file));
+    assert!(to_file.stdout.is_empty());
+    assert_eq!(
+        graph(&fs::read(&out_file).unwrap())["importers"]["apps/web"]["devDependencies"]["right"]["version"],
+        "1.0.0"
+    );
+
+    // -w updates pnpm-lock.yaml in place.
+    let write = r.cmd(CLI, &["converge", "HEAD", "--write"]);
+    assert!(write.status.success(), "{}", report(&write));
+    assert!(write.stdout.is_empty());
+    assert_eq!(
+        graph(&fs::read(&path).unwrap())["importers"]["apps/web"]["devDependencies"]["right"]["version"],
+        "1.0.0"
+    );
+    assert_eq!(
+        r.cmd(CLI, &["converge", "HEAD", "--check"]).status.code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn validate_json_directory_flag_driver_setup_completions_and_man_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let valid = "\
+lockfileVersion: '9.0'
+importers:
+  .: {}
+";
+    fs::write(ws.join("pnpm-lock.yaml"), valid).unwrap();
+
+    // -C / --directory works from outside the workspace.
+    let ok = Command::new(CLI)
+        .current_dir(dir.path())
+        .args(["-C", ws.to_str().unwrap(), "validate", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(ok.status.code(), Some(0), "{}", report(&ok));
+    let parsed: Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["issues"], json!([]));
+
+    // --format json works identically and reports graph issues with exit code 1.
+    fs::write(
+        ws.join("pnpm-lock.yaml"),
+        "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {tarball: https://example.org/foo-1.0.0.tgz}
+snapshots: {}
+",
+    )
+    .unwrap();
+    let bad = Command::new(CLI)
+        .current_dir(&ws)
+        .args(["validate", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(1), "{}", report(&bad));
+    let parsed: Value = serde_json::from_slice(&bad.stdout).unwrap();
+    assert_eq!(parsed["ok"], false);
+    assert!(!parsed["issues"].as_array().unwrap().is_empty());
+
+    // driver setup prints instructions by default and applies git config with --apply.
+    let repo = Repo::new();
+    let printed = repo.cmd(CLI, &["driver", "setup"]);
+    assert!(printed.status.success(), "{}", report(&printed));
+    let text = String::from_utf8(printed.stdout).unwrap();
+    assert!(text.contains("/pnpm-lock.yaml merge=locksmith"), "{text}");
+    assert!(text.contains("driver run %O %A %B %P"), "{text}");
+
+    let applied = repo.cmd(
+        CLI,
+        &["driver", "setup", "--bin", "custom-locksmith", "--apply"],
+    );
+    assert!(applied.status.success(), "{}", report(&applied));
+    assert_eq!(
+        repo.git(&["config", "--local", "merge.locksmith.driver"])
+            .trim(),
+        "custom-locksmith driver run %O %A %B %P"
+    );
+
+    // completions and man subcommands emit non-empty output.
+    let comp = Command::new(CLI)
+        .args(["completions", "zsh"])
+        .output()
+        .unwrap();
+    assert!(comp.status.success(), "{}", report(&comp));
+    assert!(String::from_utf8_lossy(&comp.stdout).contains("locksmith"));
+
+    let man = Command::new(CLI).args(["man"]).output().unwrap();
+    assert!(man.status.success(), "{}", report(&man));
+    assert!(String::from_utf8_lossy(&man.stdout).contains(".TH locksmith"));
+
+    let sub_man = Command::new(CLI).args(["man", "merge"]).output().unwrap();
+    assert!(sub_man.status.success(), "{}", report(&sub_man));
+    assert!(String::from_utf8_lossy(&sub_man.stdout).contains(".TH merge"));
+}
+
+#[test]
+fn driver_setup_quotes_paths_patterns_and_resolves_subdirectory_bins() {
+    let repo = Repo::new();
+
+    // Spaces and apostrophes in --bin are shell-escaped inside driver_cmd AND in the printed git config command.
+    let bin = "/opt/Bob's Tools/locksmith";
+    let printed = repo.cmd(
+        CLI,
+        &[
+            "driver",
+            "setup",
+            "--bin",
+            bin,
+            "--lockfile",
+            "/apps/my app/pnpm-lock.yaml",
+        ],
+    );
+    assert!(printed.status.success(), "{}", report(&printed));
+    let out = String::from_utf8(printed.stdout).unwrap();
+    assert!(
+        out.contains("\"/apps/my app/pnpm-lock.yaml\" merge=locksmith"),
+        "{out}"
+    );
+    let driver_config_line = out
+        .lines()
+        .find(|line| line.starts_with("git config --local merge.locksmith.driver "))
+        .expect("printed git config driver line");
+    let exec = repo.cmd("sh", &["-c", driver_config_line]);
+    assert!(exec.status.success(), "{}", report(&exec));
+    assert_eq!(
+        repo.git(&["config", "--local", "merge.locksmith.driver"])
+            .trim(),
+        "'/opt/Bob'\\''s Tools/locksmith' driver run %O %A %B %P"
+    );
+
+    // Applying stores the properly escaped executable inside merge.locksmith.driver.
+    let applied = repo.cmd(CLI, &["driver", "setup", "--bin", bin, "--apply"]);
+    assert!(applied.status.success(), "{}", report(&applied));
+    assert_eq!(
+        repo.git(&["config", "--local", "merge.locksmith.driver"])
+            .trim(),
+        "'/opt/Bob'\\''s Tools/locksmith' driver run %O %A %B %P"
+    );
+
+    // Glob characters without whitespace remain unquoted in .gitattributes.
+    let glob = repo.cmd(CLI, &["driver", "setup", "--lockfile", "**/pnpm-lock.yaml"]);
+    assert!(glob.status.success(), "{}", report(&glob));
+    assert!(
+        String::from_utf8(glob.stdout)
+            .unwrap()
+            .contains("**/pnpm-lock.yaml merge=locksmith")
+    );
+
+    // Leading `!` is escaped at the pattern layer, and `%` in --bin is doubled for Git expansion.
+    let special = repo.cmd(
+        CLI,
+        &[
+            "driver",
+            "setup",
+            "--bin",
+            "/opt/100%fast/locksmith",
+            "--lockfile",
+            "!special/pnpm-lock.yaml",
+        ],
+    );
+    assert!(special.status.success(), "{}", report(&special));
+    let special_out = String::from_utf8(special.stdout).unwrap();
+    assert!(
+        special_out.contains("\\!special/pnpm-lock.yaml merge=locksmith"),
+        "{special_out}"
+    );
+    assert!(special_out.contains("100%%fast/locksmith"), "{special_out}");
+    let special_space = repo.cmd(
+        CLI,
+        &["driver", "setup", "--lockfile", "!my app/pnpm-lock.yaml"],
+    );
+    assert!(special_space.status.success(), "{}", report(&special_space));
+    assert!(
+        String::from_utf8(special_space.stdout)
+            .unwrap()
+            .contains("\"\\\\!my app/pnpm-lock.yaml\" merge=locksmith")
+    );
+
+    // Running driver setup from a subdirectory resolves local node_modules/.bin/locksmith relative to repo root.
+    repo.write("nested/node_modules/.bin/locksmith", "#!/bin/sh\n");
+    let sub = Command::new(CLI)
+        .current_dir(repo.0.path().join("nested"))
+        .args(["driver", "setup"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(sub.status.success(), "{}", report(&sub));
+    assert!(
+        String::from_utf8(sub.stdout)
+            .unwrap()
+            .contains("./nested/node_modules/.bin/locksmith driver run %O %A %B %P")
+    );
+}
+
+#[test]
+fn repair_write_guards_dirty_worktree_and_repair_check_names_commit() {
+    let repo = Repo::new();
+    let original = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let mut damaged: Value = serde_json::from_str(&original).unwrap();
+    damaged["snapshots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("left@1.0.0")
+        .unwrap();
+    repo.write("pnpm-lock.yaml", &damaged.to_string());
+    repo.commit("drop one live snapshot");
+
+    // --check reports the commit ref and commit requirement with exit code 1.
+    let check = repo.cmd(CLI, &["repair", "HEAD", "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", report(&check));
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(stderr.contains("HEAD:pnpm-lock.yaml"), "{stderr}");
+    assert!(stderr.contains("commit"), "{stderr}");
+
+    // Dirty worktree blocks --write and directs user to --output FILE.
+    repo.write("pnpm-lock.yaml", "uncommitted worktree edit\n");
+    let blocked = repo.cmd(CLI, &["repair", "HEAD", "--write"]);
+    assert_eq!(blocked.status.code(), Some(2), "{}", report(&blocked));
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(stderr.contains("--output FILE"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(repo.0.path().join("pnpm-lock.yaml")).unwrap(),
+        "uncommitted worktree edit\n"
+    );
+
+    // Matching worktree allows --write in place and preserves file permissions.
+    repo.write("pnpm-lock.yaml", &damaged.to_string());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            repo.0.path().join("pnpm-lock.yaml"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+    }
+    let written = repo.cmd(CLI, &["repair", "HEAD", "--write"]);
+    assert!(written.status.success(), "{}", report(&written));
+    assert_eq!(
+        graph(&fs::read(repo.0.path().join("pnpm-lock.yaml")).unwrap()),
+        graph(original.as_bytes())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(repo.0.path().join("pnpm-lock.yaml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+}
+
+#[test]
+fn cli_help_color_and_golden_structure_stay_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(CLI)
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+
+    // --color=always emits ANSI escapes in clap help; --color=never strips them.
+    let colored = run(&["--color=always", "--help"]);
+    assert!(colored.status.success());
+    assert!(
+        String::from_utf8_lossy(&colored.stdout).contains("\x1b["),
+        "expected ANSI styling with --color=always"
+    );
+
+    let plain = run(&["--color=never", "--help"]);
+    assert!(plain.status.success());
+    let plain_text = String::from_utf8(plain.stdout).unwrap();
+    assert!(!plain_text.contains("\x1b["));
+    for expected in [
+        "Usage: locksmith [OPTIONS] [COMMAND]",
+        "Commands:",
+        "Global options:",
+        "Examples:",
+        "merge",
+        "converge",
+        "repair",
+        "validate",
+        "inspect",
+        "driver",
+        "completions",
+        "man",
+    ] {
+        assert!(
+            plain_text.contains(expected),
+            "missing {expected:?} in:\n{plain_text}"
+        );
+    }
+
+    // Short -h is concise and points to --help.
+    let short = run(&["--color=never", "-h"]);
+    assert!(short.status.success());
+    let short_text = String::from_utf8(short.stdout).unwrap();
+    assert!(
+        short_text.contains("see more with '--help'"),
+        "{short_text}"
+    );
+    assert!(!short_text.contains("Examples:"), "{short_text}");
+
+    // Parse error honors --color=always and --color=never.
+    let err_colored = run(&["--color=always", "merge"]);
+    assert_eq!(err_colored.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&err_colored.stderr).contains("\x1b["));
+
+    let err_plain = run(&["--color=never", "merge"]);
+    assert_eq!(err_plain.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&err_plain.stderr).contains("\x1b["));
 }

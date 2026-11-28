@@ -11,7 +11,7 @@ For peer warnings or excess instances in an existing lockfile, run `locksmith in
 
 ## Validate a lockfile
 
-Run `locksmith validate "$lockfile"` for a read-only check of YAML and internal dependency references. Use `locksmith validate --workspace "$lockfile"` to also check workspace members, dependency declarations, and recorded settings and patches. The file defaults to `pnpm-lock.yaml`. The workspace mode reads inputs beside that file, so place a scratch candidate beside the matching workspace inputs before using it.
+Run `locksmith validate "$lockfile"` for a read-only check of YAML and internal dependency references. Use `locksmith validate --workspace "$lockfile"` to also check workspace members, dependency declarations, and recorded settings and patches. Add `--json` (or `--format json`) for structured output. The file defaults to `pnpm-lock.yaml`. The workspace mode reads inputs beside that file, so place a scratch candidate beside the matching workspace inputs before using it.
 
 Both modes work offline. Exit `0` means the check passed, `1` means an invalid lockfile or workspace mismatch, and `2` means the check could not complete, for example when a pnpmfile may change the effective manifests. In a merge gate, check the lockfile from the final merge candidate. Package availability and artifact integrity are checked during installation.
 
@@ -49,24 +49,24 @@ locksmith merge "$scratch/base.yaml" "$scratch/ours.yaml" "$scratch/theirs.yaml"
 
 Manual worktree resolutions require explicit context because the Git driver derives context from input revisions. With only three lockfiles, run `locksmith merge base.yaml ours.yaml theirs.yaml > "$scratch/candidate.yaml"`. If that reports a conflict, obtain the final declarations before choosing pins.
 
-If a Git driver left the lockfile unmerged, review its diagnostic even when the text has no conflict markers. For [automatic driver setup](https://github.com/Sec-ant/locksmith#configure-the-git-merge-driver), inspect `git check-attr merge -- "$lock_path"` first and add `--allow-network` to the driver command. Linked worktrees share `git config --local` settings.
+If a Git driver left the lockfile unmerged, review its diagnostic even when the text has no conflict markers. For [automatic driver setup](https://github.com/Sec-ant/locksmith#configure-the-git-merge-driver), run `locksmith driver setup` (or `locksmith driver setup --allow-network --apply`), inspect `git check-attr merge -- "$lock_path"`, and note that linked worktrees share `git config --local` settings.
 
 ## Reduce lockfile churn after an install
 
 From the workspace root, choose the commit that contains the lockfile and declarations from before the dependency edit. After the project's normal `pnpm install`, run:
 
 ```sh
-locksmith converge --allow-network "$baseline_ref" > "$scratch/candidate.yaml"
+locksmith converge --allow-network "$baseline_ref" -o "$scratch/candidate.yaml"
 ```
 
-Each lockfile must match its own declarations. For a pnpm major upgrade, use the pre-upgrade baseline and the lock installed with the new version. Keep the exact `packageManager` in both root manifests. If overlapping overrides select a different release, check their order under the new pnpm version. If convergence rejects a workspace setting, membership, `.npmrc`, or patch change, check the baseline and merge parent. Keep and verify the pnpm-generated lock when the rejected change is intentional.
+Use `--diff` to preview changes directly, `--check` in CI, or `--write` to update `pnpm-lock.yaml` in place. Each lockfile must match its own declarations. For a pnpm major upgrade, use the pre-upgrade baseline and the lock installed with the new version. Keep the exact `packageManager` in both root manifests. If overlapping overrides select a different release, check their order under the new pnpm version. If convergence rejects a workspace setting, membership, `.npmrc`, or patch change, check the baseline and merge parent. Keep and verify the pnpm-generated lock when the rejected change is intentional.
 
 ## Repair a committed lockfile
 
 From the workspace root, run this for stale, duplicate, or missing records after a clean text merge:
 
 ```sh
-locksmith repair --allow-network "$ref" > "$scratch/candidate.yaml"
+locksmith repair --allow-network "$ref" -o "$scratch/candidate.yaml"
 ```
 
 Repair reads the lockfile, manifests, and settings from the selected commit (`HEAD` by default), and can recover records from its parents. Verify against that same commit for a review-only repair. Use `validate --workspace` to check an uncommitted lock against its worktree inputs.
