@@ -1,34 +1,36 @@
 class Locksmith < Formula
   desc "Merge, repair, and converge pnpm lockfiles"
   homepage "https://github.com/Sec-ant/locksmith"
-  version "0.3.11"
+  version "0.4.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.11/locksmith-aarch64-apple-darwin.tar.gz"
-      sha256 "6d8bd55051381d4e5a405f2e920c6cdf16e821c152d9d4764529fee551feace0"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.4.0/locksmith-aarch64-apple-darwin.tar.gz"
+      sha256 "9c493d376dd7fa77c308f1a6da4cd82db519d7ee4b5a8211395e3cad41d97942"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.11/locksmith-x86_64-apple-darwin.tar.gz"
-      sha256 "af8c619786f2199ea617cce64f59ea2f6bd6cd300d25ba1ba5666297ca6c3747"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.4.0/locksmith-x86_64-apple-darwin.tar.gz"
+      sha256 "a67236be6ca52e0544e93ffa3414efd0a8e3adb60b6fa051ff733cced3746685"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.11/locksmith-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "5cc9cb26ff65324a8cc4b0fa57dcde435f923629c6c976ca50a4a7631ad4aeaa"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.4.0/locksmith-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "0bd25bd046271819de6a6ddd85364520517b4bd16b6e2b552bad7c7391c1272d"
     end
 
     on_intel do
-      url "https://github.com/Sec-ant/locksmith/releases/download/v0.3.11/locksmith-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "1611aa0e82035d7452368c1c05b383f2abcc2a15a4d65c3f289a1565789ca439"
+      url "https://github.com/Sec-ant/locksmith/releases/download/v0.4.0/locksmith-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "99f7a0e502cf50ff149b51f65c25358b18f4ea2b23aa80c0d8157292c663450c"
     end
   end
 
   def install
     bin.install "locksmith"
+    generate_completions_from_executable(bin/"locksmith", "completions")
+    (man1/"locksmith.1").write Utils.safe_popen_read(bin/"locksmith", "man")
   end
 
   test do
