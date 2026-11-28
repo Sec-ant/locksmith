@@ -4300,3 +4300,196 @@ snapshots: {}
     assert!(sub_man.status.success(), "{}", report(&sub_man));
     assert!(String::from_utf8_lossy(&sub_man.stdout).contains(".TH merge"));
 }
+
+#[test]
+fn driver_setup_quotes_paths_patterns_and_resolves_subdirectory_bins() {
+    let repo = Repo::new();
+
+    // Spaces and apostrophes in --bin are shell-escaped inside driver_cmd AND in the printed git config command.
+    let bin = "/opt/Bob's Tools/locksmith";
+    let printed = repo.cmd(
+        CLI,
+        &[
+            "driver",
+            "setup",
+            "--bin",
+            bin,
+            "--lockfile",
+            "/apps/my app/pnpm-lock.yaml",
+        ],
+    );
+    assert!(printed.status.success(), "{}", report(&printed));
+    let out = String::from_utf8(printed.stdout).unwrap();
+    assert!(
+        out.contains("\"/apps/my app/pnpm-lock.yaml\" merge=locksmith"),
+        "{out}"
+    );
+    let driver_config_line = out
+        .lines()
+        .find(|line| line.starts_with("git config --local merge.locksmith.driver "))
+        .expect("printed git config driver line");
+    let exec = repo.cmd("sh", &["-c", driver_config_line]);
+    assert!(exec.status.success(), "{}", report(&exec));
+    assert_eq!(
+        repo.git(&["config", "--local", "merge.locksmith.driver"])
+            .trim(),
+        "'/opt/Bob'\\''s Tools/locksmith' driver run %O %A %B %P"
+    );
+
+    // Applying stores the properly escaped executable inside merge.locksmith.driver.
+    let applied = repo.cmd(CLI, &["driver", "setup", "--bin", bin, "--apply"]);
+    assert!(applied.status.success(), "{}", report(&applied));
+    assert_eq!(
+        repo.git(&["config", "--local", "merge.locksmith.driver"])
+            .trim(),
+        "'/opt/Bob'\\''s Tools/locksmith' driver run %O %A %B %P"
+    );
+
+    // Glob characters without whitespace remain unquoted in .gitattributes.
+    let glob = repo.cmd(CLI, &["driver", "setup", "--lockfile", "**/pnpm-lock.yaml"]);
+    assert!(glob.status.success(), "{}", report(&glob));
+    assert!(
+        String::from_utf8(glob.stdout)
+            .unwrap()
+            .contains("**/pnpm-lock.yaml merge=locksmith")
+    );
+
+    // Running driver setup from a subdirectory resolves local node_modules/.bin/locksmith relative to repo root.
+    repo.write("nested/node_modules/.bin/locksmith", "#!/bin/sh\n");
+    let sub = Command::new(CLI)
+        .current_dir(repo.0.path().join("nested"))
+        .args(["driver", "setup"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(sub.status.success(), "{}", report(&sub));
+    assert!(
+        String::from_utf8(sub.stdout)
+            .unwrap()
+            .contains("./nested/node_modules/.bin/locksmith driver run %O %A %B %P")
+    );
+}
+
+#[test]
+fn repair_write_guards_dirty_worktree_and_repair_check_names_commit() {
+    let repo = Repo::new();
+    let original = repo.git(&["show", "HEAD:pnpm-lock.yaml"]);
+    let mut damaged: Value = serde_json::from_str(&original).unwrap();
+    damaged["snapshots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("left@1.0.0")
+        .unwrap();
+    repo.write("pnpm-lock.yaml", &damaged.to_string());
+    repo.commit("drop one live snapshot");
+
+    // --check reports the commit ref and commit requirement with exit code 1.
+    let check = repo.cmd(CLI, &["repair", "HEAD", "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", report(&check));
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(stderr.contains("HEAD:pnpm-lock.yaml"), "{stderr}");
+    assert!(stderr.contains("commit"), "{stderr}");
+
+    // Dirty worktree blocks --write and directs user to --output FILE.
+    repo.write("pnpm-lock.yaml", "uncommitted worktree edit\n");
+    let blocked = repo.cmd(CLI, &["repair", "HEAD", "--write"]);
+    assert_eq!(blocked.status.code(), Some(2), "{}", report(&blocked));
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(stderr.contains("--output FILE"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(repo.0.path().join("pnpm-lock.yaml")).unwrap(),
+        "uncommitted worktree edit\n"
+    );
+
+    // Matching worktree allows --write in place and preserves file permissions.
+    repo.write("pnpm-lock.yaml", &damaged.to_string());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            repo.0.path().join("pnpm-lock.yaml"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+    }
+    let written = repo.cmd(CLI, &["repair", "HEAD", "--write"]);
+    assert!(written.status.success(), "{}", report(&written));
+    assert_eq!(
+        graph(&fs::read(repo.0.path().join("pnpm-lock.yaml")).unwrap()),
+        graph(original.as_bytes())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(repo.0.path().join("pnpm-lock.yaml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+}
+
+#[test]
+fn cli_help_color_and_golden_structure_stay_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(CLI)
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+
+    // --color=always emits ANSI escapes in clap help; --color=never strips them.
+    let colored = run(&["--color=always", "--help"]);
+    assert!(colored.status.success());
+    assert!(
+        String::from_utf8_lossy(&colored.stdout).contains("\x1b["),
+        "expected ANSI styling with --color=always"
+    );
+
+    let plain = run(&["--color=never", "--help"]);
+    assert!(plain.status.success());
+    let plain_text = String::from_utf8(plain.stdout).unwrap();
+    assert!(!plain_text.contains("\x1b["));
+    for expected in [
+        "Usage: locksmith [OPTIONS] [COMMAND]",
+        "Commands:",
+        "Global options:",
+        "Examples:",
+        "merge",
+        "converge",
+        "repair",
+        "validate",
+        "inspect",
+        "driver",
+        "completions",
+        "man",
+    ] {
+        assert!(
+            plain_text.contains(expected),
+            "missing {expected:?} in:\n{plain_text}"
+        );
+    }
+
+    // Short -h is concise and points to --help.
+    let short = run(&["--color=never", "-h"]);
+    assert!(short.status.success());
+    let short_text = String::from_utf8(short.stdout).unwrap();
+    assert!(
+        short_text.contains("see more with '--help'"),
+        "{short_text}"
+    );
+    assert!(!short_text.contains("Examples:"), "{short_text}");
+
+    // Parse error honors --color=always and --color=never.
+    let err_colored = run(&["--color=always", "merge"]);
+    assert_eq!(err_colored.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&err_colored.stderr).contains("\x1b["));
+
+    let err_plain = run(&["--color=never", "merge"]);
+    assert_eq!(err_plain.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&err_plain.stderr).contains("\x1b["));
+}

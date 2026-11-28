@@ -2,11 +2,12 @@
 use std::{
     env,
     error::Error,
-    fmt,
+    fmt, fs,
     io::{self, IsTerminal, Write},
     path::Path,
 };
 
+use anstream::AutoStream;
 use anstyle::{AnsiColor, Style};
 use clap::{ValueEnum, builder::Styles};
 use locksmith::LockfileError;
@@ -29,12 +30,22 @@ pub enum ColorChoice {
     Never,
 }
 
+impl ColorChoice {
+    pub fn to_clap(self) -> clap::ColorChoice {
+        match self {
+            Self::Auto => clap::ColorChoice::Auto,
+            Self::Always => clap::ColorChoice::Always,
+            Self::Never => clap::ColorChoice::Never,
+        }
+    }
+}
+
 /// Shared terminal presentation settings for a single CLI invocation.
 #[derive(Clone, Copy, Debug)]
 pub struct Ui {
     pub stdout_color: bool,
     pub stderr_color: bool,
-    pub stderr_is_tty: bool,
+    pub stderr_supports_progress: bool,
     pub quiet: bool,
     pub verbose: bool,
 }
@@ -43,10 +54,30 @@ impl Ui {
     pub fn new(color: ColorChoice, quiet: bool, verbose: bool) -> Self {
         let stdout_is_tty = io::stdout().is_terminal();
         let stderr_is_tty = io::stderr().is_terminal();
+        let dumb = is_dumb_term();
+
+        let mut stdout_color = resolve_color(color, stdout_is_tty, dumb);
+        let mut stderr_color = resolve_color(color, stderr_is_tty, dumb);
+
+        // On Windows, AutoStream::new attempts to enable ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        // per console handle via anstyle-wincon without unsafe code in this crate.
+        if stdout_color {
+            let probe = AutoStream::new(io::stdout(), anstream::ColorChoice::Always);
+            if probe.current_choice() == anstream::ColorChoice::Never {
+                stdout_color = false;
+            }
+        }
+        if stderr_color {
+            let probe = AutoStream::new(io::stderr(), anstream::ColorChoice::Always);
+            if probe.current_choice() == anstream::ColorChoice::Never {
+                stderr_color = false;
+            }
+        }
+
         Self {
-            stdout_color: resolve_color(color, stdout_is_tty),
-            stderr_color: resolve_color(color, stderr_is_tty),
-            stderr_is_tty,
+            stdout_color,
+            stderr_color,
+            stderr_supports_progress: stderr_is_tty && !dumb,
             quiet,
             verbose,
         }
@@ -82,7 +113,7 @@ impl Ui {
     }
 
     pub fn progress(&self, message: impl fmt::Display) {
-        if !self.stderr_is_tty || self.quiet {
+        if !self.stderr_supports_progress || self.quiet {
             return;
         }
         let mut err = io::stderr().lock();
@@ -91,7 +122,7 @@ impl Ui {
     }
 
     pub fn clear_progress(&self) {
-        if !self.stderr_is_tty || self.quiet {
+        if !self.stderr_supports_progress || self.quiet {
             return;
         }
         let mut err = io::stderr().lock();
@@ -150,7 +181,12 @@ impl Ui {
     }
 
     fn write_stderr_label(&self, label: &str, style: Style, message: impl fmt::Display) {
-        let mut err = io::stderr().lock();
+        let choice = if self.stderr_color {
+            anstream::ColorChoice::Always
+        } else {
+            anstream::ColorChoice::Never
+        };
+        let mut err = AutoStream::new(io::stderr().lock(), choice);
         if self.stderr_color {
             let _ = writeln!(err, "{style}{label}:{style:#} {message}");
         } else {
@@ -205,8 +241,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    let existing_perms = match fs::metadata(path) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", path.display()).into()),
+    };
     let mut temp = NamedTempFile::new_in(dir)?;
     temp.write_all(bytes)?;
+    if let Some(perms) = existing_perms {
+        temp.as_file().set_permissions(perms)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o644))?;
+        }
+    }
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -248,7 +299,11 @@ pub fn clap_styles() -> Styles {
         )
 }
 
-fn resolve_color(choice: ColorChoice, is_tty: bool) -> bool {
+fn is_dumb_term() -> bool {
+    env::var_os("TERM").is_some_and(|v| v == "dumb")
+}
+
+fn resolve_color(choice: ColorChoice, is_tty: bool, dumb: bool) -> bool {
     match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
@@ -256,7 +311,7 @@ fn resolve_color(choice: ColorChoice, is_tty: bool) -> bool {
             if env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
                 return false;
             }
-            if env::var_os("TERM").is_some_and(|v| v == "dumb") {
+            if dumb {
                 return false;
             }
             if env::var_os("FORCE_COLOR").is_some_and(|v| !v.is_empty()) {

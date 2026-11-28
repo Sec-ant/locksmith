@@ -61,6 +61,8 @@ cat <<'RUBY'
 
   def install
     bin.install "locksmith"
+    generate_completions_from_executable(bin/"locksmith", "completions")
+    (man1/"locksmith.1").write Utils.safe_popen_read(bin/"locksmith", "man")
   end
 
   test do

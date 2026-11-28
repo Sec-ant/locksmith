@@ -1,11 +1,12 @@
 use std::{
     error::Error,
-    io::{self, Write},
+    fs,
+    io::{self, ErrorKind, Write},
     path::Path,
 };
 
 use clap::CommandFactory;
-use clap_complete::generate;
+use clap_complete::Generator;
 use clap_mangen::Man;
 
 use crate::{
@@ -52,13 +53,18 @@ pub(super) fn run(command: Command, ui: &Ui) -> Result<()> {
                 "b/pnpm-lock.yaml",
                 Path::new("pnpm-lock.yaml"),
                 &args.output_mode,
-                "converge",
+                "pnpm-lock.yaml would change after converge (re-run with --diff to inspect or --write to apply)",
+                None,
                 ui,
             )
         }
         Command::Repair(args) => {
             let (original, result) = repair::run(&args.reference, args.allow_network, ui)?;
             let yaml = result.to_yaml()?;
+            let check_msg = format!(
+                "{}:pnpm-lock.yaml needs repair (re-run with --diff to inspect, then write and commit the repaired lockfile)",
+                args.reference
+            );
             emit_transformed(
                 &original,
                 &yaml,
@@ -66,7 +72,8 @@ pub(super) fn run(command: Command, ui: &Ui) -> Result<()> {
                 "repaired/pnpm-lock.yaml",
                 Path::new("pnpm-lock.yaml"),
                 &args.output_mode,
-                "repair",
+                &check_msg,
+                Some(&args.reference),
                 ui,
             )
         }
@@ -87,7 +94,9 @@ pub(super) fn run(command: Command, ui: &Ui) -> Result<()> {
         },
         Command::Completions(args) => {
             let mut cmd = Cli::command();
-            generate(args.shell, &mut cmd, "locksmith", &mut io::stdout().lock());
+            cmd.set_bin_name("locksmith");
+            cmd.build();
+            args.shell.try_generate(&cmd, &mut io::stdout().lock())?;
             Ok(())
         }
         Command::Man(args) => {
@@ -127,16 +136,15 @@ fn emit_transformed(
     new_label: &str,
     default_target: &Path,
     mode: &OutputModeArgs,
-    verb: &str,
+    check_message: &str,
+    repair_ref: Option<&str>,
     ui: &Ui,
 ) -> Result<()> {
     if mode.check {
         if original == yaml {
             return Ok(());
         }
-        ui.error(format!(
-            "pnpm-lock.yaml would change after {verb} (re-run with --diff to inspect or --write to apply)"
-        ));
+        ui.error(check_message);
         return Err(Box::new(ExitStatus(1)));
     }
     if mode.diff {
@@ -147,6 +155,20 @@ fn emit_transformed(
         return Ok(());
     }
     if mode.write {
+        if let Some(reference) = repair_ref {
+            match fs::read_to_string(default_target) {
+                Ok(worktree) if worktree != original => {
+                    return Err(format!(
+                        "{} differs from {reference}:pnpm-lock.yaml; use --output FILE instead of --write to avoid overwriting worktree changes",
+                        default_target.display()
+                    )
+                    .into());
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", default_target.display()).into()),
+            }
+        }
         write_atomic(default_target, yaml.as_bytes())?;
         ui.verbose(format!("updated {}", default_target.display()));
         return Ok(());

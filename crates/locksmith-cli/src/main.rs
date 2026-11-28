@@ -1,10 +1,10 @@
 //! Command-line adapters for the in-memory locksmith library.
-use std::{env, error::Error, fmt, process::ExitCode};
+use std::{env, error::Error, ffi::OsString, fmt, process::ExitCode};
 
 use args::{Cli, Command};
-use clap::{CommandFactory, Parser, error::ErrorKind};
+use clap::{CommandFactory, FromArgMatches, error::ErrorKind};
 use locksmith::LockfileError;
-use ui::Ui;
+use ui::{ColorChoice, Ui};
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[global_allocator]
@@ -48,9 +48,45 @@ fn parallel_parse(bytes: u64) -> bool {
     bytes >= 128 * 1024 && std::thread::available_parallelism().is_ok_and(|n| n.get() >= 3)
 }
 
+/// Pre-scan argv for `--color <WHEN>` / `--color=<WHEN>` so clap's own help and parse
+/// diagnostics honor the requested color mode before full argument parsing succeeds.
+fn prescan_color_choice(args: &[OsString]) -> ColorChoice {
+    let mut choice = ColorChoice::Auto;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        let Some(s) = arg.to_str() else {
+            continue;
+        };
+        if s == "--" {
+            break;
+        }
+        let value = if let Some(v) = s.strip_prefix("--color=") {
+            Some(v)
+        } else if s == "--color" {
+            iter.next().and_then(|v| v.to_str())
+        } else {
+            None
+        };
+        if let Some(v) = value {
+            match v {
+                "auto" => choice = ColorChoice::Auto,
+                "always" => choice = ColorChoice::Always,
+                "never" => choice = ColorChoice::Never,
+                _ => {}
+            }
+        }
+    }
+    choice
+}
+
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
+    let raw_args: Vec<OsString> = env::args_os().collect();
+    let pre_color = prescan_color_choice(&raw_args);
+    let matches = match Cli::command()
+        .color(pre_color.to_clap())
+        .try_get_matches_from(&raw_args)
+    {
+        Ok(matches) => matches,
         Err(err) => {
             let code = match err.kind() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => ExitCode::SUCCESS,
@@ -60,11 +96,18 @@ fn main() -> ExitCode {
             return code;
         }
     };
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
 
     let ui = Ui::new(cli.color, cli.quiet, cli.verbose);
 
     let Some(command) = cli.command else {
-        let _ = Cli::command().print_long_help();
+        let _ = Cli::command().color(cli.color.to_clap()).print_long_help();
         return ExitCode::SUCCESS;
     };
 

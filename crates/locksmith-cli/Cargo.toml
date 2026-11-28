@@ -20,6 +20,7 @@ doc = false
 bench-profile = ["locksmith/bench-profile"]
 
 [dependencies]
+anstream = "1"
 anstyle = "1"
 clap = { version = "4", features = ["derive", "wrap_help", "color", "suggestions", "env"] }
 clap_complete = "4"

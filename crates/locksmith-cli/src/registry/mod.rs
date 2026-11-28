@@ -220,7 +220,7 @@ pub fn resolve(
                             prefetched = true;
                         }
                         ui.progress(format!("Fetching registry metadata: {}...", request.name()));
-                        client.satisfy(request, &mut data, direct)
+                        client.satisfy(request, &mut data, direct, ui)
                     })();
                     if let Err(reason) = fetched {
                         if purpose == Lookup::Converge
@@ -622,6 +622,9 @@ impl Registry {
         // exiting, so a registry serving one connection at a time can advance.
         let total = requests.len();
         let done = AtomicUsize::new(0);
+        ui.verbose(format!(
+            "prefetching registry metadata for {total} packages"
+        ));
         ui.progress(format!("Fetching registry metadata (0/{total})..."));
         let config = self.agent.config().clone();
         self.agent = Agent::new_with_config(config.clone());
@@ -640,6 +643,9 @@ impl Registry {
                                     agent = Agent::new_with_config(config.clone());
                                 }
                                 route.clone_from(&base);
+                                ui.verbose(format!(
+                                    "fetching registry metadata for {name} from {base}"
+                                ));
                                 let packument = client.fetch_package(&agent, name, &base)?;
                                 Ok((base, packument))
                             });
@@ -673,12 +679,14 @@ impl Registry {
         req: &RegistryRequest,
         data: &mut RegistryMetadata,
         direct: bool,
+        ui: &Ui,
     ) -> Result<()> {
         let name = req.name();
         if !self.packages.contains_key(name) {
             let result = self
                 .package_base(name)
                 .and_then(|base| {
+                    ui.verbose(format!("fetching registry metadata for {name} from {base}"));
                     let packument = self.fetch_package(&self.agent, name, &base)?;
                     Ok((base, packument))
                 })

@@ -105,7 +105,7 @@ pnpm locksmith repair --diff
 pnpm locksmith repair --write
 ```
 
-Repair checks dependencies reachable from the workspace projects. It preserves unrelated, unreachable records, including stale ones. Run `locksmith validate repaired.yaml` to check every recorded reference. A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
+Repair checks dependencies reachable from the workspace projects. It preserves unrelated, unreachable records, including stale ones. Run `locksmith validate pnpm-lock.yaml` to check every recorded reference. A healthy lock comes back byte-for-byte. Repair preserves valid pins and can recover missing records from parent commits or, with `--allow-network`, from registry metadata. When a pnpmfile is active, repair asks for effective declarations before rewriting a workspace importer. If the available evidence leaves a dependency unresolved, the command reports it on stderr and leaves stdout empty.
 
 ## Validate a lockfile
 
@@ -133,7 +133,7 @@ Inspection reads the lockfile and adjacent workspace settings offline. The CLI r
 
 ## Scripting contract
 
-- On success, `merge`, `converge`, and `repair` write YAML to stdout unless `-o`/`--output`, `-w`/`--write`, `--diff`, or `--check` is passed. `driver run` writes the merged result atomically to Git's `OURS` input file. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
+- On success, `merge`, `converge`, and `repair` write YAML to stdout by default. All three accept `-o`/`--output`, while `converge` and `repair` also accept `-w`/`--write`, `--diff`, and `--check`. `driver run` writes the merged result atomically to Git's `OURS` input file. `inspect` writes its report to stdout and exits successfully even when it finds peer issues.
 - Diagnostics and TTY progress updates go to stderr (controlled via `-q`/`--quiet`, `-v`/`--verbose`, `--color`, `NO_COLOR`, and `FORCE_COLOR`). Use `-C`/`--directory` to run against another directory.
 - `validate` is silent on success (`0`) in text mode, or emits a structured JSON report with `--json` / `--format json`. It returns `1` for invalid lockfile content or a workspace mismatch in `--workspace` mode, and `2` when it cannot complete the check, including when the lockfile format version is unsupported.
 - Shell completions and manual pages are available via `locksmith completions <shell>` and `locksmith man [command]`.

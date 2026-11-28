@@ -1,6 +1,7 @@
 //! Non-interactive Git low-level merge driver and setup helper for pnpm lockfiles.
 use std::{
     collections::BTreeSet,
+    env,
     ffi::OsString,
     io::{self, Write},
     path::Path,
@@ -49,21 +50,90 @@ fn project_conflicts(
     Ok(inputs)
 }
 
+/// Quote a string as a single POSIX shell token, leaving plain safe words unquoted.
+fn shell_quote_token(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'))
+    {
+        return value.to_string();
+    }
+    shell_quote_single(value)
+}
+
+/// Always quote a string using POSIX single-quote escaping (`'` -> `'\''`).
+fn shell_quote_single(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Quote a `.gitattributes` pattern using Git's C-style quoting when needed.
+fn quote_gitattributes_pattern(pattern: &str) -> String {
+    let needs_quoting = pattern.starts_with(['#', '!'])
+        || pattern
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\'));
+    if !needs_quoting {
+        return pattern.to_string();
+    }
+    let mut out = String::with_capacity(pattern.len() + 2);
+    out.push('"');
+    for ch in pattern.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn detect_local_driver_bin() -> Option<String> {
+    let local = Path::new("node_modules/.bin/locksmith");
+    if !local.exists() {
+        return None;
+    }
+    let cwd = env::current_dir().ok()?.canonicalize().ok()?;
+    let full = cwd.join(local);
+    if let Ok(top) = git::output(&["rev-parse", "--show-toplevel"])
+        && let Ok(top_canon) = Path::new(top.trim()).canonicalize()
+        && let Ok(rel) = full.strip_prefix(&top_canon)
+    {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        return Some(format!("./{rel}"));
+    }
+    Some(full.to_string_lossy().into_owned())
+}
+
 pub fn setup(args: &DriverSetupArgs, ui: &Ui) -> Result<()> {
     let bin = match &args.bin {
         Some(bin) => bin.clone(),
-        None if !args.global && Path::new("node_modules/.bin/locksmith").exists() => {
-            "./node_modules/.bin/locksmith".to_string()
-        }
+        None if !args.global => detect_local_driver_bin().unwrap_or_else(|| "locksmith".into()),
         None => "locksmith".to_string(),
     };
+    let escaped_bin = shell_quote_token(&bin);
     let network = if args.allow_network {
         " --allow-network"
     } else {
         ""
     };
-    let driver_cmd = format!("{bin} driver run %O %A %B %P{network}");
-    let gitattributes_line = format!("{} merge=locksmith", args.lockfile);
+    let driver_cmd = format!("{escaped_bin} driver run %O %A %B %P{network}");
+    let quoted_pattern = quote_gitattributes_pattern(&args.lockfile);
+    let gitattributes_line = format!("{quoted_pattern} merge=locksmith");
     let scope_flag = if args.global { "--global" } else { "--local" };
 
     if args.apply {
@@ -103,7 +173,8 @@ pub fn setup(args: &DriverSetupArgs, ui: &Ui) -> Result<()> {
     )?;
     writeln!(
         out,
-        "git config {scope_flag} merge.locksmith.driver '{driver_cmd}'"
+        "git config {scope_flag} merge.locksmith.driver {}",
+        shell_quote_single(&driver_cmd)
     )?;
     ui.hint("pass --apply to write the git config entries automatically");
     Ok(())
@@ -191,6 +262,13 @@ fn resolve(
         .collect();
     let locks = merge::Sources::read(files)?;
     let target = git::preferred_target(&inputs)?;
+    ui.verbose(format!(
+        "git merge driver resolving {path} (preferred target: {})",
+        match target {
+            locksmith::MergeTarget::Ours => "ours",
+            locksmith::MergeTarget::Theirs => "theirs",
+        }
+    ));
     let mut read = |path: &str| blobs.read(&tree, &format!("{prefix}{path}"));
     let (root_name, root) =
         workspace::read_named_manifest(".", &mut read)?.ok_or("missing root package manifest")?;
